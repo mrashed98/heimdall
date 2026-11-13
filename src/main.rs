@@ -8,8 +8,10 @@ use heimdall::client::Client;
 use heimdall::config::HeimdallConfig;
 use heimdall::gate::{self, GateResponse};
 use heimdall::ingest::manifests::direct_name_keys;
+use heimdall::inventory::sight;
 use heimdall::model::{OathKind, Severity};
 use heimdall::oath::{ExtendBody, NewOathBody, Oath};
+use heimdall::AppState;
 
 #[derive(Parser)]
 #[command(
@@ -44,8 +46,8 @@ enum Command {
         #[command(subcommand)]
         action: KeysAction,
     },
-    /// Sight: inventory scanning
-    Sight,
+    /// Sight: scan the cluster and ingest its inventory
+    Sight(SightArgs),
     /// Generate SBOMs for images that have none
     ScanImages,
     /// Realms
@@ -75,6 +77,20 @@ struct GateArgs {
     /// Repository default branch (default: from $GITHUB_EVENT_PATH)
     #[arg(long)]
     default_branch: Option<String>,
+}
+
+#[derive(Args)]
+struct SightArgs {
+    /// Realm the cluster belongs to
+    #[arg(long)]
+    realm: String,
+    /// POST to this Bifröst instead of ingesting in-process (scout mode;
+    /// needs HEIMDALL_API_KEY)
+    #[arg(long)]
+    push: Option<String>,
+    /// Path to heimdall.yaml (in-process mode)
+    #[arg(long, default_value = "heimdall.yaml")]
+    config: PathBuf,
 }
 
 #[derive(Subcommand)]
@@ -285,6 +301,31 @@ fn print_gate(r: &GateResponse) {
     );
 }
 
+async fn sight(args: SightArgs) -> anyhow::Result<()> {
+    use anyhow::Context;
+    // Without --push the scan is ingested in-process, which needs the config
+    // (realm list) and the database.
+    let state = match args.push {
+        Some(_) => None,
+        None => {
+            let cfg = HeimdallConfig::load(&args.config)?;
+            let url = std::env::var("DATABASE_URL")
+                .context("DATABASE_URL is not set (or use --push URL)")?;
+            Some(AppState {
+                pool: heimdall::db::connect(&url).await?,
+                cfg: std::sync::Arc::new(cfg),
+                http: reqwest::Client::new(),
+            })
+        }
+    };
+    let out = sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?;
+    println!(
+        "sight: {} services, {} components added, {} removed",
+        out.services, out.added, out.removed
+    );
+    Ok(())
+}
+
 async fn keys(action: KeysAction) -> anyhow::Result<()> {
     let client = Client::from_env()?;
     match action {
@@ -349,6 +390,13 @@ async fn main() -> ExitCode {
             }
         },
         Command::Oath { action } => match oaths(action).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Sight(args) => match sight(args).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");

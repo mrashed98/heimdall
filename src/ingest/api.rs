@@ -170,7 +170,30 @@ async fn ingest_cluster(
     Json(inv): Json<ClusterInventory>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Ingest)?;
-    check_realm(&state, &inv.realm)?;
+    let out = ingest_cluster_inner(&state, &inv).await?;
+    Ok(Json(serde_json::json!({
+        "services": out.services,
+        "added": out.added,
+        "removed": out.removed,
+    })))
+}
+
+/// What one cluster inventory did to the inventory.
+#[derive(Debug, Clone)]
+pub struct ClusterOutcome {
+    pub services: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// The cluster ingest itself, shared by `/ingest/cluster` and Sight's
+/// in-process mode: check the realm, replace each reported service's cluster
+/// component set and empty the ones that vanished. The caller checks the scope.
+pub async fn ingest_cluster_inner(
+    state: &AppState,
+    inv: &ClusterInventory,
+) -> Result<ClusterOutcome, ApiError> {
+    check_realm(state, &inv.realm)?;
 
     let mut added = 0;
     let mut removed = 0;
@@ -210,11 +233,11 @@ async fn ingest_cluster(
         }
     }
 
-    Ok(Json(serde_json::json!({
-        "services": inv.services.len(),
-        "added": added,
-        "removed": removed,
-    })))
+    Ok(ClusterOutcome {
+        services: inv.services.len(),
+        added,
+        removed,
+    })
 }
 
 /// `sha256:` followed by 64 hex characters.

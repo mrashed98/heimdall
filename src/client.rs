@@ -23,6 +23,15 @@ impl Client {
         })
     }
 
+    /// A client for an explicit server URL (e.g. Sight's `--push`).
+    pub fn new(base: &str, key: String) -> Client {
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            key,
+            http: reqwest::Client::new(),
+        }
+    }
+
     /// Bound every request made through this client (connect to body).
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> anyhow::Result<Client> {
         self.http = reqwest::Client::builder()

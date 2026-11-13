@@ -1,0 +1,6 @@
+{"apiVersion":"argoproj.io/v1alpha1","kind":"ApplicationList","items":[
+ {"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"cert-manager","namespace":"argocd"},
+  "spec":{"source":{"repoURL":"https://charts.jetstack.io","chart":"cert-manager","targetRevision":"v1.16.1"}}},
+ {"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"plain-git","namespace":"argocd"},
+  "spec":{"source":{"repoURL":"https://github.com/acme/deploy","path":"apps/x","targetRevision":"main"}}}
+]}
