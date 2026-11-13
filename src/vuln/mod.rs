@@ -1,4 +1,7 @@
-//! Vulnerability sources: OSV (this task) and NVD (added later).
+//! Vulnerability sources: OSV and NVD, merged by CVE id.
 
+pub mod cpe;
+pub mod nvd;
 pub mod osv;
+pub mod retry;
 pub mod severity;

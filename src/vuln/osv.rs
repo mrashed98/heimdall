@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::model::Severity;
 use crate::purl::{name_key, osv_package, OsvPackage};
-use crate::vuln::severity;
+use crate::vuln::{retry, severity};
 
 const BATCH_SIZE: usize = 1000;
 /// Safety valve against a server that keeps returning page tokens.
@@ -83,18 +83,13 @@ impl OsvClient {
                     q
                 })
                 .collect();
-            let resp: BatchResponse = self
-                .http
-                .post(url.clone())
-                .json(&json!({ "queries": queries }))
-                .send()
-                .await
-                .context("osv querybatch request")?
-                .error_for_status()
-                .context("osv querybatch status")?
-                .json()
-                .await
-                .context("osv querybatch body")?;
+            let body = json!({ "queries": queries });
+            let resp: BatchResponse =
+                retry::send("osv querybatch", || self.http.post(url.clone()).json(&body))
+                    .await?
+                    .json()
+                    .await
+                    .context("osv querybatch body")?;
             if resp.results.len() != pending.len() {
                 return Err(anyhow!(
                     "osv returned {} results for {} queries",
@@ -112,6 +107,13 @@ impl OsvClient {
             }
             pending = next;
         }
+        // Returning what we have would make the caller treat it as complete
+        // and delete the links of the advisories that were cut off.
+        if !pending.is_empty() {
+            return Err(anyhow!(
+                "osv querybatch still had page tokens after {MAX_PAGES} pages"
+            ));
+        }
         Ok(hits)
     }
 
@@ -122,13 +124,8 @@ impl OsvClient {
             .map_err(|_| anyhow!("osv base url cannot be a base"))?
             .pop_if_empty()
             .extend(["v1", "vulns", id]);
-        self.http
-            .get(url)
-            .send()
-            .await
-            .with_context(|| format!("osv get {id}"))?
-            .error_for_status()
-            .with_context(|| format!("osv get {id} status"))?
+        retry::send(&format!("osv get {id}"), || self.http.get(url.clone()))
+            .await?
             .json()
             .await
             .with_context(|| format!("osv get {id} body"))
@@ -678,5 +675,192 @@ mod tests {
         let hits = client.query_batch(&[pkg]).await.unwrap();
         let ids: Vec<&str> = hits[0].iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, ["A", "B"]);
+    }
+
+    #[tokio::test]
+    async fn query_batch_page_cap_errors() {
+        let server = MockServer::start().await;
+        // Every page carries a token, so the loop can only end at the cap.
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "vulns": [{"id": "A", "modified": "2026-01-01T00:00:00Z"}],
+                    "next_page_token": "again"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let client = OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        let pkg = OsvPackage {
+            ecosystem: "npm".into(),
+            name: "widget".into(),
+            version: "1.2.0".into(),
+        };
+        let err = client.query_batch(&[pkg]).await.unwrap_err();
+        assert!(format!("{err:#}").contains("page"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn get_retries_on_429_then_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/vulns/X"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/vulns/X"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "X"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        assert_eq!(client.get("X").await.unwrap()["id"], "X");
+    }
+
+    /// An OSV record for `widget` with the given severity word and optional fix.
+    fn osv_record(id: &str, modified: &str, word: &str, fixed: Option<&str>) -> Value {
+        let mut events = vec![json!({"introduced": "0"})];
+        if let Some(f) = fixed {
+            events.push(json!({"fixed": f}));
+        }
+        json!({
+            "id": id,
+            "modified": modified,
+            "aliases": ["CVE-2026-5000"],
+            "summary": "test",
+            "database_specific": {"severity": word},
+            "affected": [{
+                "package": {"ecosystem": "npm", "name": "widget"},
+                "ranges": [{"type": "SEMVER", "events": events}]
+            }]
+        })
+    }
+
+    /// Mount querybatch (one hit) and the record for `id`.
+    async fn mount_record(server: &MockServer, record: &Value, expect_get: u64) {
+        let id = record["id"].as_str().unwrap();
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [{"id": id, "modified": record["modified"]}]}]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/vulns/{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record))
+            .expect(expect_get)
+            .mount(server)
+            .await;
+    }
+
+    fn client_for(server: &MockServer) -> OsvClient {
+        OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn osv_refresh_never_lowers_nvd_raised_severity(pool: PgPool) {
+        let server = MockServer::start().await;
+        mount_record(
+            &server,
+            &osv_record("GHSA-sev", "2026-05-01T00:00:00Z", "HIGH", None),
+            1,
+        )
+        .await;
+        let cid = seed_component(&pool, PURL).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source, scores, modified, cve_id) \
+             values ('GHSA-sev', 'critical', 'osv', '{\"nvd\": 9.8}', '2026-01-01T00:00:00Z', 'CVE-2026-5000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        refresh(&pool, &client_for(&server), &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+        let (sev, scores): (String, Value) =
+            sqlx::query_as("select severity, scores from advisories where id = 'GHSA-sev'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sev, "critical");
+        assert_eq!(scores["nvd"], json!(9.8));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn osv_raises_severity_without_nvd(pool: PgPool) {
+        let server = MockServer::start().await;
+        mount_record(
+            &server,
+            &osv_record("GHSA-sev", "2026-05-01T00:00:00Z", "HIGH", None),
+            1,
+        )
+        .await;
+        let cid = seed_component(&pool, PURL).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source, modified, cve_id) \
+             values ('GHSA-sev', 'medium', 'osv', '2026-01-01T00:00:00Z', 'CVE-2026-5000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        refresh(&pool, &client_for(&server), &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+        let sev: String =
+            sqlx::query_scalar("select severity from advisories where id = 'GHSA-sev'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sev, "high");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn fix_appears_refetches(pool: PgPool) {
+        let server = MockServer::start().await;
+        let cid = seed_component(&pool, PURL).await;
+        let comps = vec![(cid, PURL.to_string())];
+        mount_record(
+            &server,
+            &osv_record("GHSA-fix", "2026-05-01T00:00:00Z", "HIGH", None),
+            1,
+        )
+        .await;
+        let first = refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        assert_eq!(first.fetched, 1);
+        let fixed: Value = sqlx::query_scalar("select fixed from advisories where id = 'GHSA-fix'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fixed[NAME_KEY], json!([]));
+
+        // Same advisory, newer `modified`, now with a fixed event.
+        server.reset().await;
+        mount_record(
+            &server,
+            &osv_record("GHSA-fix", "2026-06-01T00:00:00Z", "HIGH", Some("1.9.1")),
+            1,
+        )
+        .await;
+        let second = refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        assert_eq!(second.fetched, 1);
+        let fixed: Value = sqlx::query_scalar("select fixed from advisories where id = 'GHSA-fix'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fixed[NAME_KEY], json!(["1.9.1"]));
     }
 }

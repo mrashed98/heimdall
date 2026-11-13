@@ -41,7 +41,7 @@ pub fn merge(a: Severity, b: Severity) -> Severity {
     a.max(b)
 }
 
-fn from_score(score: f64) -> Severity {
+pub fn from_score(score: f64) -> Severity {
     if score >= 9.0 {
         Severity::Critical
     } else if score >= 7.0 {

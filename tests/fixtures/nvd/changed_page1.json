@@ -1,0 +1,37 @@
+{
+  "resultsPerPage": 2,
+  "startIndex": 0,
+  "totalResults": 3,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2026-2001",
+        "descriptions": [
+          {"lang": "es", "value": "Desbordamiento"},
+          {"lang": "en", "value": "Buffer overflow in PostgreSQL."}
+        ],
+        "metrics": {
+          "cvssMetricV31": [{"cvssData": {"version": "3.1", "baseScore": 9.8}}],
+          "cvssMetricV30": [{"cvssData": {"version": "3.0", "baseScore": 9.1}}]
+        },
+        "configurations": [{"nodes": [{"operator": "OR", "negate": false, "cpeMatch": [
+          {"vulnerable": true, "criteria": "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*",
+           "versionStartIncluding": "16.0", "versionEndExcluding": "16.5"},
+          {"vulnerable": false, "criteria": "cpe:2.3:o:debian:debian_linux:12.0:*:*:*:*:*:*:*"}
+        ]}]}]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2026-2002",
+        "descriptions": [{"lang": "en", "value": "Issue in an unrelated product."}],
+        "metrics": {"cvssMetricV30": [{"cvssData": {"version": "3.0", "baseScore": 5.0}}]},
+        "configurations": [{"nodes": [{"operator": "OR", "negate": false, "cpeMatch": [
+          {"vulnerable": true, "criteria": "cpe:2.3:a:other:thing:1.0:*:*:*:*:*:*:*"}
+        ]}]}]
+      }
+    }
+  ]
+}

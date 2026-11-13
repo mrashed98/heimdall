@@ -1,0 +1,20 @@
+{
+  "resultsPerPage": 1,
+  "startIndex": 0,
+  "totalResults": 1,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2025-3001",
+        "descriptions": [{"lang": "en", "value": "Older PostgreSQL flaw."}],
+        "metrics": {"cvssMetricV31": [{"cvssData": {"version": "3.1", "baseScore": 7.5}}]},
+        "configurations": [{"nodes": [{"operator": "OR", "negate": false, "cpeMatch": [
+          {"vulnerable": true, "criteria": "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*",
+           "versionStartIncluding": "15.0", "versionEndIncluding": "16.4"}
+        ]}]}]
+      }
+    }
+  ]
+}
