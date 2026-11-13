@@ -33,6 +33,8 @@ pub struct HeimdallConfig {
     pub nvd: NvdConfig,
     #[serde(default)]
     pub retention: Retention,
+    #[serde(default)]
+    pub sight: SightConfig,
 }
 
 impl HeimdallConfig {
@@ -41,6 +43,21 @@ impl HeimdallConfig {
             .with_context(|| format!("reading config {}", path.display()))?;
         serde_yaml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
     }
+
+    /// The realm in-process Sight scans: `sight.realm`, else the first realm.
+    pub fn sight_realm(&self) -> Option<&str> {
+        self.sight
+            .realm
+            .as_deref()
+            .or(self.realms.first().map(|r| r.as_str()))
+    }
+}
+
+/// In-process Sight (`heimdall serve` scanning the cluster it runs in).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SightConfig {
+    /// The realm of the cluster Heimdall runs in. Default: the first realm.
+    pub realm: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -254,5 +271,13 @@ mod tests {
             .find(|t| t.repo == "kubernetes/kubernetes")
             .unwrap();
         assert_eq!(k8s.major_component, 1);
+        assert_eq!(cfg.sight_realm(), Some("dev-k3s"));
+    }
+
+    #[test]
+    fn sight_realm_can_be_set() {
+        let cfg: HeimdallConfig =
+            serde_yaml::from_str("realms: [a, b]\nsight: { realm: b }").unwrap();
+        assert_eq!(cfg.sight_realm(), Some("b"));
     }
 }

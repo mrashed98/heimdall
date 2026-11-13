@@ -107,7 +107,7 @@ fn compare_counted(ecosystem: &str, a: &str, b: &str) -> Option<Ordering> {
     let o = version::compare(ecosystem, a, b);
     if o.is_none() {
         UNCOMPARABLE.fetch_add(1, AtomicOrdering::Relaxed);
-        eprintln!("nvd: cannot compare versions {a:?} and {b:?} ({ecosystem})");
+        tracing::warn!("nvd: cannot compare versions {a:?} and {b:?} ({ecosystem})");
     }
     o
 }

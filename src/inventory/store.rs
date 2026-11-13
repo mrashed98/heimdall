@@ -219,8 +219,9 @@ pub async fn pending_image_digests(pool: &PgPool) -> anyhow::Result<Vec<(String,
     for (digest, image_ref) in by_digest {
         match image_ref {
             Some(r) => out.push((digest, r)),
-            None => eprintln!(
-                "warning: no pkg:oci purl with repository_url references {digest}; skipping"
+            None => tracing::warn!(
+                digest = %digest,
+                "no pkg:oci purl with repository_url references this digest; skipping"
             ),
         }
     }

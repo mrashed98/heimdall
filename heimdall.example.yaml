@@ -56,6 +56,11 @@ declared:
 # Private registry credentials: host -> env var holding the credential.
 registries: []
 
+# In-process Sight: the realm of the cluster Heimdall itself runs in
+# (default: the first realm). Skipped when no cluster is reachable.
+sight:
+  realm: dev-k3s
+
 # Polling intervals in minutes (these are the defaults).
 schedules:
   sight_minutes: 15

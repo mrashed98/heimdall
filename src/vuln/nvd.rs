@@ -297,7 +297,7 @@ pub async fn refresh(
                 all.extend(seen.into_iter().flatten().cloned());
                 backfilled.push((product.clone(), all.into_iter().collect()));
             }
-            Err(e) => eprintln!("nvd: backfill of {product} failed, will retry: {e:#}"),
+            Err(e) => tracing::warn!(product = %product, "nvd backfill failed, will retry: {e:#}"),
         }
     }
 

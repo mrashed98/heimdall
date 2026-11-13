@@ -156,7 +156,7 @@ pub async fn run(
                 Ok(Err(e)) => format!("failed ({e:#})"),
                 _ => "timed out".to_string(),
             };
-            eprintln!("gate: osv {why}; falling back to the github advisory db");
+            tracing::warn!("gate: osv {why}; falling back to the github advisory db");
             let left = clients.total_budget.saturating_sub(started.elapsed());
             let (hits, unverified) = ghsa_hits(pool, clients.ghsa.as_ref(), &checked, left).await?;
             (CheckSource::Ghsa, hits, unverified)
@@ -376,11 +376,11 @@ async fn fetch_records(
             Ok(Some(Ok((id, Ok(rec))))) => {
                 out.insert(id, rec);
             }
-            Ok(Some(Ok((id, Err(e))))) => eprintln!("gate: osv record {id}: {e:#}"),
-            Ok(Some(Err(e))) => eprintln!("gate: osv record fetch task failed: {e}"),
+            Ok(Some(Ok((id, Err(e))))) => tracing::warn!("gate: osv record {id}: {e:#}"),
+            Ok(Some(Err(e))) => tracing::warn!("gate: osv record fetch task failed: {e}"),
             Err(_) => {
                 // Dropping the JoinSet aborts the fetches still running.
-                eprintln!("gate: osv record fetches ran out of time");
+                tracing::warn!("gate: osv record fetches ran out of time");
                 break;
             }
         }
@@ -399,18 +399,18 @@ async fn ghsa_hits(
 ) -> anyhow::Result<(Vec<Hit>, Vec<String>)> {
     let everything = || checked.iter().map(|c| c.purl.clone()).collect();
     let Some(client) = client else {
-        eprintln!("gate: GITHUB_TOKEN is not set; no fallback, everything is unverified");
+        tracing::warn!("gate: GITHUB_TOKEN is not set; no fallback, everything is unverified");
         return Ok((Vec::new(), everything()));
     };
     let pkgs: Vec<OsvPackage> = checked.iter().map(|c| c.pkg.clone()).collect();
     let all = match tokio::time::timeout(budget, client.check(&pkgs)).await {
         Ok(Ok(all)) => all,
         Ok(Err(e)) => {
-            eprintln!("gate: github advisory db failed ({e:#}); everything is unverified");
+            tracing::warn!("gate: github advisory db failed ({e:#}); everything is unverified");
             return Ok((Vec::new(), everything()));
         }
         Err(_) => {
-            eprintln!("gate: github advisory db timed out; everything is unverified");
+            tracing::warn!("gate: github advisory db timed out; everything is unverified");
             return Ok((Vec::new(), everything()));
         }
     };

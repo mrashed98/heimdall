@@ -140,9 +140,11 @@ pub struct WatchReport {
     /// Findings inserted or re-opened; Gjallarhorn alerts on these.
     pub opened: Vec<i64>,
     pub resolved: usize,
-    /// Failed targets per watcher.
-    // TODO(Task 17): export as `heimdall_watcher_failures_total{watcher}`.
+    /// Failed targets per watcher; the scheduler adds them to
+    /// `heimdall_watcher_failures_total{watcher}`.
     pub failures: BTreeMap<String, u64>,
+    /// Time spent fetching, per watcher (`heimdall_watcher_duration_seconds`).
+    pub durations: BTreeMap<String, std::time::Duration>,
 }
 
 /// Base URLs of the outside services. Tests point them all at one mock.
@@ -216,6 +218,61 @@ struct Planned {
 /// One component a realm runs.
 type Running = (String, EffectiveComponent);
 
+/// Every realm's effective components, tagged with the realm.
+async fn running(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Result<Vec<Running>> {
+    let mut running: Vec<Running> = Vec::new();
+    for realm in &cfg.realms {
+        for c in effective_components(pool, realm).await? {
+            running.push((realm.clone(), c));
+        }
+    }
+    Ok(running)
+}
+
+/// `(realm, target, n)` for each release-watched target we know the running
+/// version of: `n` is how many stored releases are newer than it and not
+/// pre-releases. `realm` is empty for a target not tied to one realm.
+pub async fn versions_behind(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+) -> anyhow::Result<Vec<(String, String, u64)>> {
+    let planned = plan(cfg, &running(pool, cfg).await?);
+    let names: Vec<String> = planned.iter().map(|p| p.target.name.clone()).collect();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT target, version FROM releases WHERE target = ANY($1)")
+            .bind(&names)
+            .fetch_all(pool)
+            .await?;
+    let mut by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for (target, version) in rows {
+        by_target.entry(target).or_default().push(version);
+    }
+    let mut out = Vec::new();
+    for p in &planned {
+        let Some(current) = &p.target.current else {
+            continue;
+        };
+        if !p.track_releases {
+            continue;
+        }
+        let eco = p.target.kind.ecosystem();
+        let behind = by_target.get(&p.target.name).map_or(0, |versions| {
+            versions
+                .iter()
+                .filter(|v| {
+                    !is_prerelease(v) && compare(eco, v, current) == Some(Ordering::Greater)
+                })
+                .count()
+        });
+        out.push((
+            p.realm.clone().unwrap_or_default(),
+            p.target.name.clone(),
+            behind as u64,
+        ));
+    }
+    Ok(out)
+}
+
 pub async fn run_all(state: &crate::AppState, now: DateTime<Utc>) -> anyhow::Result<WatchReport> {
     run_with(
         &state.pool,
@@ -235,12 +292,7 @@ pub async fn run_with(
     ep: &Endpoints,
     now: DateTime<Utc>,
 ) -> anyhow::Result<WatchReport> {
-    let mut running: Vec<Running> = Vec::new();
-    for realm in &cfg.realms {
-        for c in effective_components(pool, realm).await? {
-            running.push((realm.clone(), c));
-        }
-    }
+    let running = running(pool, cfg).await?;
     let planned = plan(cfg, &running);
     let mut report = WatchReport {
         targets: planned.len(),
@@ -250,7 +302,13 @@ pub async fn run_with(
     // Cycles of each endoflife target that answered, for the Eol check.
     let mut cycles: HashMap<String, Vec<Cycle>> = HashMap::new();
     for p in &planned {
-        match fetch_target(pool, http, cfg, ep, p, now).await {
+        let started = std::time::Instant::now();
+        let fetched = fetch_target(pool, http, cfg, ep, p, now).await;
+        *report
+            .durations
+            .entry(p.target.kind.label().to_string())
+            .or_default() += started.elapsed();
+        match fetched {
             Ok((releases, fetched_cycles)) => {
                 if p.track_releases {
                     report.new_releases += store_releases(pool, &p.target, &releases).await?;
@@ -261,7 +319,7 @@ pub async fn run_with(
             }
             Err(e) => {
                 let label = p.target.kind.label();
-                eprintln!("warning: watcher {label} {}: {e:#}", p.target.name);
+                tracing::warn!(watcher = label, watch_target = %p.target.name, "watcher failed: {e:#}");
                 *report.failures.entry(label.to_string()).or_default() += 1;
             }
         }
@@ -274,7 +332,7 @@ pub async fn run_with(
     // Release notes are best effort: a failure here must not lose the run.
     match notes::run(pool, http, cfg, ep, &planned, now).await {
         Ok(note_findings) => report.opened.extend(note_findings),
-        Err(e) => eprintln!("warning: release notes: {e:#}"),
+        Err(e) => tracing::warn!("release notes failed: {e:#}"),
     }
     Ok(report)
 }

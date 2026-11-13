@@ -12,6 +12,7 @@ use heimdall::inventory::sight;
 use heimdall::model::{OathKind, Severity};
 use heimdall::oath::{ExtendBody, NewOathBody, Oath};
 use heimdall::scan_images;
+use heimdall::server::{FindingRow, RealmRow};
 use heimdall::AppState;
 
 #[derive(Parser)]
@@ -51,8 +52,25 @@ enum Command {
     Sight(SightArgs),
     /// Generate SBOMs for images that have none
     ScanImages(ScanImagesArgs),
-    /// Realms
+    /// Findings (open by default)
+    Findings(FindingsArgs),
+    /// Realms, with their service and open-finding counts
     Realms,
+}
+
+#[derive(Args)]
+struct FindingsArgs {
+    #[arg(long)]
+    realm: Option<String>,
+    /// open or resolved
+    #[arg(long, default_value = "open")]
+    status: String,
+    /// vuln, fixavailable, majorrelease, oathexpired, eol, k8scve, releasenotecve
+    #[arg(long)]
+    kind: Option<String>,
+    /// Lowest severity to list
+    #[arg(long)]
+    min_severity: Option<String>,
 }
 
 #[derive(Args)]
@@ -337,6 +355,49 @@ async fn sight(args: SightArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `heimdall findings`: a thin client of `GET /api/v1/findings`.
+async fn findings(args: FindingsArgs) -> anyhow::Result<()> {
+    let enc = Client::encode_segment;
+    let mut path = format!("/api/v1/findings?status={}", enc(&args.status));
+    for (name, value) in [
+        ("realm", &args.realm),
+        ("kind", &args.kind),
+        ("min_severity", &args.min_severity),
+    ] {
+        if let Some(v) = value {
+            path.push_str(&format!("&{name}={}", enc(v)));
+        }
+    }
+    let rows: Vec<FindingRow> = Client::from_env()?.get_json(&path).await?;
+    for f in rows {
+        let severity = serde_json::to_value(f.severity)?;
+        let kind = serde_json::to_value(f.kind)?;
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            f.id,
+            severity.as_str().unwrap_or("?"),
+            kind.as_str().unwrap_or("?"),
+            f.realm,
+            f.service.as_deref().unwrap_or("-"),
+            f.ref_id.as_deref().unwrap_or("-"),
+            f.purl.as_deref().unwrap_or("-"),
+        );
+    }
+    Ok(())
+}
+
+/// `heimdall realms`: a thin client of `GET /api/v1/realms`.
+async fn realms() -> anyhow::Result<()> {
+    let rows: Vec<RealmRow> = Client::from_env()?.get_json("/api/v1/realms").await?;
+    for r in rows {
+        println!(
+            "{}\t{} services\t{} open findings",
+            r.name, r.services, r.open_findings
+        );
+    }
+    Ok(())
+}
+
 async fn keys(action: KeysAction) -> anyhow::Result<()> {
     let client = Client::from_env()?;
     match action {
@@ -381,6 +442,34 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Command::Serve {
+            check_config: false,
+            config,
+        } => {
+            let path = config.unwrap_or_else(|| PathBuf::from("heimdall.yaml"));
+            match heimdall::server::serve(&path).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    // Telemetry may not be up yet, so this goes to stderr.
+                    eprintln!("serve: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::Findings(args) => match findings(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Realms => match realms().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Gate(args) => match run_gate(args).await {
             Ok(r) => {
                 print_gate(&r);
@@ -434,10 +523,6 @@ async fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
-        }
-        _ => {
-            eprintln!("not implemented yet");
-            ExitCode::FAILURE
         }
     }
 }

@@ -23,8 +23,8 @@ pub struct DrainResult {
     /// Throttled, server error or network error: retried later.
     pub retry: usize,
     /// Rejected by Teams (a 4xx other than 429): marked sent with
-    /// `card.failed = true`.
-    // TODO(task 17): also count as `heimdall_teams_failures_total`.
+    /// `card.failed = true`. The scheduler adds it to
+    /// `heimdall_teams_failures_total`.
     pub failed: usize,
 }
 
@@ -111,7 +111,7 @@ pub async fn drain_once(
             why,
         } => {
             let next = now + backoff(attempts, retry_after_secs);
-            eprintln!("warning: teams route {route}: {why}; retrying outbox {id} at {next}");
+            tracing::warn!(route = %route, outbox_id = id, retry_at = %next, "teams send failed: {why}");
             sqlx::query(
                 "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = $2 WHERE id = $1",
             )
@@ -123,7 +123,7 @@ pub async fn drain_once(
         }
         Outcome::Rejected(status) => {
             // Sending the same card again would be rejected again.
-            eprintln!("error: teams route {route} rejected outbox {id} with {status}; giving up");
+            tracing::error!(route = %route, outbox_id = id, status = %status, "teams rejected the card; giving up");
             sqlx::query(
                 "UPDATE outbox SET sent_at = $2, card = jsonb_set(card, '{failed}', 'true') \
                  WHERE id = $1",

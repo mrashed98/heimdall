@@ -93,7 +93,7 @@ pub(super) async fn run(
             Err(e) => {
                 // Locating asks npm, a registry or Artifact Hub, never GitHub:
                 // a 403 here is this target's problem, not a rate limit.
-                eprintln!("warning: release notes {name}: {e:#}");
+                tracing::warn!("release notes {name}: {e:#}");
                 record_failure(pool, name, &pending).await?;
                 continue 'targets;
             }
@@ -103,7 +103,7 @@ pub(super) async fn run(
                 Some(src) => match fetch(src, version, http, ep).await {
                     Ok(n) => n,
                     Err(e) => {
-                        eprintln!("warning: release notes {name} {version}: {e:#}");
+                        tracing::warn!("release notes {name} {version}: {e:#}");
                         // Not a 404: count it, and leave the rest of this
                         // target for the next run.
                         record_failure(pool, name, std::slice::from_ref(version)).await?;

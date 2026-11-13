@@ -769,3 +769,29 @@ async fn go_next_major_absent_is_empty() {
     .unwrap();
     assert!(got.is_empty());
 }
+
+// ---- versions behind ------------------------------------------------------
+
+#[sqlx::test(migrations = "./migrations")]
+async fn versions_behind_counts_newer_stable_releases(pool: PgPool) {
+    let cfg = cfg("realms: [prod]\nwatchers:\n  github:\n    - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }\n");
+    components(
+        &pool,
+        "prod",
+        "cluster",
+        &[("pkg:generic/kubernetes@1.30.2", true)],
+    )
+    .await;
+    for v in ["1.29.0", "1.30.2", "1.30.3", "1.31.0", "1.32.0-rc.1"] {
+        sqlx::query("INSERT INTO releases (target, version) VALUES ('kubernetes', $1)")
+            .bind(v)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let behind = versions_behind(&pool, &cfg).await.unwrap();
+    assert_eq!(
+        behind,
+        vec![("prod".to_string(), "kubernetes".to_string(), 2)]
+    );
+}

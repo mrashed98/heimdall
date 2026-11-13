@@ -309,7 +309,7 @@ pub(crate) fn warn_once(key: &str, message: &str) {
     // is still usable.
     let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
     if warned.insert(key.to_string()) {
-        eprintln!("warning: {message}");
+        tracing::warn!("{message}");
     }
 }
 

@@ -28,7 +28,7 @@ impl IntoResponse for ApiError {
             ),
             ApiError::Internal(e) => {
                 // Log the detail, but give the client nothing to learn from.
-                eprintln!("internal error: {e:#}");
+                tracing::error!("internal error: {e:#}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal error".to_string(),

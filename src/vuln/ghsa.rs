@@ -272,7 +272,9 @@ fn clause_holds(ecosystem: &str, version: &str, clause: &str) -> bool {
         version::compare(ecosystem, version, bound)
     };
     let Some(ord) = ord else {
-        eprintln!("ghsa: cannot compare {version:?} with clause {clause:?}; treating as affected");
+        tracing::warn!(
+            "ghsa: cannot compare {version:?} with clause {clause:?}; treating as affected"
+        );
         return true;
     };
     match op {

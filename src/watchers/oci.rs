@@ -79,7 +79,7 @@ pub async fn tags(
         tags.extend(list.tags.unwrap_or_default());
         let Some(next) = next else { break };
         if page == MAX_PAGES {
-            eprintln!("warning: {what}: stopped after {MAX_PAGES} pages of tags");
+            tracing::warn!("{what}: stopped after {MAX_PAGES} pages of tags");
             break;
         }
         // The link is usually host-relative (`/v2/...?last=..`).
