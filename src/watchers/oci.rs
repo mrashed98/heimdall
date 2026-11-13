@@ -8,7 +8,8 @@ use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use url::Url;
 
-use super::{endpoint, etag_of, get, Fetched, ReleaseInfo, UA};
+use super::http::{endpoint, etag_of, get};
+use super::{Fetched, ReleaseInfo, UA};
 use crate::config::RegistryCred;
 use crate::vuln::retry;
 

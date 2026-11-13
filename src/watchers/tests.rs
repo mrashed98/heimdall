@@ -8,6 +8,7 @@ use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use super::plan::image_ref;
 use super::*;
 use crate::config::HeimdallConfig;
 use crate::inventory::store::{replace_components, upsert_service, InventoryItem};

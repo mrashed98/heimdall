@@ -9,7 +9,8 @@ use serde::de::IgnoredAny;
 use serde::Deserialize;
 use url::Url;
 
-use super::{endpoint, etag_of, get, Fetched, ReleaseInfo};
+use super::http::{endpoint, etag_of, get};
+use super::{Fetched, ReleaseInfo};
 
 /// Only the two fields we read. `IgnoredAny` skips each version's manifest
 /// without keeping it in memory: packuments can be many megabytes.

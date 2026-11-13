@@ -9,7 +9,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use url::Url;
 
-use super::{endpoint, etag_of, get, Fetched, ReleaseInfo};
+use super::http::{endpoint, etag_of, get};
+use super::{Fetched, ReleaseInfo};
 
 #[derive(Deserialize)]
 struct Index {

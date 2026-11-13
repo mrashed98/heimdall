@@ -4,7 +4,8 @@ use anyhow::Context;
 use reqwest::Client;
 use url::Url;
 
-use super::{endpoint, etag_of, get, Fetched, ReleaseInfo};
+use super::http::{endpoint, etag_of, get};
+use super::{Fetched, ReleaseInfo};
 
 /// The proxy's case encoding: every uppercase letter becomes `!` plus its
 /// lowercase form, so `BurntSushi` is `!burnt!sushi`.

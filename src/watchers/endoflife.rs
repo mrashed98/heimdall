@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use url::Url;
 
-use super::{endpoint, get};
+use super::http::{endpoint, get};
 
 /// One release cycle (`16` for PostgreSQL, `1.31` for Kubernetes).
 #[derive(Debug, Clone, PartialEq, Eq)]
