@@ -1,6 +1,7 @@
 //! CPE 2.3 formatted-string parsing and version-range matching.
 
 use std::cmp::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::version;
 
@@ -23,15 +24,18 @@ pub struct Cpe {
     pub version: String,
 }
 
-/// Split on `:` that is not escaped as `\:`, and drop the backslashes.
-fn fields(s: &str) -> Vec<String> {
+/// Split on `:` that is not escaped as `\:`. Escapes stay in the fields, which
+/// is the form NVD wants back in `virtualMatchString` (`g\+\+`).
+fn raw_fields(s: &str) -> Vec<String> {
     let mut out = vec![String::new()];
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' => {
+                let cur = out.last_mut().expect("never empty");
+                cur.push(c);
                 if let Some(next) = chars.next() {
-                    out.last_mut().expect("never empty").push(next);
+                    cur.push(next);
                 }
             }
             ':' => out.push(String::new()),
@@ -39,6 +43,26 @@ fn fields(s: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Remove the backslash escapes: for comparing, not for sending to NVD.
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn fields(s: &str) -> Vec<String> {
+    raw_fields(s).iter().map(|f| unescape(f)).collect()
 }
 
 /// `cpe:2.3:part:vendor:product:version:...`; None when it is not that shape.
@@ -54,21 +78,38 @@ pub fn parse(s: &str) -> Option<Cpe> {
     })
 }
 
-/// `vendor:product` (lowercase, `:` escaped again) as used for backfill and
-/// the `nvd_products` table.
+/// `vendor:product`, lowercase, with the CPE escapes kept as written: this is
+/// the `virtualMatchString` tail and the `nvd_products` key.
 pub fn vendor_product(cpe: &str) -> Option<String> {
-    let c = parse(cpe)?;
-    if c.vendor == "*" || c.product == "*" {
+    let f = raw_fields(cpe);
+    if f.len() < 6 || f[0] != "cpe" || f[1] != "2.3" || f[3] == "*" || f[4] == "*" {
         return None;
     }
-    let esc = |s: &str| s.to_lowercase().replace(':', "\\:");
-    Some(format!("{}:{}", esc(&c.vendor), esc(&c.product)))
+    Some(format!("{}:{}", f[3].to_lowercase(), f[4].to_lowercase()))
 }
 
 /// The concrete version inside a CPE, if it has one.
 pub fn concrete_version(cpe: &str) -> Option<String> {
     let c = parse(cpe)?;
     (!matches!(c.version.as_str(), "*" | "-" | "")).then_some(c.version)
+}
+
+/// How many comparisons found no order (version unreadable even by the dpkg
+/// fallback). Such a bound counts as no match, so this is the number of
+/// possible misses; `nvd::refresh` reports it.
+static UNCOMPARABLE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn uncomparable_count() -> usize {
+    UNCOMPARABLE.load(AtomicOrdering::Relaxed)
+}
+
+fn compare_counted(ecosystem: &str, a: &str, b: &str) -> Option<Ordering> {
+    let o = version::compare(ecosystem, a, b);
+    if o.is_none() {
+        UNCOMPARABLE.fetch_add(1, AtomicOrdering::Relaxed);
+        eprintln!("nvd: cannot compare versions {a:?} and {b:?} ({ecosystem})");
+    }
+    o
 }
 
 /// Does `range` cover a component described by `component_cpe` at `version`?
@@ -86,11 +127,11 @@ pub fn cpe_matches(range: &CpeRange, component_cpe: &str, version: &str, ecosyst
     }
     if !matches!(want.version.as_str(), "*" | "-" | "") {
         return want.version == version
-            || version::compare(ecosystem, &want.version, version) == Some(Ordering::Equal);
+            || compare_counted(ecosystem, &want.version, version) == Some(Ordering::Equal);
     }
     let ok = |bound: &Option<String>, allowed: &[Ordering]| match bound {
         None => true,
-        Some(b) => version::compare(ecosystem, version, b).is_some_and(|o| allowed.contains(&o)),
+        Some(b) => compare_counted(ecosystem, version, b).is_some_and(|o| allowed.contains(&o)),
     };
     ok(&range.start_incl, &[Ordering::Greater, Ordering::Equal])
         && ok(&range.start_excl, &[Ordering::Greater])
@@ -113,6 +154,28 @@ mod tests {
             r"ven\:dor:prod"
         );
         assert_eq!(parse("pkg:npm/x"), None);
+    }
+
+    #[test]
+    fn vendor_product_keeps_escapes_for_nvd() {
+        let cpe = r"cpe:2.3:a:GNU:g\+\+:12.1:*:*:*:*:*:*:*";
+        assert_eq!(vendor_product(cpe).unwrap(), r"gnu:g\+\+");
+        // Comparison still works on the unescaped text.
+        assert_eq!(parse(cpe).unwrap().product, "g++");
+    }
+
+    #[test]
+    fn openssh_9_6p1_is_before_9_8() {
+        let r = CpeRange {
+            criteria: "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*".into(),
+            start_incl: Some("8.5".into()),
+            start_excl: None,
+            end_incl: None,
+            end_excl: Some("9.8".into()),
+        };
+        let c = "cpe:2.3:a:openbsd:openssh:9.6p1:*:*:*:*:*:*:*";
+        assert!(cpe_matches(&r, c, "9.6p1", "generic"));
+        assert!(!cpe_matches(&r, c, "9.8p1", "generic"));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::model::Severity;
 use crate::purl::{name_key, osv_package, OsvPackage};
-use crate::vuln::{retry, severity};
+use crate::vuln::{nvd, retry, severity};
 
 const BATCH_SIZE: usize = 1000;
 /// Safety valve against a server that keeps returning page tokens.
@@ -250,6 +250,10 @@ pub async fn refresh(
     let mut tx = pool.begin().await?;
     for adv in &fetched {
         upsert_advisory(&mut tx, adv).await?;
+        // NVD may have stored this CVE under its own id before OSV knew it.
+        if let Some(cve) = &adv.cve_id {
+            nvd::fold_duplicates(&mut tx, cve).await?;
+        }
     }
 
     let checked_ids: Vec<i64> = checked.iter().map(|c| c.component_id).collect();

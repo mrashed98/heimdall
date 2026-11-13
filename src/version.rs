@@ -25,11 +25,17 @@ pub fn compare(ecosystem: &str, a: &str, b: &str) -> Option<Ordering> {
     if ecosystem.starts_with("Debian:") || ecosystem.starts_with("Ubuntu:") {
         return Some(dpkg_cmp(a, b));
     }
-    // Go, npm and everything else: lenient semver (strips `v`, pads `X.Y`).
-    let a = lenient_semver(a)?;
-    let b = lenient_semver(b)?;
+    // Go and npm are semver by definition: lenient semver (strips `v`, pads
+    // `X.Y`), and None when it does not parse.
     // Precedence ignores build metadata (`+incompatible`, `+k3s1`), as SemVer requires.
-    Some(a.cmp_precedence(&b))
+    let semver = || Some(lenient_semver(a)?.cmp_precedence(&lenient_semver(b)?));
+    if matches!(ecosystem, "Go" | "npm") {
+        return semver();
+    }
+    // Everything else (generic, PyPI, ...) also meets versions like `9.6p1`,
+    // `1.1.1t` or `11.0.20.1`; semver cannot read those, dpkg ordering can.
+    // Missing a CVE because a version did not parse is worse than a rough order.
+    Some(semver().unwrap_or_else(|| dpkg_cmp(a, b)))
 }
 
 /// Split `s` into its numeric `X[.Y[.Z]]` prefix and the rest.
@@ -293,7 +299,7 @@ mod tests {
             compare("PyPI", "1.2", "1.2.1"),
             Some(std::cmp::Ordering::Less)
         );
-        assert_eq!(compare("PyPI", "banana", "1.0.0"), None);
+        assert_eq!(compare("Go", "banana", "1.0.0"), None);
     }
 
     #[test]
@@ -348,5 +354,15 @@ mod tests {
         assert!(!is_prerelease("v1.32.0+k3s1"));
         assert!(is_prerelease("1.2.3.4-rc1"));
         assert!(!is_prerelease("1.2.3.4"));
+    }
+
+    #[test]
+    fn generic_versions_semver_cannot_read_still_order() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare("generic", "9.6p1", "9.8"), Some(Less));
+        assert_eq!(compare("generic", "1.1.1t", "1.1.1s"), Some(Greater));
+        assert_eq!(compare("generic", "11.0.20.1", "11.0.21"), Some(Less));
+        // Semver-shaped versions still use semver.
+        assert_eq!(compare("generic", "1.10.0", "1.9.0"), Some(Greater));
     }
 }

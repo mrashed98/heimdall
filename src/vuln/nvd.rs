@@ -17,7 +17,7 @@ use url::Url;
 use crate::config::HeimdallConfig;
 use crate::model::Severity;
 use crate::purl::osv_package;
-use crate::vuln::cpe::{concrete_version, vendor_product};
+use crate::vuln::cpe::{self, concrete_version, vendor_product};
 use crate::vuln::{retry, severity};
 
 pub use crate::vuln::cpe::{cpe_matches, CpeRange};
@@ -202,6 +202,8 @@ pub struct NvdReport {
     pub changed: usize,
     /// (component, CVE) pairs that match right now.
     pub matched: usize,
+    /// Version comparisons that found no order (each counted as no match).
+    pub uncomparable: usize,
 }
 
 /// `(inventory_name, cpe)` of every configured target that has a `cpe`.
@@ -239,6 +241,7 @@ pub async fn refresh(
     targets: &[(String, String)],
     now: DateTime<Utc>,
 ) -> anyhow::Result<NvdReport> {
+    let uncomparable_before = cpe::uncomparable_count();
     let candidates = candidates(pool, targets).await?;
 
     let last: Option<String> = sqlx::query_scalar("select value from kv where key = $1")
@@ -259,20 +262,42 @@ pub async fn refresh(
         cves.insert(c.id.clone(), c);
     }
 
-    // Products we have components for but never asked NVD about in full.
-    let wanted: BTreeSet<String> = candidates
-        .iter()
-        .filter_map(|c| vendor_product(&c.cpe))
-        .collect();
-    let done: Vec<String> = sqlx::query_scalar(
-        "select vendor_product from nvd_products where backfilled_at is not null",
+    // vendor:product -> component versions we would match against it.
+    let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in &candidates {
+        if let Some(p) = vendor_product(&c.cpe) {
+            wanted.entry(p).or_default().insert(c.version.clone());
+        }
+    }
+    let done: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "select vendor_product, versions from nvd_products where backfilled_at is not null",
     )
     .fetch_all(pool)
     .await?;
-    let fresh: Vec<&String> = wanted.iter().filter(|p| !done.contains(p)).collect();
-    for product in &fresh {
-        for c in client.backfill(product).await? {
-            cves.entry(c.id.clone()).or_insert(c);
+    let done: HashMap<String, BTreeSet<String>> = done
+        .into_iter()
+        .map(|(p, v)| (p, v.into_iter().collect()))
+        .collect();
+    // Backfill a product again when a component version appeared that it was
+    // not backfilled for: older CVEs may apply to that version.
+    // One product failing must not stop the others, so errors are logged and
+    // the product stays unrecorded (it is retried next run).
+    let mut backfilled: Vec<(String, Vec<String>)> = Vec::new();
+    for (product, versions) in &wanted {
+        let seen = done.get(product);
+        if seen.is_some_and(|s| versions.is_subset(s)) {
+            continue;
+        }
+        match client.backfill(product).await {
+            Ok(list) => {
+                for c in list {
+                    cves.entry(c.id.clone()).or_insert(c);
+                }
+                let mut all = versions.clone();
+                all.extend(seen.into_iter().flatten().cloned());
+                backfilled.push((product.clone(), all.into_iter().collect()));
+            }
+            Err(e) => eprintln!("nvd: backfill of {product} failed, will retry: {e:#}"),
         }
     }
 
@@ -293,13 +318,15 @@ pub async fn refresh(
 
     let mut tx = pool.begin().await?;
     let matched = write_matches(&mut tx, &cves, &matches).await?;
-    for product in &fresh {
+    for (product, versions) in &backfilled {
         sqlx::query(
-            "insert into nvd_products (vendor_product, backfilled_at) values ($1, $2) \
-             on conflict (vendor_product) do update set backfilled_at = excluded.backfilled_at",
+            "insert into nvd_products (vendor_product, backfilled_at, versions) values ($1, $2, $3) \
+             on conflict (vendor_product) do update set \
+               backfilled_at = excluded.backfilled_at, versions = excluded.versions",
         )
-        .bind(product.as_str())
+        .bind(product)
         .bind(now)
+        .bind(versions)
         .execute(&mut *tx)
         .await?;
     }
@@ -316,6 +343,7 @@ pub async fn refresh(
     Ok(NvdReport {
         changed: changed_count,
         matched,
+        uncomparable: cpe::uncomparable_count().saturating_sub(uncomparable_before),
     })
 }
 
@@ -352,7 +380,7 @@ async fn candidates(pool: &PgPool, targets: &[(String, String)]) -> anyhow::Resu
     Ok(out)
 }
 
-type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+pub type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 
 /// Upsert advisories for matching CVEs, add `nvd`/`both` links, and take away
 /// the NVD side of links that no longer match. Returns the match count.
@@ -362,17 +390,18 @@ async fn write_matches(
     matches: &BTreeMap<&str, BTreeSet<i64>>,
 ) -> anyhow::Result<usize> {
     let cve_ids: Vec<String> = cves.keys().cloned().collect();
-    let existing: Vec<(String, String, Severity, String)> = sqlx::query_as(
-        "select id, coalesce(cve_id, id), severity, source from advisories \
-         where cve_id = any($1) or id = any($1)",
-    )
-    .bind(&cve_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    // CVE id -> advisories that carry it (OSV's GHSA/DSA records, or our own).
-    let mut by_cve: HashMap<String, Vec<(String, Severity, String)>> = HashMap::new();
-    for (id, cve, sev, source) in existing {
-        by_cve.entry(cve).or_default().push((id, sev, source));
+    let mut by_cve = load_existing(tx, &cve_ids).await?;
+    // An nvd row next to an OSV row for one CVE is a duplicate: fold it in
+    // first, then read again so the severities below are current.
+    let mut folded = false;
+    for (cve, rows) in &by_cve {
+        if rows.iter().any(|r| r.2 == "nvd") && rows.iter().any(|r| r.2 != "nvd") {
+            fold_duplicates(tx, cve).await?;
+            folded = true;
+        }
+    }
+    if folded {
+        by_cve = load_existing(tx, &cve_ids).await?;
     }
 
     let mut touched: Vec<String> = Vec::new();
@@ -446,6 +475,72 @@ async fn write_matches(
     .await?;
 
     Ok(pair_c.len().min(pair_a.len()))
+}
+
+/// CVE id -> (advisory id, severity, source) of every advisory carrying it.
+async fn load_existing(
+    tx: &mut Tx<'_>,
+    cve_ids: &[String],
+) -> anyhow::Result<HashMap<String, Vec<(String, Severity, String)>>> {
+    let existing: Vec<(String, String, Severity, String)> = sqlx::query_as(
+        "select id, coalesce(cve_id, id), severity, source from advisories \
+         where cve_id = any($1) or id = any($1)",
+    )
+    .bind(cve_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut by_cve: HashMap<String, Vec<(String, Severity, String)>> = HashMap::new();
+    for (id, cve, sev, source) in existing {
+        by_cve.entry(cve).or_default().push((id, sev, source));
+    }
+    Ok(by_cve)
+}
+
+/// One CVE must be one advisory. When an nvd-sourced advisory and an
+/// OSV-sourced one share `cve_id` (NVD ran before OSV knew the CVE), move the
+/// nvd row's links onto the OSV row(s), copy `scores.nvd`, keep the higher
+/// severity and delete the nvd row. A link NVD found stays `nvd`; where OSV
+/// already links the component it becomes `both`. Called by both the NVD and
+/// the OSV write paths.
+pub async fn fold_duplicates(tx: &mut Tx<'_>, cve_id: &str) -> anyhow::Result<()> {
+    let rows: Vec<(String, Severity, String, Value)> = sqlx::query_as(
+        "select id, severity, source, scores from advisories where cve_id = $1 order by id",
+    )
+    .bind(cve_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let Some(nvd) = rows.iter().find(|r| r.2 == "nvd") else {
+        return Ok(());
+    };
+    for (id, sev, _, _) in rows.iter().filter(|r| r.2 != "nvd") {
+        sqlx::query(
+            "insert into component_advisories (component_id, advisory_id, match_source) \
+             select component_id, $2, match_source from component_advisories where advisory_id = $1 \
+             on conflict (component_id, advisory_id) do update set match_source = \
+               case when component_advisories.match_source = 'nvd' then 'nvd' else 'both' end",
+        )
+        .bind(&nvd.0)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+        let score = nvd.3.get("nvd").cloned().unwrap_or(Value::Null);
+        sqlx::query(
+            "update advisories set severity = $2, \
+               scores = scores || jsonb_build_object('nvd', $3::jsonb) where id = $1",
+        )
+        .bind(id)
+        .bind(severity::merge(*sev, nvd.1))
+        .bind(score)
+        .execute(&mut **tx)
+        .await?;
+    }
+    if rows.iter().any(|r| r.2 != "nvd") {
+        sqlx::query("delete from advisories where id = $1")
+            .bind(&nvd.0)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 /// scores.nvd as a JSON number. f32 -> f64 directly would show 9.800000190...
@@ -932,5 +1027,206 @@ mod tests {
             links(&pool).await,
             [("CVE-2026-7100".to_string(), "nvd".to_string())]
         );
+    }
+
+    async fn seed_generic(pool: &PgPool, name: &str, version: &str, cpe: &str) -> i64 {
+        sqlx::query_scalar(
+            "insert into components (purl, name_key, ecosystem, version, cpes) \
+             values ($1, $2, 'generic', $3, $4) returning id",
+        )
+        .bind(format!("pkg:generic/{name}@{version}"))
+        .bind(format!("pkg:generic/{name}"))
+        .bind(version)
+        .bind(vec![cpe.to_string()])
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn new_version_triggers_rebackfill(pool: PgPool) {
+        let server = MockServer::start().await;
+        mock_changed(&server, empty_page()).await;
+        // Once for 16.4, once more when 15.2 appears; not on a third run.
+        mock_backfill(
+            &server,
+            serde_json::from_str(include_str!(
+                "../../tests/fixtures/nvd/backfill_postgresql.json"
+            ))
+            .unwrap(),
+            2,
+        )
+        .await;
+        seed_pg(&pool).await;
+        refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        let old = seed_generic(
+            &pool,
+            "postgresql-old",
+            "15.2",
+            "cpe:2.3:a:postgresql:postgresql:15.2:*:*:*:*:*:*:*",
+        )
+        .await;
+        refresh(&pool, &client(&server), &[], at(14)).await.unwrap();
+        refresh(&pool, &client(&server), &[], at(15)).await.unwrap();
+
+        let versions: Vec<String> = sqlx::query_scalar(
+            "select versions from nvd_products where vendor_product = 'postgresql:postgresql'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(versions, ["15.2", "16.4"]);
+        let linked: i64 =
+            sqlx::query_scalar("select count(*) from component_advisories where component_id = $1")
+                .bind(old)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(linked, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn backfill_failure_isolated(pool: PgPool) {
+        let server = MockServer::start().await;
+        mock_changed(&server, empty_page()).await;
+        Mock::given(method("GET"))
+            .and(query_param(
+                "virtualMatchString",
+                "cpe:2.3:*:postgresql:postgresql",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(query_param("virtualMatchString", "cpe:2.3:*:acme:gizmo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+            .mount(&server)
+            .await;
+        seed_pg(&pool).await;
+        seed_generic(
+            &pool,
+            "gizmo",
+            "1.0",
+            "cpe:2.3:a:acme:gizmo:1.0:*:*:*:*:*:*:*",
+        )
+        .await;
+
+        refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        let last: Option<String> =
+            sqlx::query_scalar("select value from kv where key = 'nvd_last'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(last.is_some(), "window must advance");
+        let recorded: Vec<String> =
+            sqlx::query_scalar("select vendor_product from nvd_products order by 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded, ["acme:gizmo"]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn escaped_product_is_sent_to_nvd_as_written(pool: PgPool) {
+        let server = MockServer::start().await;
+        mock_changed(&server, empty_page()).await;
+        Mock::given(method("GET"))
+            .and(query_param("virtualMatchString", r"cpe:2.3:*:gnu:g\+\+"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page_with(
+                "CVE-2026-7200",
+                7.0,
+                r"gnu:g\+\+",
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cpe = r"cpe:2.3:a:gnu:g\+\+:16.1:*:*:*:*:*:*:*";
+        seed_generic(&pool, "gpp", "16.1", cpe).await;
+        let report = refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        assert_eq!(report.matched, 1);
+        let p: String = sqlx::query_scalar("select vendor_product from nvd_products")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(p, r"gnu:g\+\+");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nvd_then_osv_same_cve_counts_once(pool: PgPool) {
+        // NVD runs first and stores CVE-2026-5000 under its own id.
+        let nvd_server = MockServer::start().await;
+        mock_changed(&nvd_server, page_with("CVE-2026-5000", 9.8, "acme:widget")).await;
+        mock_backfill_for(&nvd_server, "acme:widget").await;
+        let cid: i64 = sqlx::query_scalar(
+            "insert into components (purl, name_key, ecosystem, version, cpes) \
+             values ('pkg:npm/widget@16.1.0', 'pkg:npm/widget', 'npm', '16.1.0', $1) returning id",
+        )
+        .bind(vec![
+            "cpe:2.3:a:acme:widget:16.1.0:*:*:*:*:*:*:*".to_string()
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        refresh(&pool, &client(&nvd_server), &[], at(13))
+            .await
+            .unwrap();
+        assert_eq!(
+            links(&pool).await,
+            [("CVE-2026-5000".to_string(), "nvd".to_string())]
+        );
+
+        // Then OSV learns the same CVE under a GHSA id (High).
+        let osv_server = MockServer::start().await;
+        let record = json!({
+            "id": "GHSA-dup", "modified": "2026-05-01T00:00:00Z",
+            "aliases": ["CVE-2026-5000"], "summary": "dup",
+            "database_specific": {"severity": "HIGH"},
+            "affected": [{"package": {"ecosystem": "npm", "name": "widget"},
+                          "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}]}]
+        });
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [{"id": "GHSA-dup", "modified": "2026-05-01T00:00:00Z"}]}]
+            })))
+            .mount(&osv_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/vulns/GHSA-dup"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record))
+            .mount(&osv_server)
+            .await;
+        let osv_client = crate::vuln::osv::OsvClient {
+            base: Url::parse(&osv_server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        crate::vuln::osv::refresh(&pool, &osv_client, &[(cid, "pkg:npm/widget@16.1.0".into())])
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String, Value)> =
+            sqlx::query_as("select id, severity, scores from advisories")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, "GHSA-dup");
+        assert_eq!(rows[0].1, "critical");
+        assert_eq!(rows[0].2["nvd"], json!(9.8));
+        assert_eq!(
+            links(&pool).await,
+            [("GHSA-dup".to_string(), "both".to_string())]
+        );
+    }
+
+    async fn mock_backfill_for(server: &MockServer, product: &str) {
+        Mock::given(method("GET"))
+            .and(query_param(
+                "virtualMatchString",
+                format!("cpe:2.3:*:{product}"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+            .mount(server)
+            .await;
     }
 }
