@@ -19,6 +19,7 @@ pub mod scan_images;
 pub mod scheduler;
 pub mod server;
 pub mod telemetry;
+pub mod ui;
 pub mod version;
 pub mod vuln;
 pub mod watchers;

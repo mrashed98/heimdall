@@ -235,6 +235,45 @@ Existing types are `github`, `endoflife`, `oci`, `helm`, `tf_registry`,
    `Planned` for each in `src/watchers/plan.rs`.
 5. Add a test next to the others (recorded HTTP fixtures live in `tests/fixtures`).
 
+## CLI
+
+`heimdall` with no command (or `--help`) shows the Bifröst banner, a rainbow
+gradient over the letters (shown below in plain text):
+
+```text
+█   █  █████  █████  █   █  ████    ███   █      █
+█   █  █        █    ██ ██  █   █  █   █  █      █
+█████  ████     █    █ █ █  █   █  █████  █      █
+█   █  █        █    █   █  █   █  █   █  █      █
+█   █  █████  █████  █   █  ████   █   █  █████  █████
+the watcher at the Bifröst · v0.1.0
+```
+
+Output is coloured when stdout is a terminal, and in CI where there is no
+terminal but `CI` or `GITHUB_ACTIONS` is set. Severities use the same colours
+everywhere: critical bold white on red, high red, medium yellow, low blue,
+unknown dim. Turn colour off with `--no-color`, `NO_COLOR` or `TERM=dumb`.
+`COLORTERM=truecolor` gives the full gradient; other terminals get the six
+basic ANSI colours. `serve` prints the banner only on a terminal, so JSON logs
+stay clean, and `gate` prints only its compact header. Exit codes are
+unchanged.
+
+A `heimdall gate` report (plain text; the terminal version has rounded
+borders and colour):
+
+```text
+>> Hofund - CI gate
++----------+---------------------+--------------------------------+--------------------+------+
+| SEVERITY | ADVISORY            | PACKAGE                        | VERSION -> FIXED   | OATH |
++===============================================================================================+
+| CRITICAL | GHSA-jf85-cpcp-j695 | pkg:npm/lodash                 | 4.17.11 -> 4.17.21 | -    |
+| HIGH     | CVE-2024-45337      | pkg:golang/golang.org/x/crypto | 0.21.0 -> 0.31.0   | #7   |
+| MEDIUM   | GHSA-3xgq-45jj-v275 | pkg:npm/cross-spawn            | 7.0.3 -> 7.0.5     | -    |
++----------+---------------------+--------------------------------+--------------------+------+
+findings: 1 critical, 1 high, 1 medium
+verdict: FAIL (checked against osv)
+```
+
 ## The oath CLI
 
 Set `HEIMDALL_URL` and `HEIMDALL_API_KEY` (an admin key) first. An oath is

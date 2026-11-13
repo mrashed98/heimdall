@@ -1,8 +1,9 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::NaiveDate;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use heimdall::auth::{CreateKeyRequest, CreateKeyResponse, KeyInfo, Scope};
 use heimdall::client::Client;
 use heimdall::config::HeimdallConfig;
@@ -13,6 +14,7 @@ use heimdall::model::{OathKind, Severity};
 use heimdall::oath::{ExtendBody, NewOathBody, Oath};
 use heimdall::scan_images;
 use heimdall::server::{FindingRow, RealmRow};
+use heimdall::ui::{banner, render, Style};
 use heimdall::AppState;
 
 #[derive(Parser)]
@@ -22,8 +24,20 @@ use heimdall::AppState;
     about = "Vulnerability and release tracker"
 )]
 struct Cli {
+    /// Turn off colour (also: NO_COLOR, TERM=dumb)
+    #[arg(long, global = true)]
+    no_color: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+/// Parse the command line with the banner above `--help`. The banner has to
+/// be chosen before clap runs, so `--no-color` is looked for in the raw args.
+fn parse_cli() -> Cli {
+    let no_color = std::env::args().any(|a| a == "--no-color");
+    let banner_text = banner::render(&Style::detect(no_color), "");
+    let matches = Cli::command().before_help(banner_text).get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
 }
 
 #[derive(Subcommand)]
@@ -210,7 +224,7 @@ fn oath_body(kind: OathKind, t: OathTarget, until: Option<NaiveDate>) -> NewOath
     }
 }
 
-async fn oaths(action: OathAction) -> anyhow::Result<()> {
+async fn oaths(action: OathAction, style: &Style) -> anyhow::Result<()> {
     let client = Client::from_env()?;
     match action {
         OathAction::Snooze { target, until } => {
@@ -229,23 +243,7 @@ async fn oaths(action: OathAction) -> anyhow::Result<()> {
                 None => "/api/v1/oaths".to_string(),
             };
             let all: Vec<Oath> = client.get_json(&path).await?;
-            for o in all {
-                let due = o
-                    .expires_at
-                    .or(o.review_at)
-                    .map(|d| d.date_naive().to_string());
-                println!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    o.id,
-                    o.status,
-                    o.advisory_id,
-                    o.name_key,
-                    o.service_name,
-                    o.realm.as_deref().unwrap_or("*"),
-                    due.unwrap_or_default(),
-                    o.reason
-                );
-            }
+            print!("{}", render::oaths_table(style, &all));
         }
         OathAction::Revoke { id } => {
             let _: Oath = client
@@ -254,14 +252,17 @@ async fn oaths(action: OathAction) -> anyhow::Result<()> {
                     &serde_json::json!({}),
                 )
                 .await?;
-            println!("revoked oath {id}");
+            print!("{}", render::ok_line(style, &format!("revoked oath {id}")));
         }
         OathAction::Extend { id, until } => {
             let body = ExtendBody { until };
             let _: Oath = client
                 .post_json(&format!("/api/v1/oaths/{id}/extend"), &body)
                 .await?;
-            println!("extended oath {id} to {until}");
+            print!(
+                "{}",
+                render::ok_line(style, &format!("extended oath {id} to {until}"))
+            );
         }
     }
     Ok(())
@@ -314,23 +315,7 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
     client.post_json(&path, &body).await
 }
 
-fn print_gate(r: &GateResponse) {
-    if !r.findings.is_empty() {
-        print!("{}", gate::table(&r.findings));
-    }
-    for purl in &r.unverified {
-        println!("unverified: {purl}");
-    }
-    let verdict = serde_json::to_value(r.verdict).unwrap_or_default();
-    let source = serde_json::to_value(r.source).unwrap_or_default();
-    println!(
-        "hofund: {} (checked against {})",
-        verdict.as_str().unwrap_or("?"),
-        source.as_str().unwrap_or("?")
-    );
-}
-
-async fn sight(args: SightArgs) -> anyhow::Result<()> {
+async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
     use anyhow::Context;
     // Without --push the scan is ingested in-process, which needs the config
     // (realm list) and the database.
@@ -348,15 +333,16 @@ async fn sight(args: SightArgs) -> anyhow::Result<()> {
         }
     };
     let out = sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?;
-    println!(
+    let msg = format!(
         "sight: {} services, {} components added, {} removed",
         out.services, out.added, out.removed
     );
+    print!("{}", render::ok_line(style, &msg));
     Ok(())
 }
 
 /// `heimdall findings`: a thin client of `GET /api/v1/findings`.
-async fn findings(args: FindingsArgs) -> anyhow::Result<()> {
+async fn findings(args: FindingsArgs, style: &Style) -> anyhow::Result<()> {
     let enc = Client::encode_segment;
     let mut path = format!("/api/v1/findings?status={}", enc(&args.status));
     for (name, value) in [
@@ -369,36 +355,21 @@ async fn findings(args: FindingsArgs) -> anyhow::Result<()> {
         }
     }
     let rows: Vec<FindingRow> = Client::from_env()?.get_json(&path).await?;
-    for f in rows {
-        let severity = serde_json::to_value(f.severity)?;
-        let kind = serde_json::to_value(f.kind)?;
-        println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            f.id,
-            severity.as_str().unwrap_or("?"),
-            kind.as_str().unwrap_or("?"),
-            f.realm,
-            f.service.as_deref().unwrap_or("-"),
-            f.ref_id.as_deref().unwrap_or("-"),
-            f.purl.as_deref().unwrap_or("-"),
-        );
-    }
+    print!(
+        "{}",
+        render::findings_table(style, &rows, &args.status, args.realm.as_deref())
+    );
     Ok(())
 }
 
 /// `heimdall realms`: a thin client of `GET /api/v1/realms`.
-async fn realms() -> anyhow::Result<()> {
+async fn realms(style: &Style) -> anyhow::Result<()> {
     let rows: Vec<RealmRow> = Client::from_env()?.get_json("/api/v1/realms").await?;
-    for r in rows {
-        println!(
-            "{}\t{} services\t{} open findings",
-            r.name, r.services, r.open_findings
-        );
-    }
+    print!("{}", render::realms_table(style, &rows));
     Ok(())
 }
 
-async fn keys(action: KeysAction) -> anyhow::Result<()> {
+async fn keys(action: KeysAction, style: &Style) -> anyhow::Result<()> {
     let client = Client::from_env()?;
     match action {
         KeysAction::Create { name, scope } => {
@@ -408,15 +379,13 @@ async fn keys(action: KeysAction) -> anyhow::Result<()> {
         }
         KeysAction::List => {
             let keys: Vec<KeyInfo> = client.get_json("/api/v1/keys").await?;
-            for k in keys {
-                println!("{}\t{}\t{}", k.name, k.scope, k.created_at.to_rfc3339());
-            }
+            print!("{}", render::keys_table(style, &keys));
         }
         KeysAction::Revoke { name } => {
             client
                 .delete(&format!("/api/v1/keys/{}", Client::encode_segment(&name)))
                 .await?;
-            println!("revoked {name}");
+            print!("{}", render::ok_line(style, &format!("revoked {name}")));
         }
     }
     Ok(())
@@ -424,8 +393,16 @@ async fn keys(action: KeysAction) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match cli.command {
+    let cli = parse_cli();
+    let style = Style::detect(cli.no_color);
+    let Some(command) = cli.command else {
+        // Bare `heimdall`: banner, then the help text.
+        print!("{}", banner::render(&style, ""));
+        println!();
+        let _ = Cli::command().print_help();
+        return ExitCode::SUCCESS;
+    };
+    match command {
         Command::Serve {
             check_config: true,
             config,
@@ -447,6 +424,10 @@ async fn main() -> ExitCode {
             config,
         } => {
             let path = config.unwrap_or_else(|| PathBuf::from("heimdall.yaml"));
+            // Banner only on a terminal: in k8s stdout is a JSON log stream.
+            if std::io::stdout().is_terminal() {
+                print!("{}", banner::render(&style, "serving"));
+            }
             match heimdall::server::serve(&path).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -456,14 +437,14 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Command::Findings(args) => match findings(args).await {
+        Command::Findings(args) => match findings(args, &style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
                 ExitCode::FAILURE
             }
         },
-        Command::Realms => match realms().await {
+        Command::Realms => match realms(&style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -472,7 +453,7 @@ async fn main() -> ExitCode {
         },
         Command::Gate(args) => match run_gate(args).await {
             Ok(r) => {
-                print_gate(&r);
+                print!("{}", render::gate_report(&style, &r));
                 ExitCode::from(gate::exit_code(r.verdict))
             }
             // Unreachable server, HTTP error or bad input: the build cannot be
@@ -482,21 +463,21 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        Command::Keys { action } => match keys(action).await {
+        Command::Keys { action } => match keys(action, &style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
                 ExitCode::FAILURE
             }
         },
-        Command::Oath { action } => match oaths(action).await {
+        Command::Oath { action } => match oaths(action, &style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
                 ExitCode::FAILURE
             }
         },
-        Command::Sight(args) => match sight(args).await {
+        Command::Sight(args) => match sight(args, &style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -510,7 +491,13 @@ async fn main() -> ExitCode {
             };
             match report {
                 Ok(r) => {
-                    println!("scan-images: {} scanned, {} failed", r.scanned, r.failed);
+                    let msg = format!("scan-images: {} scanned, {} failed", r.scanned, r.failed);
+                    let line = if r.failed > 0 {
+                        render::warn_line(&style, &msg)
+                    } else {
+                        render::ok_line(&style, &msg)
+                    };
+                    print!("{line}");
                     // Failure only when every attempted image failed.
                     if r.scanned == 0 && r.failed > 0 {
                         ExitCode::FAILURE

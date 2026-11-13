@@ -564,7 +564,7 @@ pub fn table(findings: &[GateFinding]) -> String {
 }
 
 /// (name key, version) of a purl, for display.
-fn split_purl(purl: &str) -> (String, String) {
+pub fn split_purl(purl: &str) -> (String, String) {
     let version = packageurl::PackageUrl::from_str(purl)
         .ok()
         .and_then(|p| p.version().map(str::to_string))
