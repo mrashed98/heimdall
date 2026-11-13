@@ -169,19 +169,22 @@ async fn add_event(
 /// The oath that suppresses `advisory_id` for this component in this service
 /// and realm, if any. Matching is by component name (not version), so an oath
 /// carries across versions; an all-realms oath (realm NULL) matches any realm.
-/// Only `active` oaths count: `process_expiries` is the one place that retires
-/// them, so that every expiry is announced exactly once.
+/// Only `active` oaths whose date is still ahead of `now` count, so a lapsed
+/// oath stops suppressing even if the scheduler is late. `process_expiries`
+/// stays the one place that changes status, so each expiry is announced once.
 pub async fn active_for(
     pool: &PgPool,
     advisory_id: &str,
     name_key: &str,
     service_name: &str,
     realm: &str,
+    now: DateTime<Utc>,
 ) -> anyhow::Result<Option<Oath>> {
     let sql = format!(
         "SELECT {COLUMNS} FROM oaths \
          WHERE status = 'active' AND advisory_id = $1 AND name_key = $2 \
            AND service_name = $3 AND (realm = $4 OR realm IS NULL) \
+           AND COALESCE(expires_at, review_at) > $5 \
          ORDER BY id LIMIT 1"
     );
     let found = sqlx::query_as::<_, Oath>(&sql)
@@ -189,6 +192,7 @@ pub async fn active_for(
         .bind(name_key)
         .bind(service_name)
         .bind(realm)
+        .bind(now)
         .fetch_optional(pool)
         .await?;
     Ok(found)
@@ -540,9 +544,16 @@ mod tests {
             vec![("created".into(), "alice".into())]
         );
 
-        let hit = active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", "prod")
-            .await
-            .unwrap();
+        let hit = active_for(
+            &pool,
+            "GHSA-aaaa-bbbb-cccc",
+            GIN_KEY,
+            "api",
+            "prod",
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         assert_eq!(hit.unwrap().id, id);
         // Other advisory, other component, other service: no match.
         for (adv, key, svc) in [
@@ -550,7 +561,7 @@ mod tests {
             ("GHSA-aaaa-bbbb-cccc", "pkg:golang/example.com/x", "api"),
             ("GHSA-aaaa-bbbb-cccc", GIN_KEY, "web"),
         ] {
-            assert!(active_for(&pool, adv, key, svc, "prod")
+            assert!(active_for(&pool, adv, key, svc, "prod", Utc::now())
                 .await
                 .unwrap()
                 .is_none());
@@ -586,12 +597,17 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, ignore_id);
         // Expired oaths no longer suppress.
-        assert!(
-            active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", "prod")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(active_for(
+            &pool,
+            "GHSA-aaaa-bbbb-cccc",
+            GIN_KEY,
+            "api",
+            "prod",
+            Utc::now()
+        )
+        .await
+        .unwrap()
+        .is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -604,9 +620,16 @@ mod tests {
         let id = create(&pool, all).await.unwrap();
         assert!(get(&pool, id).await.realm.is_none());
         for realm in ["prod", "dev-k3s"] {
-            let hit = active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", realm)
-                .await
-                .unwrap();
+            let hit = active_for(
+                &pool,
+                "GHSA-aaaa-bbbb-cccc",
+                GIN_KEY,
+                "api",
+                realm,
+                Utc::now(),
+            )
+            .await
+            .unwrap();
             assert_eq!(hit.unwrap().id, id);
         }
     }
@@ -618,18 +641,28 @@ mod tests {
             ..snooze(7)
         };
         create(&pool, dev).await.unwrap();
-        assert!(
-            active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", "prod")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", "dev-k3s")
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(active_for(
+            &pool,
+            "GHSA-aaaa-bbbb-cccc",
+            GIN_KEY,
+            "api",
+            "prod",
+            Utc::now()
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(active_for(
+            &pool,
+            "GHSA-aaaa-bbbb-cccc",
+            GIN_KEY,
+            "api",
+            "dev-k3s",
+            Utc::now()
+        )
+        .await
+        .unwrap()
+        .is_some());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -651,12 +684,17 @@ mod tests {
         let id = create(&pool, snooze(7)).await.unwrap();
         let o = revoke(&pool, id, "bob").await.unwrap().unwrap();
         assert_eq!(o.status, "revoked");
-        assert!(
-            active_for(&pool, "GHSA-aaaa-bbbb-cccc", GIN_KEY, "api", "prod")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(active_for(
+            &pool,
+            "GHSA-aaaa-bbbb-cccc",
+            GIN_KEY,
+            "api",
+            "prod",
+            Utc::now()
+        )
+        .await
+        .unwrap()
+        .is_none());
         assert_eq!(
             events(&pool, id).await.last().unwrap(),
             &("revoked".to_string(), "bob".to_string())
@@ -708,6 +746,32 @@ mod tests {
         assert_eq!(active.iter().map(|o| o.id).collect::<Vec<_>>(), vec![a]);
         assert_eq!(list(&pool, None).await.unwrap().len(), 2);
         assert!(is_invalid(&list(&pool, Some("bogus")).await.unwrap_err()));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn lapsed_but_unprocessed_oath_not_active(pool: PgPool) {
+        create(&pool, snooze(1)).await.unwrap();
+        create(
+            &pool,
+            NewOath {
+                advisory_id: "GHSA-ign".to_string(),
+                ..req(OathKind::Ignore)
+            },
+        )
+        .await
+        .unwrap();
+        let later = Utc::now() + Duration::days(100);
+        // process_expiries has not run, yet neither oath suppresses at `later`.
+        for adv in ["GHSA-aaaa-bbbb-cccc", "GHSA-ign"] {
+            assert!(active_for(&pool, adv, GIN_KEY, "api", "prod", Utc::now())
+                .await
+                .unwrap()
+                .is_some());
+            assert!(active_for(&pool, adv, GIN_KEY, "api", "prod", later)
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 
     mod http {
