@@ -1,0 +1,36 @@
+{
+  "data": {
+    "q0": {
+      "nodes": [
+        {
+          "advisory": {
+            "ghsaId": "GHSA-3vp4-m3rf-835h",
+            "severity": "MODERATE",
+            "identifiers": [
+              {"type": "GHSA", "value": "GHSA-3vp4-m3rf-835h"},
+              {"type": "CVE", "value": "CVE-2023-29401"}
+            ]
+          },
+          "vulnerableVersionRange": "< 1.9.1",
+          "firstPatchedVersion": {"identifier": "1.9.1"}
+        }
+      ]
+    },
+    "q1": {
+      "nodes": [
+        {
+          "advisory": {
+            "ghsaId": "GHSA-3vp4-m3rf-835h",
+            "severity": "MODERATE",
+            "identifiers": [
+              {"type": "GHSA", "value": "GHSA-3vp4-m3rf-835h"},
+              {"type": "CVE", "value": "CVE-2023-29401"}
+            ]
+          },
+          "vulnerableVersionRange": "< 1.9.1",
+          "firstPatchedVersion": {"identifier": "1.9.1"}
+        }
+      ]
+    }
+  }
+}
