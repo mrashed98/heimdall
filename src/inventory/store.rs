@@ -148,6 +148,19 @@ pub async fn store_image_sbom(
     image_ref: &str,
     purls: &[String],
 ) -> anyhow::Result<()> {
+    let components: Vec<(String, Vec<String>)> =
+        purls.iter().map(|p| (p.clone(), Vec::new())).collect();
+    store_image_components(pool, digest, image_ref, &components).await
+}
+
+/// Same as `store_image_sbom`, but each component is a (purl, cpes) pair so
+/// the SBOM's CPEs are unioned onto the stored components.
+pub async fn store_image_components(
+    pool: &PgPool,
+    digest: &str,
+    image_ref: &str,
+    components: &[(String, Vec<String>)],
+) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO image_sboms (digest, image_ref) VALUES ($1, $2) \
@@ -161,8 +174,8 @@ pub async fn store_image_sbom(
         .bind(digest)
         .execute(&mut *tx)
         .await?;
-    for purl in purls {
-        let component_id = upsert_component(&mut tx, purl, &[]).await?;
+    for (purl, cpes) in components {
+        let component_id = upsert_component(&mut tx, purl, cpes).await?;
         sqlx::query(
             "INSERT INTO image_components (digest, component_id) VALUES ($1, $2) \
              ON CONFLICT DO NOTHING",
