@@ -13,6 +13,7 @@ pub mod model;
 pub mod notify;
 pub mod oath;
 pub mod purl;
+pub mod scan_images;
 pub mod server;
 pub mod version;
 pub mod vuln;

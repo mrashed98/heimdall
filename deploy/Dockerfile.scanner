@@ -1,0 +1,33 @@
+# Image SBOM scanner: runs `heimdall scan-images` (syft + upload) as a CronJob.
+# Build from the repo root:  docker build -f deploy/Dockerfile.scanner -t heimdall-scanner .
+
+# --- build: static musl binary (alpine's native target is musl) ---
+FROM rust:1-alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY migrations ./migrations
+RUN cargo build --release --locked --bin heimdall
+
+# --- runtime: alpine + pinned syft + heimdall ---
+FROM alpine:3.22
+# Pinned release; checksum from syft_1.57.1_checksums.txt on the GitHub release.
+# For arm64 override both: --build-arg SYFT_ARCH=arm64
+#   --build-arg SYFT_SHA256=aa3d3e07344f590bcce8d31043b752daa76c8a56c2aa34ceeee63c6168152582
+ARG SYFT_VERSION=1.57.1
+ARG SYFT_ARCH=amd64
+ARG SYFT_SHA256=bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c
+RUN apk add --no-cache ca-certificates curl \
+ && curl -fsSL -o /tmp/syft.tgz \
+    "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${SYFT_ARCH}.tar.gz" \
+ && echo "${SYFT_SHA256}  /tmp/syft.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/syft.tgz -C /usr/local/bin syft \
+ && rm /tmp/syft.tgz \
+ && apk del curl \
+ && adduser -D -u 10001 scanner
+COPY --from=build /src/target/release/heimdall /usr/local/bin/heimdall
+USER scanner
+# Registry credentials: mount a docker config.json and set DOCKER_CONFIG to its dir.
+# Needs HEIMDALL_URL and HEIMDALL_API_KEY (ingest scope).
+ENTRYPOINT ["heimdall", "scan-images"]

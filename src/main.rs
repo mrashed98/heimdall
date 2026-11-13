@@ -11,6 +11,7 @@ use heimdall::ingest::manifests::direct_name_keys;
 use heimdall::inventory::sight;
 use heimdall::model::{OathKind, Severity};
 use heimdall::oath::{ExtendBody, NewOathBody, Oath};
+use heimdall::scan_images;
 use heimdall::AppState;
 
 #[derive(Parser)]
@@ -49,7 +50,7 @@ enum Command {
     /// Sight: scan the cluster and ingest its inventory
     Sight(SightArgs),
     /// Generate SBOMs for images that have none
-    ScanImages,
+    ScanImages(ScanImagesArgs),
     /// Realms
     Realms,
 }
@@ -77,6 +78,16 @@ struct GateArgs {
     /// Repository default branch (default: from $GITHUB_EVENT_PATH)
     #[arg(long)]
     default_branch: Option<String>,
+}
+
+#[derive(Args)]
+struct ScanImagesArgs {
+    /// Most images to scan in one run
+    #[arg(long, default_value_t = 20)]
+    max: usize,
+    /// Path to the syft binary
+    #[arg(long, default_value = "syft")]
+    syft: PathBuf,
 }
 
 #[derive(Args)]
@@ -403,6 +414,27 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Command::ScanImages(args) => {
+            let report = match Client::from_env() {
+                Ok(client) => scan_images::run(&client, &args.syft, args.max).await,
+                Err(e) => Err(e),
+            };
+            match report {
+                Ok(r) => {
+                    println!("scan-images: {} scanned, {} failed", r.scanned, r.failed);
+                    // Failure only when every attempted image failed.
+                    if r.scanned == 0 && r.failed > 0 {
+                        ExitCode::FAILURE
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("not implemented yet");
             ExitCode::FAILURE

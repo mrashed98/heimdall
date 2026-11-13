@@ -55,6 +55,20 @@ impl Client {
         self.send(req).await
     }
 
+    /// POST raw bytes (e.g. a CycloneDX document) and decode the JSON reply.
+    pub async fn post_bytes<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> anyhow::Result<T> {
+        let req = self
+            .http
+            .post(self.url(path))
+            .header("content-type", "application/json")
+            .body(body);
+        self.send(req).await
+    }
+
     /// Percent-encode one path segment so names cannot alter the route.
     pub fn encode_segment(s: &str) -> String {
         let mut out = String::new();
