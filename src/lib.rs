@@ -10,6 +10,7 @@ pub mod ingest;
 pub mod inventory;
 pub mod matcher;
 pub mod model;
+pub mod notify;
 pub mod oath;
 pub mod purl;
 pub mod server;

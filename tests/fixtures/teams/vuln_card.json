@@ -1,0 +1,107 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open GHSA-gin-0001",
+            "type": "Action.OpenUrl",
+            "url": "https://osv.dev/vulnerability/GHSA-gin-0001"
+          }
+        ],
+        "body": [
+          {
+            "color": "Attention",
+            "size": "Large",
+            "text": "⚠ GHSA-gin-0001 (high) affects 2 service(s)",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "text": "gin mishandles header parsing",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "text": "OSV 7.5 · NVD 9.8",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "items": [
+              {
+                "text": "prod / api",
+                "type": "TextBlock",
+                "weight": "Bolder",
+                "wrap": true
+              },
+              {
+                "facts": [
+                  {
+                    "title": "Component",
+                    "value": "pkg:golang/github.com/gin-gonic/gin@v1.9.0"
+                  },
+                  {
+                    "title": "Version",
+                    "value": "v1.9.0"
+                  },
+                  {
+                    "title": "Fix",
+                    "value": "upgrade to v1.9.1 (latest v1.10.0)"
+                  }
+                ],
+                "type": "FactSet"
+              }
+            ],
+            "separator": true,
+            "type": "Container"
+          },
+          {
+            "items": [
+              {
+                "text": "prod / worker",
+                "type": "TextBlock",
+                "weight": "Bolder",
+                "wrap": true
+              },
+              {
+                "facts": [
+                  {
+                    "title": "Component",
+                    "value": "pkg:golang/github.com/gin-gonic/gin@v1.9.0"
+                  },
+                  {
+                    "title": "Version",
+                    "value": "v1.9.0"
+                  },
+                  {
+                    "title": "Fix",
+                    "value": "upgrade to v1.9.1 (latest v1.10.0)"
+                  },
+                  {
+                    "title": "Note",
+                    "value": "indirect dependency"
+                  }
+                ],
+                "type": "FactSet"
+              }
+            ],
+            "separator": true,
+            "type": "Container"
+          }
+        ],
+        "msteams": {
+          "width": "Full"
+        },
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive"
+    }
+  ],
+  "type": "message"
+}
