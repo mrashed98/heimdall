@@ -1,4 +1,5 @@
-/target
 .superpowers/
 *.swp
 .env
+/target
+heimdall.yaml

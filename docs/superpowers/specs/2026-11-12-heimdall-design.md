@@ -138,7 +138,7 @@ arrive this way, so Heimdall does not parse lockfiles itself.
 
 **Sight (cluster scanner)**, every 15 min via the Kubernetes API (read-only ClusterRole):
 - Pods → unique image references + digests → components (`pkg:oci/...`).
-- Helm releases (Helm release secrets) and ArgoCD `Application` resources → chart name + version.
+- Helm chart versions from the `helm.sh/chart` workload label (not Helm release Secrets; see ADR 0003) and ArgoCD `Application` resources → chart name + version.
 - Server version → Kubernetes / k3s version.
 - Nodes → OS image (Ubuntu/Debian version) and kubelet version.
 
@@ -278,7 +278,7 @@ heimdall gate --service api --realm dev-k3s --sbom sbom.json --fail-on high
 
 - REST/JSON over axum; the CLI (`clap`) is a thin client of the same API.
 - Endpoints (phase 1): ingest SBOM, ingest cluster inventory, list services/components/findings/releases, oath CRUD, image-SBOM work queue, health, metrics.
-- **API keys** stored hashed (argon2) in Postgres, with scopes: `ingest` (CI, CronJob), `read`, `admin` (oaths). Bootstrap admin key from a Kubernetes secret (SOPS-managed).
+- **API keys** stored hashed (SHA-256; see ADR 0004) in Postgres, with scopes: `ingest` (CI, CronJob), `read`, `admin` (oaths). Bootstrap admin key from a Kubernetes secret (SOPS-managed).
 - The API is designed for the phase-2 UI to consume as-is.
 - **Reachability from CI (owner's decision):** self-hosted GitHub Actions
   runners that can reach the cluster network. Heimdall is **not exposed to the
@@ -352,6 +352,8 @@ on self-hosted runners (no internet exposure); alerts fire from the first run;
 alerts grouped per advisory; service name from `app.kubernetes.io/name` label;
 uploads replace, and findings close when fixed or removed; EKS/RDS checks moved
 to phase 3.
+
+**Deviations (phase 1 plan):** API keys use SHA-256, not argon2 (32 random bytes; a slow hash only costs CPU on a 1-CPU pod; ADR 0004). Sight reads chart versions from `helm.sh/chart` labels and ArgoCD Applications, not Helm release Secrets, to avoid cluster-wide Secret read access (ADR 0003).
 
 **Claude's calls (owner to check):** oaths carry across still-affected
 versions; paced Teams queue; theme names user-facing only; tech stack §8.

@@ -1,0 +1,23 @@
+[package]
+name = "heimdall"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight vulnerability and release tracker"
+
+[lib]
+name = "heimdall"
+path = "src/lib.rs"
+
+[[bin]]
+name = "heimdall"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,73 @@
+# Example Heimdall configuration. Copy to heimdall.yaml and adjust.
+realms:
+  - dev-k3s
+
+digest:
+  weekday: Mon
+  hour: 9
+  timezone: UTC
+
+# Key names allowed to hold the admin scope (besides "bootstrap").
+admins: []
+
+# Images under these prefixes are ours and are never release-watched.
+own_registries:
+  - ghcr.io/yourorg
+
+teams:
+  - name: default
+    webhook_env: TEAMS_WEBHOOK_DEFAULT
+    realms: []          # empty = all realms
+    min_severity: high
+
+watchers:
+  github:
+    - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }
+    - { repo: k3s-io/k3s, inventory_name: k3s, major_component: 1 }
+    - { repo: kyverno/kyverno, inventory_name: kyverno }
+    - { repo: argoproj/argo-cd, inventory_name: argocd }
+    - { repo: ClickHouse/ClickHouse, inventory_name: clickhouse, cpe: "cpe:2.3:a:clickhouse:clickhouse" }
+    - { repo: apache/kafka, inventory_name: kafka, cpe: "cpe:2.3:a:apache:kafka" }
+    - { repo: valkey-io/valkey, inventory_name: valkey, cpe: "cpe:2.3:a:valkey:valkey" }
+    - { repo: open-telemetry/opentelemetry-collector-releases, inventory_name: opentelemetry-collector }
+    - { repo: isindir/sops-secrets-operator, inventory_name: sops-secrets-operator }
+    - { repo: prometheus-community/helm-charts, inventory_name: kube-prometheus-stack }
+    - { repo: grafana/grafana, inventory_name: grafana }
+    - { repo: grafana/loki, inventory_name: loki }
+    - { repo: grafana/tempo, inventory_name: tempo }
+    - { repo: opentofu/opentofu, inventory_name: opentofu }
+    - { repo: hashicorp/terraform, inventory_name: terraform }
+  endoflife:
+    - { product: postgresql, inventory_name: postgresql, cpe: "cpe:2.3:a:postgresql:postgresql", repo: postgres/postgres }
+    - { product: clickhouse, inventory_name: clickhouse, cpe: "cpe:2.3:a:clickhouse:clickhouse", repo: ClickHouse/ClickHouse }
+    - { product: kubernetes, inventory_name: kubernetes, major_component: 1, repo: kubernetes/kubernetes }
+    - { product: k3s, inventory_name: k3s, major_component: 1, repo: k3s-io/k3s }
+    - { product: ubuntu, inventory_name: ubuntu }
+    - { product: debian, inventory_name: debian }
+    - { product: valkey, inventory_name: valkey, cpe: "cpe:2.3:a:valkey:valkey", repo: valkey-io/valkey }
+    - { product: amazon-eks, inventory_name: amazon-eks, major_component: 1 }
+    - { product: amazon-rds-postgresql, inventory_name: amazon-rds-postgresql }
+  tf_registry: []
+
+# Components outside any cluster or SBOM.
+declared:
+  - { realm: dev-k3s, service: postgres-vm, purl: "pkg:generic/postgresql@17.2" }
+
+# Private registry credentials: host -> env var holding the credential.
+registries: []
+
+# Polling intervals in minutes (these are the defaults).
+schedules:
+  sight_minutes: 15
+  osv_minutes: 15
+  k8s_cve_minutes: 30
+  watchers_minutes: 60
+
+nvd:
+  api_key_env: NVD_API_KEY
+  minutes: 120
+
+retention:
+  findings_days: 365
+  releases_days: 365
+  outbox_days: 30
