@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.2.0",
+  "generated_at": "2026-11-13T00:00:00+00:00",
+  "last_modified": "2026-11-13T00:00:00+00:00",
+  "result": {
+    "name": "postgresql",
+    "aliases": ["postgres"],
+    "label": "PostgreSQL",
+    "category": "database",
+    "tags": ["database", "sql"],
+    "versionCommand": "SELECT version();",
+    "releases": [
+      {
+        "name": "18",
+        "codename": null,
+        "label": "18",
+        "releaseDate": "2025-09-25",
+        "isLts": false,
+        "ltsFrom": null,
+        "isEol": false,
+        "eolFrom": "2030-11-14",
+        "isMaintained": true,
+        "latest": { "name": "18.1", "date": "2025-11-13", "link": "https://www.postgresql.org/docs/18/release-18-1.html" }
+      },
+      {
+        "name": "16",
+        "codename": null,
+        "label": "16",
+        "releaseDate": "2023-09-14",
+        "isLts": false,
+        "ltsFrom": null,
+        "isEol": false,
+        "eolFrom": "2028-11-09",
+        "isMaintained": true,
+        "latest": { "name": "16.11", "date": "2025-11-13", "link": "https://www.postgresql.org/docs/16/release-16-11.html" }
+      },
+      {
+        "name": "9.6",
+        "codename": null,
+        "label": "9.6",
+        "releaseDate": "2016-09-29",
+        "isLts": false,
+        "ltsFrom": null,
+        "isEol": true,
+        "eolFrom": "2021-11-11",
+        "isMaintained": false,
+        "latest": { "name": "9.6.24", "date": "2021-11-11", "link": null }
+      }
+    ]
+  }
+}

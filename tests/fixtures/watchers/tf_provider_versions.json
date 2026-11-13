@@ -1,0 +1,44 @@
+{
+  "id": "hashicorp/random",
+  "versions": [
+    {
+      "version": "3.6.3",
+      "protocols": [
+        "5.0"
+      ]
+    },
+    {
+      "version": "3.2.0",
+      "protocols": [
+        "5.0"
+      ]
+    },
+    {
+      "version": "2.2.1",
+      "protocols": [
+        "4.0",
+        "5.0"
+      ]
+    },
+    {
+      "version": "3.1.1",
+      "protocols": [
+        "5.0"
+      ]
+    },
+    {
+      "version": "2.3.1",
+      "protocols": [
+        "4.0",
+        "5.0"
+      ]
+    },
+    {
+      "version": "3.6.1",
+      "protocols": [
+        "5.0"
+      ]
+    }
+  ],
+  "warnings": null
+}

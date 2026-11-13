@@ -1,0 +1,74 @@
+[
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/436102666",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.38.0-beta.0",
+    "id": 436102666,
+    "tag_name": "v1.38.0-beta.0",
+    "name": "v1.38.0-beta.0",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-11-06T01:02:46Z",
+    "published_at": "2026-11-06T04:34:14Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  },
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/426444234",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.38.0-alpha.3",
+    "id": 426444234,
+    "tag_name": "v1.38.0-alpha.3",
+    "name": "v1.38.0-alpha.3",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-28T00:45:52Z",
+    "published_at": "2026-10-28T09:02:26Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  },
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/426267137",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.37.2",
+    "id": 426267137,
+    "tag_name": "v1.37.2",
+    "name": "v1.37.2",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-27T12:01:04Z",
+    "published_at": "2026-10-28T04:37:53Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  },
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/426276727",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.36.6",
+    "id": 426276727,
+    "tag_name": "v1.36.6",
+    "name": "v1.36.6",
+    "draft": true,
+    "prerelease": false,
+    "created_at": "2026-10-27T12:02:52Z",
+    "published_at": "2026-10-28T04:56:35Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  },
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/426266947",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.35.10",
+    "id": 426266947,
+    "tag_name": "v1.35.10",
+    "name": "v1.35.10",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-27T12:02:52Z",
+    "published_at": "2026-10-28T04:37:28Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  },
+  {
+    "url": "https://api.github.com/repos/kubernetes/kubernetes/releases/426267034",
+    "html_url": "https://github.com/kubernetes/kubernetes/releases/tag/v1.34.13",
+    "id": 426267034,
+    "tag_name": "v1.34.13",
+    "name": "v1.34.13",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-27T12:03:02Z",
+    "published_at": "2026-10-28T04:37:39Z",
+    "body": "\nSee [kubernetes-announce@](https://groups.google.com/forum/#!forum/kubernetes-announce). Additional binary downloads are linked in the [CHANGELOG](https://github.com/kubernetes/kubernetes/blob/master"
+  }
+]

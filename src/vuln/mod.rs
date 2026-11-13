@@ -2,6 +2,7 @@
 
 pub mod cpe;
 pub mod ghsa;
+pub mod k8s_feed;
 pub mod nvd;
 pub mod osv;
 pub mod retry;

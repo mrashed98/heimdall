@@ -1,0 +1,25 @@
+{
+  "name": "library/postgres",
+  "tags": [
+    "10",
+    "10-alpine",
+    "10-alpine3.13",
+    "10-alpine3.14",
+    "10-alpine3.15",
+    "10-alpine3.16",
+    "10-beta1",
+    "10-beta1-alpine",
+    "10-beta2",
+    "10-beta2-alpine",
+    "10-beta3",
+    "10-beta3-alpine",
+    "10-beta4",
+    "10-beta4-alpine",
+    "10-bullseye",
+    "10-buster",
+    "10-rc1",
+    "10-rc1-alpine",
+    "10-stretch",
+    "10.0"
+  ]
+}

@@ -198,8 +198,10 @@ pub fn parse_tag(tag: &str) -> Option<Tag> {
     })
 }
 
-/// True for semver pre-releases (`-rc.1`, `-beta.2`). Build metadata
-/// (`+k3s1`) is not a pre-release.
+/// True for pre-releases: semver ones (`-rc.1`, `-beta.2`) and the common
+/// non-semver forms (`1.0.0rc1`, `1.0a1`, `1.0~rc1`, `1.0.dev0`). Build
+/// metadata (`+k3s1`), patch letters (`9.6p1`) and vendor suffixes (`-lts`)
+/// are not pre-releases.
 pub fn is_prerelease(v: &str) -> bool {
     if let Some(ver) = lenient_semver(v) {
         return !ver.pre.is_empty();
@@ -207,9 +209,28 @@ pub fn is_prerelease(v: &str) -> bool {
     let v = v.trim();
     let v = v.strip_prefix('v').unwrap_or(v);
     let (_, rest) = split_numeric(v);
-    ["-rc", "-alpha", "-beta"]
+    let rest = rest.split('+').next().unwrap_or("").to_ascii_lowercase();
+    // Any word of the tail that names a pre-release stage.
+    rest.split(|c: char| !c.is_ascii_alphabetic())
+        .any(|word| PRERELEASE_WORDS.contains(&word))
+}
+
+const PRERELEASE_WORDS: [&str; 8] = ["a", "b", "rc", "alpha", "beta", "pre", "preview", "dev"];
+
+/// The major line a version belongs to: its first `major_component + 1`
+/// numbers, one more for a 0.x version (`17.0-alpine` -> `17`,
+/// `v1.32.0` with component 1 -> `1.32`, `0.4.0` -> `0.4`). Releases of one
+/// line share one MajorRelease finding.
+pub fn major_line(v: &str, major_component: u8) -> String {
+    let mut len = major_component as usize + 1;
+    if components(v, 1)[0] == 0 {
+        len += 1;
+    }
+    let parts: Vec<String> = components(v, len)[..len]
         .iter()
-        .any(|p| rest.to_ascii_lowercase().starts_with(p))
+        .map(u64::to_string)
+        .collect();
+    parts.join(".")
 }
 
 /// Pick the smallest fixed version above `current` that keeps its major,
@@ -386,6 +407,31 @@ mod tests {
         assert!(!is_prerelease("v1.32.0+k3s1"));
         assert!(is_prerelease("1.2.3.4-rc1"));
         assert!(!is_prerelease("1.2.3.4"));
+    }
+
+    #[test]
+    fn non_semver_prereleases_detected() {
+        assert!(is_prerelease("1.0.0rc1"));
+        assert!(is_prerelease("1.0a1"));
+        assert!(is_prerelease("1.0b2"));
+        assert!(is_prerelease("1.0~rc1"));
+        assert!(is_prerelease("2.0-beta"));
+        assert!(is_prerelease("1.0.dev0"));
+        assert!(is_prerelease("1.2.3.dev4"));
+        assert!(is_prerelease("3.1.0.post1-dev"));
+        // Patch letters and vendor suffixes are not pre-releases.
+        assert!(!is_prerelease("9.6p1"));
+        assert!(!is_prerelease("1.1.1t"));
+        assert!(!is_prerelease("24.8.4.13-lts"));
+        assert!(!is_prerelease("1.2.3.4"));
+    }
+
+    #[test]
+    fn major_line_names_the_major() {
+        assert_eq!(major_line("17.0-alpine", 0), "17");
+        assert_eq!(major_line("v1.32.0+k3s1", 1), "1.32");
+        assert_eq!(major_line("0.4.0", 0), "0.4");
+        assert_eq!(major_line("1.0.0", 0), "1");
     }
 
     #[test]

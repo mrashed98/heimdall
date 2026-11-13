@@ -1,4 +1,4 @@
-//! One small retry helper shared by the OSV and NVD clients.
+//! One small retry helper shared by the OSV and NVD clients and the watchers.
 
 use std::time::Duration;
 
@@ -15,7 +15,9 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Send the request built by `build`, retrying 429, 5xx and network errors with
 /// exponential backoff (a `Retry-After` in seconds wins). `build` is a closure
 /// because a `RequestBuilder` is consumed by `send`. Any other non-2xx status
-/// is an error at once. The returned response always has a success status.
+/// is an error at once. The returned response has a success status, or is a
+/// 304 Not Modified (only possible when the caller sent a validator such as
+/// `If-None-Match`, as the watchers do).
 pub async fn send(what: &str, build: impl Fn() -> RequestBuilder) -> anyhow::Result<Response> {
     let mut attempt = 0;
     loop {
@@ -23,7 +25,9 @@ pub async fn send(what: &str, build: impl Fn() -> RequestBuilder) -> anyhow::Res
         let last = attempt == MAX_ATTEMPTS;
         let backoff = BASE_DELAY * 2u32.pow(attempt - 1);
         match build().send().await {
-            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) if resp.status().is_success() || resp.status() == StatusCode::NOT_MODIFIED => {
+                return Ok(resp)
+            }
             Ok(resp) => {
                 let status = resp.status();
                 if last || !retryable(status) {
