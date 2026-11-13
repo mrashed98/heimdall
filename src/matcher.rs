@@ -385,12 +385,23 @@ async fn upsert(
                 opened.push(*id);
             }
             Some((id, _)) => {
-                sqlx::query("UPDATE findings SET severity = $2, details = $3 WHERE id = $1")
-                    .bind(id)
-                    .bind(w.severity)
-                    .bind(&w.details)
-                    .execute(&mut *tx)
-                    .await?;
+                // A Vuln re-scored from below High to High or worse alerts
+                // again: it may have been announced only in the digest. On
+                // the right of SET, `severity` is still the old value.
+                sqlx::query(
+                    "UPDATE findings SET severity = $2, details = $3, \
+                         notified_at = CASE \
+                             WHEN kind = 'vuln' \
+                                  AND severity NOT IN ('critical', 'high') \
+                                  AND $2 IN ('critical', 'high') THEN NULL \
+                             ELSE notified_at END \
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(w.severity)
+                .bind(&w.details)
+                .execute(&mut *tx)
+                .await?;
             }
         }
     }
@@ -574,11 +585,53 @@ mod tests {
             .await
             .unwrap();
 
+        // High -> critical: already alerted as high, so no second alert.
         let report = run(&pool, REALM, now).await.unwrap();
         assert!(report.opened.is_empty());
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!(v.severity, "critical");
         assert!(v.notified_at.is_some());
+
+        // Medium -> low stays below High: notified_at is kept too.
+        for sev in ["medium", "low"] {
+            sqlx::query("UPDATE advisories SET severity = $1")
+                .bind(sev)
+                .execute(&pool)
+                .await
+                .unwrap();
+            run(&pool, REALM, now).await.unwrap();
+            let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+            assert_eq!(v.severity, sev);
+            assert!(v.notified_at.is_some(), "{sev}");
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn severity_crossing_high_rearms_alert(pool: PgPool) {
+        seed_gin(&pool, "v1.9.0").await;
+        sqlx::query("UPDATE advisories SET severity = 'medium'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        run(&pool, REALM, now).await.unwrap();
+        // The digest announced the medium Vuln (and its fix alerted).
+        sqlx::query("UPDATE findings SET notified_at = $1")
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE advisories SET severity = 'high'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run(&pool, REALM, now).await.unwrap();
+        let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+        assert_eq!(v.severity, "high");
+        assert!(v.notified_at.is_none());
+        let f = &of_kind(&pool, FindingKind::FixAvailable).await[0];
+        assert!(f.notified_at.is_some());
     }
 
     #[sqlx::test(migrations = "./migrations")]

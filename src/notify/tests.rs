@@ -408,6 +408,58 @@ async fn no_routes_leaves_findings_pending(pool: PgPool) {
     assert_eq!(notified_status(&pool, v).await, (false, "open".into()));
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn medium_fix_and_expired_oath_reach_a_high_route(pool: PgPool) {
+    let f = fix(&pool, "prod", "api", "medium").await;
+    finding(
+        &pool,
+        "oathexpired",
+        "prod",
+        None,
+        "GHSA-med",
+        "medium",
+        json!({"oath": 9, "advisory": "GHSA-med", "name_key": GIN, "service": "web",
+               "realm": "prod", "kind": "ignore", "reason": "r", "version_at_creation": "v1"}),
+    )
+    .await;
+    assert_eq!(
+        enqueue_alerts(&pool, &one_route("NOTIFY_T11"))
+            .await
+            .unwrap(),
+        2
+    );
+    let titles: Vec<String> = outbox(&pool).await.iter().map(|r| title(&r.card)).collect();
+    assert!(
+        titles.iter().any(|t| t.starts_with("Fix available")),
+        "{titles:?}"
+    );
+    assert!(
+        titles.contains(&"Oath expired: GHSA-med on web".to_string()),
+        "{titles:?}"
+    );
+    assert_eq!(notified_status(&pool, f).await, (true, "open".into()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn realm_without_route_stays_pending(pool: PgPool) {
+    let c = cfg("realms: [prod, dev]\n\
+         teams:\n  - {name: prod, webhook_env: A, realms: [prod], min_severity: low}\n");
+    let v = vuln(&pool, "dev", "api", "critical").await;
+    assert_eq!(enqueue_alerts(&pool, &c).await.unwrap(), 0);
+    assert!(outbox(&pool).await.is_empty());
+    assert_eq!(notified_status(&pool, v).await, (false, "open".into()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn severity_opt_out_is_marked(pool: PgPool) {
+    let c = cfg("realms: [prod]\n\
+         teams:\n  - {name: crit, webhook_env: A, min_severity: critical}\n");
+    let v = vuln(&pool, "prod", "api", "high").await;
+    assert_eq!(enqueue_alerts(&pool, &c).await.unwrap(), 0);
+    assert!(outbox(&pool).await.is_empty());
+    assert_eq!(notified_status(&pool, v).await, (true, "open".into()));
+}
+
 // ---- drain ----
 
 /// One queued card for route `all`, due long ago.
@@ -540,6 +592,23 @@ async fn drain_network_error_retries(pool: PgPool) {
     assert_eq!(r.retry, 1);
     let row = &outbox(&pool).await[0];
     assert_eq!(row.next_attempt_at, now() + Duration::seconds(30));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn drain_huge_retry_after_is_clamped(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "99999999999999999"))
+        .mount(&server)
+        .await;
+    let c = with_webhook("NOTIFY_HOOK_HUGE", &server);
+    queued(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, now())
+        .await
+        .unwrap();
+    assert_eq!(r.retry, 1);
+    let row = &outbox(&pool).await[0];
+    assert_eq!(row.next_attempt_at, now() + Duration::hours(1));
 }
 
 // ---- digest ----
@@ -714,5 +783,53 @@ async fn digest_lists_declared_since(pool: PgPool) {
     assert!(
         text.contains("postgres-vm: postgresql 17.2, declared since 2026-11-13"),
         "{text}"
+    );
+}
+
+async fn release(pool: &PgPool, version: &str, published: &str) {
+    sqlx::query(
+        "INSERT INTO releases (target, version, published_at, notes_class) \
+         VALUES ('pkg:npm/lib', $1, $2::timestamptz, 'plain')",
+    )
+    .bind(version)
+    .bind(published)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn digest_takes_releases_stored_late(pool: PgPool) {
+    let c = digest_cfg();
+    // First digest: only recent history counts.
+    release(&pool, "1.0.0", "2026-10-01T00:00:00Z").await;
+    release(&pool, "1.0.1", "2026-11-14T00:00:00Z").await;
+    assert!(maybe_send(&pool, &c, monday_0910()).await.unwrap());
+    let first = digest_text(&pool).await;
+    assert!(first.contains("1.0.1"), "{first}");
+    assert!(!first.contains("1.0.0"), "{first}");
+
+    // Published before the first digest, stored after it.
+    release(&pool, "1.0.2", "2026-11-10T00:00:00Z").await;
+    let next = monday_0910() + Duration::days(7);
+    assert!(maybe_send(&pool, &c, next).await.unwrap());
+    let rows = outbox(&pool).await;
+    let second = rows.last().unwrap().card.to_string();
+    assert!(second.contains("1.0.2"), "{second}");
+    assert!(!second.contains("1.0.1"), "{second}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn digest_leaves_uncovered_realm_pending(pool: PgPool) {
+    let c = cfg("realms: [prod, dev]\n\
+         digest: {weekday: Mon, hour: 9, timezone: Europe/Berlin}\n\
+         teams:\n  - {name: prod, webhook_env: X, realms: [prod], min_severity: high}\n");
+    let covered = vuln(&pool, "prod", "api", "medium").await;
+    let uncovered = vuln(&pool, "dev", "api", "medium").await;
+    assert!(maybe_send(&pool, &c, monday_0910()).await.unwrap());
+    assert_eq!(notified_status(&pool, covered).await, (true, "open".into()));
+    assert_eq!(
+        notified_status(&pool, uncovered).await,
+        (false, "open".into())
     );
 }

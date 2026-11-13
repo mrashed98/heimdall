@@ -13,12 +13,30 @@ use crate::model::{FindingKind, Severity};
 pub(crate) const MAX_ROWS: usize = 25;
 /// Breaking-change lines quoted on a major release card.
 const MAX_BREAKING: usize = 5;
-/// Longest advisory summary or quoted line, in characters.
+/// Longest advisory summary, fact or quoted line, in characters.
 const MAX_TEXT: usize = 300;
+/// Services named in a card title before "and N more".
+const TITLE_SERVICES: usize = 3;
+/// Serialized card size above which rows are cut further (Teams rejects
+/// payloads over about 28 KB, and a rejected card is lost).
+pub(crate) const MAX_CARD_BYTES: usize = 24_000;
 
-/// The Workflows payload for one alert group.
+/// The Workflows payload for one alert group. Shows up to 25 items; when the
+/// card is still too big, fewer.
 pub fn card(group: &AlertGroup) -> Value {
-    let mut body = vec![title_block(&title(group), group.worst())];
+    let mut card = Value::Null;
+    for cap in [MAX_ROWS, 10, 5, 1] {
+        card = card_with(group, cap);
+        if card.to_string().len() <= MAX_CARD_BYTES {
+            break;
+        }
+    }
+    card
+}
+
+/// The card showing at most `cap` items.
+fn card_with(group: &AlertGroup, cap: usize) -> Value {
+    let mut body = vec![title_block(&clip(&title(group)), group.worst())];
     if let Some(a) = &group.advisory {
         if !a.summary.is_empty() {
             body.push(text_block(&clip(&a.summary), true));
@@ -27,7 +45,7 @@ pub fn card(group: &AlertGroup) -> Value {
     if let Some(s) = scores(group) {
         body.push(text_block(&s, true));
     }
-    for item in group.items.iter().take(MAX_ROWS) {
+    for item in group.items.iter().take(cap) {
         let heading = match &item.service {
             Some(s) if !s.is_empty() => format!("{} / {s}", item.realm),
             _ => item.realm.clone(),
@@ -36,14 +54,14 @@ pub fn card(group: &AlertGroup) -> Value {
             "type": "Container",
             "separator": true,
             "items": [
-                {"type": "TextBlock", "text": heading, "weight": "Bolder", "wrap": true},
+                {"type": "TextBlock", "text": clip(&heading), "weight": "Bolder", "wrap": true},
                 {"type": "FactSet", "facts": facts(item.kind, &item.details)},
             ],
         }));
     }
-    if group.items.len() > MAX_ROWS {
+    if group.items.len() > cap {
         body.push(text_block(
-            &format!("and {} more", group.items.len() - MAX_ROWS),
+            &format!("and {} more", group.items.len() - cap),
             true,
         ));
     }
@@ -134,7 +152,21 @@ pub(crate) fn link(title: &str, url: &str) -> Value {
 }
 
 fn fact(title: &str, value: &str) -> Value {
-    json!({"title": title, "value": value})
+    json!({"title": title, "value": clip(value)})
+}
+
+/// "a, b, c and 7 more".
+fn capped_list(names: &[String]) -> String {
+    let shown = names
+        .iter()
+        .take(TITLE_SERVICES)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut out = shown.join(", ");
+    if names.len() > TITLE_SERVICES {
+        out.push_str(&format!(" and {} more", names.len() - TITLE_SERVICES));
+    }
+    out
 }
 
 /// Cut long text so one card stays well under the Teams size limit.
@@ -251,7 +283,11 @@ fn title(g: &AlertGroup) -> String {
             str_of(first, "version")
         ),
         FindingKind::OathExpired => {
-            format!("Oath expired: {} on {}", g.ref_id, services(g).join(", "))
+            format!(
+                "Oath expired: {} on {}",
+                g.ref_id,
+                capped_list(&services(g))
+            )
         }
         FindingKind::Eol => format!(
             "{} {} reaches end of support on {}",
@@ -265,7 +301,7 @@ fn title(g: &AlertGroup) -> String {
             str_of(first, "target"),
             str_of(first, "version"),
             first["id"].as_str().unwrap_or(&g.ref_id),
-            services(g).join(", ")
+            capped_list(&services(g))
         ),
     }
 }
@@ -617,5 +653,43 @@ mod tests {
         assert!(t.contains("svc24"));
         assert!(!t.contains("svc25"));
         assert!(t.contains("and 15 more"), "{t}");
+    }
+
+    #[test]
+    fn huge_groups_stay_under_the_size_limit() {
+        let long = format!("pkg:npm/{}@1.0.0", "x".repeat(2000));
+        let items: Vec<AlertItem> = (0..500)
+            .map(|i| {
+                vuln_item(
+                    &format!("service-{i:03}-{}", "s".repeat(200)),
+                    &long,
+                    false,
+                    "nvd",
+                )
+            })
+            .collect();
+        let c = card(&group(FindingKind::Vuln, "GHSA-x", items));
+        assert!(c.to_string().len() < 24_000, "{}", c.to_string().len());
+
+        let services: Vec<String> = (0..500).map(|i| format!("svc{i:03}")).collect();
+        let mut g = group(
+            FindingKind::ReleaseNoteCve,
+            "GHSA-abc",
+            vec![item(
+                1,
+                FindingKind::ReleaseNoteCve,
+                "",
+                json!({"target": "pkg:npm/lib", "version": "1.2.3", "id": "CVE-2026-7",
+                       "ids": vec!["CVE-2026-7"; 500], "advisory": "GHSA-abc",
+                       "services": services}),
+            )],
+        );
+        g.items[0].service = None;
+        let c = card(&g);
+        assert!(c.to_string().len() < 24_000, "{}", c.to_string().len());
+        assert_eq!(
+            c["attachments"][0]["content"]["body"][0]["text"],
+            "pkg:npm/lib 1.2.3 release notes mention CVE-2026-7 (affects svc000, svc001, svc002 and 497 more)"
+        );
     }
 }

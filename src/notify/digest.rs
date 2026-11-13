@@ -5,25 +5,24 @@
 //! minor/patch releases by release-notes class, active oaths (flagging those
 //! carried to a new version), and declared components with their age.
 //!
-//! kv keys: `digest_last` (local date of the last digest), `digest_last_at`
-//! (its UTC time) and `digest_release_id` (highest release id covered).
+//! kv keys: `digest_last` (local date of the last digest) and
+//! `digest_release_id` (highest release id covered).
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
-use super::teams::{clip, message, package_name, severity_name, text_block, title_block, MAX_ROWS};
-use super::{covers, outbox};
+use super::teams::{
+    clip, message, package_name, severity_name, text_block, title_block, MAX_CARD_BYTES, MAX_ROWS,
+};
+use super::{covers, outbox, realm_has_route};
 use crate::config::{HeimdallConfig, TeamsRoute};
 use crate::model::Severity;
 use crate::version::is_prerelease;
 
 /// Fix lines quoted per bug-fix release.
 const FIX_LINES: usize = 3;
-/// Serialized card size above which rows are cut further (Teams' limit is
-/// about 28 KB).
-const MAX_CARD_BYTES: usize = 24_000;
 
 /// One line of a digest section, with the realm it belongs to (None: every
 /// realm, such as a release or an all-realms oath).
@@ -61,19 +60,19 @@ pub async fn maybe_send(
     if kv_get(&mut tx, "digest_last").await?.as_deref() == Some(today.as_str()) {
         return Ok(false);
     }
-    let since = kv_get(&mut tx, "digest_last_at")
+    let last_release: Option<i64> = kv_get(&mut tx, "digest_release_id")
         .await?
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-        .map(|t| t.with_timezone(&Utc))
-        .unwrap_or(now - Duration::days(7));
-    let last_release: i64 = kv_get(&mut tx, "digest_release_id")
-        .await?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .and_then(|s| s.parse().ok());
 
-    let (vuln_ids, vulns) = vulnerabilities(&mut tx).await?;
+    let (listed, vulns) = vulnerabilities(&mut tx).await?;
+    // A vuln of a realm no route covers stays pending for a later digest.
+    let vuln_ids: Vec<i64> = listed
+        .into_iter()
+        .filter(|(_, realm)| realm_has_route(cfg, realm))
+        .map(|(id, _)| id)
+        .collect();
     let mut sections = vec![vulns];
-    sections.extend(releases(&mut tx, last_release, since).await?);
+    sections.extend(releases(&mut tx, last_release, now - Duration::days(7)).await?);
     sections.push(oaths(&mut tx, d.timezone).await?);
     sections.push(declared(&mut tx, d.timezone).await?);
 
@@ -89,9 +88,12 @@ pub async fn maybe_send(
         .fetch_one(&mut *tx)
         .await?;
     kv_set(&mut tx, "digest_last", &today).await?;
-    kv_set(&mut tx, "digest_last_at", &now.to_rfc3339()).await?;
-    let covered = max_release.unwrap_or(0).max(last_release);
-    kv_set(&mut tx, "digest_release_id", &covered.to_string()).await?;
+    // No release stored yet: leave the watermark unset, or the next digest
+    // would take every release ever stored as new.
+    if let Some(max) = max_release {
+        let covered = max.max(last_release.unwrap_or(0));
+        kv_set(&mut tx, "digest_release_id", &covered.to_string()).await?;
+    }
     tx.commit().await?;
     Ok(true)
 }
@@ -145,8 +147,8 @@ struct VulnRow {
 }
 
 /// Open medium/low/unknown Vuln findings no digest has listed yet, and their
-/// ids (to mark notified).
-async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<i64>, Section)> {
+/// (id, realm) (to mark notified).
+async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, String)>, Section)> {
     let rows: Vec<VulnRow> = sqlx::query_as(
         "SELECT f.id, f.realm, s.name AS service, f.ref_id, f.severity, f.details->>'purl' AS purl \
          FROM findings f LEFT JOIN services s ON s.id = f.service_id \
@@ -157,7 +159,7 @@ async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<i64>, Sec
     )
     .fetch_all(&mut *tx)
     .await?;
-    let ids = rows.iter().map(|r| r.id).collect();
+    let ids = rows.iter().map(|r| (r.id, r.realm.clone())).collect();
     let rows = rows
         .into_iter()
         .map(|r| Row {
@@ -190,23 +192,27 @@ struct ReleaseRow {
     excerpt: Option<Value>,
 }
 
-/// Minor/patch releases stored since the last digest, in four sections by
-/// notes class. Releases whose notes mention a CVE affecting us already
-/// alerted and are left out. Only releases published since the last digest
-/// (or undated) count, so a first sight's history does not flood it.
+/// Minor/patch releases stored since the last digest (id above the
+/// watermark, however old their publish date), in four sections by notes
+/// class. Releases whose notes mention a CVE affecting us already alerted and
+/// are left out. The first digest has no watermark: it takes releases
+/// published since `first_since` (or undated), so a first sight's history
+/// does not flood it.
 async fn releases(
     tx: &mut PgConnection,
-    after_id: i64,
-    since: DateTime<Utc>,
+    after_id: Option<i64>,
+    first_since: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Section>> {
     let rows: Vec<ReleaseRow> = sqlx::query_as(
         "SELECT target, version, notes_url, notes_class, excerpt FROM releases \
-         WHERE id > $1 AND NOT is_major AND (published_at IS NULL OR published_at >= $2) \
-           AND notes_class IS DISTINCT FROM 'cve_affecting' \
+         WHERE NOT is_major AND notes_class IS DISTINCT FROM 'cve_affecting' \
+           AND CASE WHEN $1::bigint IS NULL \
+                    THEN published_at IS NULL OR published_at >= $2 \
+                    ELSE id > $1 END \
          ORDER BY target, id",
     )
     .bind(after_id)
-    .bind(since)
+    .bind(first_since)
     .fetch_all(&mut *tx)
     .await?;
     let mut security = Vec::new();

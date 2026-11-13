@@ -1,7 +1,7 @@
 //! Gjallarhorn: announces findings in Teams.
 //!
-//! - this file: which findings alert, how they are grouped into one card per
-//!   advisory or release, and routing them into the outbox.
+//! - this file: which findings alert, and routing their cards into the outbox.
+//! - `group`: how findings are grouped into one card per advisory or release.
 //! - `teams`: the Adaptive Card payloads.
 //! - `outbox`: sending queued cards, paced, with retries.
 //! - `digest`: the weekly digest of everything that did not alert.
@@ -10,13 +10,15 @@
 //! that queues its card, so a crash either queues and marks or does neither.
 
 pub mod digest;
+mod group;
 pub mod outbox;
 pub mod teams;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
 
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
@@ -76,51 +78,24 @@ impl AlertGroup {
     }
 
     /// The severity routes compare against. Releases, end of support and
-    /// Kubernetes CVEs count as High. A release-note CVE always alerts, so it
-    /// never routes below High.
+    /// Kubernetes CVEs count as High. Kinds that always alert (a fix
+    /// available, an expired oath, a release-note CVE) never route below
+    /// High, so a high-only route does not drop them. A Vuln routes at its
+    /// own severity.
     pub fn routing_severity(&self) -> Severity {
         match self.kind {
             FindingKind::MajorRelease | FindingKind::Eol | FindingKind::K8sCve => Severity::High,
-            FindingKind::ReleaseNoteCve => self.worst().max(Severity::High),
-            _ => self.worst(),
+            FindingKind::FixAvailable | FindingKind::OathExpired | FindingKind::ReleaseNoteCve => {
+                self.worst().max(Severity::High)
+            }
+            FindingKind::Vuln => self.worst(),
         }
     }
 
     /// The `(kind, ref_id)` grouping key. A release's ref_id (version, cycle)
     /// is only unique per target, so the target is part of the key for those.
     fn key(&self) -> String {
-        group_key(self.items.first(), self.kind, &self.ref_id)
-    }
-}
-
-fn group_key(item: Option<&AlertItem>, kind: FindingKind, ref_id: &str) -> String {
-    let detail = |name: &str| {
-        item.and_then(|i| i.details[name].as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
-    let k = kind_name(kind);
-    match kind {
-        FindingKind::MajorRelease | FindingKind::Eol => {
-            format!("{k}|{}|{ref_id}", detail("target"))
-        }
-        FindingKind::ReleaseNoteCve => {
-            format!("{k}|{}|{}|{ref_id}", detail("target"), detail("version"))
-        }
-        _ => format!("{k}|{ref_id}"),
-    }
-}
-
-/// The lowercase name stored in the database.
-fn kind_name(kind: FindingKind) -> &'static str {
-    match kind {
-        FindingKind::Vuln => "vuln",
-        FindingKind::FixAvailable => "fixavailable",
-        FindingKind::MajorRelease => "majorrelease",
-        FindingKind::OathExpired => "oathexpired",
-        FindingKind::Eol => "eol",
-        FindingKind::K8sCve => "k8scve",
-        FindingKind::ReleaseNoteCve => "releasenotecve",
+        group::group_key(self.items.first(), self.kind, &self.ref_id)
     }
 }
 
@@ -128,8 +103,10 @@ fn kind_name(kind: FindingKind) -> &'static str {
 /// advisory or release and route, and mark the findings notified, all in one
 /// transaction. Returns the number of outbox rows queued.
 ///
-/// With no Teams route configured nothing is marked, so the alerts are not
-/// lost: they go out once a route exists.
+/// A finding of a realm no route covers stays pending (and is warned about
+/// once), so it goes out once a route covers the realm. A finding every
+/// covering route filters out by `min_severity` is marked: that is an
+/// explicit opt-out.
 pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Result<usize> {
     if cfg.teams.is_empty() {
         return Ok(0);
@@ -137,12 +114,16 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
     let mut tx = pool.begin().await?;
     lock_realms(&mut tx, cfg).await?;
 
-    let items = pending(&mut tx).await?;
+    let items: Vec<(String, AlertItem)> = pending(&mut tx)
+        .await?
+        .into_iter()
+        .filter(|(_, i)| realm_has_route(cfg, &i.realm))
+        .collect();
     if items.is_empty() {
         return Ok(0);
     }
     let mut ids: Vec<i64> = items.iter().map(|(_, i)| i.finding_id).collect();
-    let mut groups = group(items);
+    let mut groups = group::group(items);
     for g in &mut groups {
         load_extras(&mut tx, g).await?;
         ids.extend(&g.absorbed);
@@ -251,83 +232,6 @@ async fn pending(tx: &mut PgConnection) -> anyhow::Result<Vec<(String, AlertItem
         .collect())
 }
 
-/// Group findings into cards, worst first:
-/// - one group per `(kind, ref_id)` (plus target for releases);
-/// - a FixAvailable whose service already has a Vuln card for the same
-///   advisory is absorbed into that card, which shows the fix advice;
-/// - a Vuln card for an advisory whose oath just expired merges into the
-///   "Oath expired" card, so the advisory gives one card, not two.
-pub fn group(items: Vec<(String, AlertItem)>) -> Vec<AlertGroup> {
-    let mut groups: BTreeMap<String, AlertGroup> = BTreeMap::new();
-    for (ref_id, item) in items {
-        let k = group_key(Some(&item), item.kind, &ref_id);
-        groups
-            .entry(k)
-            .or_insert_with(|| AlertGroup {
-                kind: item.kind,
-                ref_id,
-                items: Vec::new(),
-                absorbed: Vec::new(),
-                advisory: None,
-                release: None,
-            })
-            .items
-            .push(item);
-    }
-
-    let advisories: Vec<String> = groups
-        .values()
-        .filter(|g| g.kind == FindingKind::FixAvailable)
-        .map(|g| g.ref_id.clone())
-        .collect();
-    for adv in advisories {
-        let fix_key = format!("fixavailable|{adv}");
-        let Some(vuln) = groups.get(&format!("vuln|{adv}")) else {
-            continue;
-        };
-        let covered: BTreeSet<(String, Option<String>)> = vuln
-            .items
-            .iter()
-            .map(|i| (i.realm.clone(), i.service.clone()))
-            .collect();
-        let fix = groups.get_mut(&fix_key).expect("collected above");
-        let (folded, kept): (Vec<AlertItem>, Vec<AlertItem>) = fix
-            .items
-            .drain(..)
-            .partition(|i| covered.contains(&(i.realm.clone(), i.service.clone())));
-        fix.items = kept;
-        let folded_ids: Vec<i64> = folded.iter().map(|i| i.finding_id).collect();
-        if fix.items.is_empty() {
-            groups.remove(&fix_key);
-        }
-        if let Some(vuln) = groups.get_mut(&format!("vuln|{adv}")) {
-            vuln.absorbed.extend(folded_ids);
-        }
-    }
-
-    let expired: Vec<String> = groups
-        .values()
-        .filter(|g| g.kind == FindingKind::OathExpired)
-        .map(|g| g.ref_id.clone())
-        .collect();
-    for adv in expired {
-        if let Some(vuln) = groups.remove(&format!("vuln|{adv}")) {
-            let oath = groups
-                .get_mut(&format!("oathexpired|{adv}"))
-                .expect("collected above");
-            oath.items.extend(vuln.items);
-            oath.absorbed.extend(vuln.absorbed);
-        }
-    }
-
-    let mut out: Vec<AlertGroup> = groups.into_values().collect();
-    out.sort_by_key(|g| {
-        let first = g.items.iter().map(|i| i.finding_id).min().unwrap_or(0);
-        (std::cmp::Reverse(g.routing_severity()), first)
-    });
-    out
-}
-
 /// Advisory summary and scores, and release notes, for the card.
 async fn load_extras(tx: &mut PgConnection, g: &mut AlertGroup) -> anyhow::Result<()> {
     let advisory_kinds = [
@@ -382,6 +286,31 @@ async fn load_extras(tx: &mut PgConnection, g: &mut AlertGroup) -> anyhow::Resul
 /// Does the route cover this realm? An empty realm list covers all.
 fn covers(route: &TeamsRoute, realm: &str) -> bool {
     route.realms.is_empty() || route.realms.iter().any(|r| r == realm)
+}
+
+/// Does any route cover this realm? Warns once per realm when none does.
+pub(crate) fn realm_has_route(cfg: &HeimdallConfig, realm: &str) -> bool {
+    let covered = cfg.teams.iter().any(|r| covers(r, realm));
+    if !covered {
+        warn_once(
+            &format!("realm|{realm}"),
+            &format!("no teams route covers realm {realm}; its findings stay pending"),
+        );
+    }
+    covered
+}
+
+/// Warnings already logged, by key, so a condition checked every few
+/// seconds is logged once per process.
+static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+pub(crate) fn warn_once(key: &str, message: &str) {
+    // A poisoned lock only means another thread panicked mid-insert; the set
+    // is still usable.
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(key.to_string()) {
+        eprintln!("warning: {message}");
+    }
 }
 
 /// The part of `g` this route receives: only the items of realms it covers,

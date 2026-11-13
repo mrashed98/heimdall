@@ -1,9 +1,6 @@
 //! The outbox: cards queued in the database and sent to Teams one at a time.
 //! Queued rows survive restarts; a sent row is never sent again.
 
-use std::collections::BTreeSet;
-use std::sync::Mutex;
-
 use chrono::{DateTime, Duration, Utc};
 use reqwest::header::RETRY_AFTER;
 use reqwest::StatusCode;
@@ -49,10 +46,6 @@ pub(crate) async fn push(
     Ok(id)
 }
 
-/// Routes already warned about a missing webhook variable, so the warning is
-/// logged once per route rather than every 2 s.
-static WARNED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-
 /// Send at most one due card (oldest first); the caller loops every 2 s,
 /// which paces Teams. Rows of a route whose webhook variable is unset stay
 /// queued untouched until it is set.
@@ -69,7 +62,13 @@ pub async fn drain_once(
     for route in &cfg.teams {
         match std::env::var(&route.webhook_env) {
             Ok(url) if !url.is_empty() => webhooks.push((route.name.clone(), url)),
-            _ => warn_once(&route.name, &route.webhook_env),
+            _ => super::warn_once(
+                &format!("webhook|{}", route.name),
+                &format!(
+                    "teams route {}: {} is not set; its cards stay queued",
+                    route.name, route.webhook_env
+                ),
+            ),
         }
     }
     let mut result = DrainResult::default();
@@ -170,12 +169,15 @@ async fn send(http: &reqwest::Client, url: &str, card: &Value) -> Outcome {
         return Outcome::Sent;
     }
     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-        // Retry-After in seconds; the HTTP-date form is ignored.
+        // Retry-After in seconds, at most the backoff cap so a huge value
+        // can neither overflow the date nor park the card for days. The
+        // HTTP-date form, negatives and garbage are ignored.
         let retry_after_secs = resp
             .headers()
             .get(RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<i64>().ok());
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|secs| secs.min(BACKOFF_CAP_SECS as u64) as i64);
         return Outcome::Retry {
             retry_after_secs,
             why: format!("{status}"),
@@ -185,21 +187,13 @@ async fn send(http: &reqwest::Client, url: &str, card: &Value) -> Outcome {
 }
 
 /// The delay before the next attempt: 30 s doubled per earlier attempt,
-/// capped at 1 h, or the server's Retry-After when that is longer.
+/// capped at 1 h, or the server's Retry-After when that is longer (it is
+/// already clamped to 1 h).
 fn backoff(attempts: i32, retry_after_secs: Option<i64>) -> Duration {
     // 2^7 x 30 s already passes the cap; clamping keeps the shift small.
     let exp = attempts.clamp(0, 7) as u32;
     let ours = (BACKOFF_BASE_SECS << exp).min(BACKOFF_CAP_SECS);
     Duration::seconds(ours.max(retry_after_secs.unwrap_or(0)))
-}
-
-fn warn_once(route: &str, env: &str) {
-    // A poisoned lock only means another thread panicked mid-insert; the set
-    // is still usable.
-    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
-    if warned.insert(route.to_string()) {
-        eprintln!("warning: teams route {route}: {env} is not set; its cards stay queued");
-    }
 }
 
 #[cfg(test)]
