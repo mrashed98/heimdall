@@ -399,7 +399,7 @@ fn is_cve_id(s: &str) -> bool {
 
 /// `fixed` events of the `affected[]` entries for exactly this package,
 /// first-seen order, no duplicates.
-fn fixed_versions(vuln: &Value, pkg: &OsvPackage) -> Vec<String> {
+pub(crate) fn fixed_versions(vuln: &Value, pkg: &OsvPackage) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let affected = vuln["affected"].as_array().into_iter().flatten();
     for a in affected {

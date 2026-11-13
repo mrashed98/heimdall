@@ -6,7 +6,9 @@ use clap::{Args, Parser, Subcommand};
 use heimdall::auth::{CreateKeyRequest, CreateKeyResponse, KeyInfo, Scope};
 use heimdall::client::Client;
 use heimdall::config::HeimdallConfig;
-use heimdall::model::OathKind;
+use heimdall::gate::{self, GateResponse};
+use heimdall::ingest::manifests::direct_name_keys;
+use heimdall::model::{OathKind, Severity};
 use heimdall::oath::{ExtendBody, NewOathBody, Oath};
 
 #[derive(Parser)]
@@ -30,8 +32,8 @@ enum Command {
         /// Path to heimdall.yaml
         config: Option<PathBuf>,
     },
-    /// Hofund: CI gate
-    Gate,
+    /// Hofund: CI gate. Exit 0 pass, 1 fail, 2 unverified or server unreachable
+    Gate(GateArgs),
     /// Oaths (suppressions)
     Oath {
         #[command(subcommand)]
@@ -48,6 +50,31 @@ enum Command {
     ScanImages,
     /// Realms
     Realms,
+}
+
+#[derive(Args)]
+struct GateArgs {
+    /// Service name
+    #[arg(long)]
+    service: String,
+    /// Realm
+    #[arg(long)]
+    realm: String,
+    /// CycloneDX JSON SBOM
+    #[arg(long)]
+    sbom: PathBuf,
+    /// Lowest severity that fails the build
+    #[arg(long, value_parser = gate::parse_severity)]
+    fail_on: Severity,
+    /// Where go.mod / package.json files are read for direct dependencies
+    #[arg(long, default_value = ".")]
+    repo_root: PathBuf,
+    /// Branch being built (default: $GITHUB_REF_NAME)
+    #[arg(long)]
+    branch: Option<String>,
+    /// Repository default branch (default: from $GITHUB_EVENT_PATH)
+    #[arg(long)]
+    default_branch: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -195,6 +222,67 @@ async fn oaths(action: OathAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
+    use anyhow::Context;
+    let branch = args
+        .branch
+        .or_else(|| {
+            std::env::var("GITHUB_REF_NAME")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .context("--branch is required when GITHUB_REF_NAME is not set")?;
+    let default_branch = match args.default_branch {
+        Some(d) => Some(d),
+        None => match std::env::var("GITHUB_EVENT_PATH")
+            .ok()
+            .filter(|p| !p.is_empty())
+        {
+            Some(p) => gate::default_branch_from_event(std::path::Path::new(&p))?,
+            None => None,
+        },
+    }
+    .context(
+        "--default-branch is required when $GITHUB_EVENT_PATH has no repository.default_branch",
+    )?;
+
+    let text = std::fs::read_to_string(&args.sbom)
+        .with_context(|| format!("reading {}", args.sbom.display()))?;
+    let sbom: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not JSON", args.sbom.display()))?;
+    let direct = direct_name_keys(&args.repo_root)?;
+
+    let fail_on = serde_json::to_value(args.fail_on)?;
+    let enc = Client::encode_segment;
+    let path = format!(
+        "/api/v1/gate?service={}&realm={}&branch={}&default_branch={}&fail_on={}",
+        enc(&args.service),
+        enc(&args.realm),
+        enc(&branch),
+        enc(&default_branch),
+        enc(fail_on.as_str().unwrap_or_default()),
+    );
+    let client = Client::from_env()?;
+    let body = serde_json::json!({ "sbom": sbom, "direct": direct });
+    client.post_json(&path, &body).await
+}
+
+fn print_gate(r: &GateResponse) {
+    if !r.findings.is_empty() {
+        print!("{}", gate::table(&r.findings));
+    }
+    for purl in &r.unverified {
+        println!("unverified: {purl}");
+    }
+    let verdict = serde_json::to_value(r.verdict).unwrap_or_default();
+    let source = serde_json::to_value(r.source).unwrap_or_default();
+    println!(
+        "hofund: {} (checked against {})",
+        verdict.as_str().unwrap_or("?"),
+        source.as_str().unwrap_or("?")
+    );
+}
+
 async fn keys(action: KeysAction) -> anyhow::Result<()> {
     let client = Client::from_env()?;
     match action {
@@ -239,6 +327,18 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Command::Gate(args) => match run_gate(args).await {
+            Ok(r) => {
+                print_gate(&r);
+                ExitCode::from(gate::exit_code(r.verdict))
+            }
+            // Unreachable server, HTTP error or bad input: the build cannot be
+            // vouched for, which is "unverified", never "pass".
+            Err(e) => {
+                eprintln!("hofund: {e:#}");
+                ExitCode::from(2)
+            }
+        },
         Command::Keys { action } => match keys(action).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

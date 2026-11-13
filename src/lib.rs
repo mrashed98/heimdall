@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod gate;
 pub mod ingest;
 pub mod inventory;
 pub mod matcher;

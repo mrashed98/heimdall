@@ -20,7 +20,7 @@ use crate::purl::name_key;
 use crate::AppState;
 
 /// Ingest bodies (SBOMs can be big) are capped at 50 MB.
-const BODY_LIMIT: usize = 50 * 1024 * 1024;
+pub const BODY_LIMIT: usize = 50 * 1024 * 1024;
 
 /// What Sight (the cluster scanner) posts: every service it saw in a realm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,12 +47,24 @@ pub struct ClusterItem {
     pub via_image_digest: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct SbomQuery {
-    service: String,
-    realm: String,
-    branch: String,
-    default_branch: String,
+/// Where an SBOM upload belongs. Shared with the gate (Hofund).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SbomQuery {
+    pub service: String,
+    pub realm: String,
+    pub branch: String,
+    pub default_branch: String,
+}
+
+/// What one SBOM upload did to the inventory.
+#[derive(Debug, Clone)]
+pub struct IngestOutcome {
+    pub source: Source,
+    pub added: usize,
+    pub removed: usize,
+    pub skipped_without_purl: usize,
+    /// Every component purl in the SBOM, in SBOM order.
+    pub purls: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -99,14 +111,32 @@ async fn ingest_sbom(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Ingest)?;
-    check_realm(&state, &q.realm)?;
-    let upload: SbomUpload = serde_json::from_slice(&body)
+    let out = ingest_sbom_inner(&state, &q, &body).await?;
+    Ok(Json(serde_json::json!({
+        "source": out.source,
+        "added": out.added,
+        "removed": out.removed,
+        "skipped_without_purl": out.skipped_without_purl,
+    })))
+}
+
+/// The SBOM upload itself, shared by `/ingest/sbom` and the gate: check the
+/// realm, parse `{"sbom": ..., "direct": [...]}` and replace the service's
+/// git (default branch) or ci component set. The caller checks the scope.
+pub async fn ingest_sbom_inner(
+    state: &AppState,
+    q: &SbomQuery,
+    body: &[u8],
+) -> Result<IngestOutcome, ApiError> {
+    check_realm(state, &q.realm)?;
+    let upload: SbomUpload = serde_json::from_slice(body)
         .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?;
     // Re-serialize the embedded object so the one SBOM parser is used everywhere.
     let sbom_bytes = serde_json::to_vec(&upload.sbom).map_err(anyhow::Error::from)?;
     let parsed = sbom::parse(&sbom_bytes).map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
 
     let direct: HashSet<&str> = upload.direct.iter().map(|s| s.as_str()).collect();
+    let purls: Vec<String> = parsed.components.iter().map(|c| c.purl.clone()).collect();
     let items: Vec<InventoryItem> = parsed
         .components
         .into_iter()
@@ -125,12 +155,13 @@ async fn ingest_sbom(
     };
     let service_id = upsert_service(&state.pool, &q.realm, &q.service).await?;
     let report = replace_components(&state.pool, service_id, source, &items).await?;
-    Ok(Json(serde_json::json!({
-        "source": source,
-        "added": report.added,
-        "removed": report.removed,
-        "skipped_without_purl": parsed.skipped_without_purl,
-    })))
+    Ok(IngestOutcome {
+        source,
+        added: report.added,
+        removed: report.removed,
+        skipped_without_purl: parsed.skipped_without_purl,
+        purls,
+    })
 }
 
 async fn ingest_cluster(
