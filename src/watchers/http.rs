@@ -54,3 +54,10 @@ pub(super) fn etag_of(resp: &Response) -> Option<String> {
 pub(super) fn is_not_found(err: &anyhow::Error) -> bool {
     err.to_string().contains("HTTP 404")
 }
+
+/// True when `err` is a 403 or 429: GitHub's answers to an exhausted rate
+/// limit. Asking again in the same run would only make it worse.
+pub(super) fn is_rate_limited(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("HTTP 403") || text.contains("HTTP 429")
+}
