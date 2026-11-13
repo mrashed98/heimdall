@@ -1,0 +1,3 @@
+# OSV and NVD without local mirrors
+
+We check every component against both OSV and NVD, but mirror neither: full mirrors are several GB and would break the 1 GB budget. OSV is queried in batches for the components we actually run; NVD is pulled incrementally (CVEs changed since the last check, every 2 h) and matched locally against component CPEs, with a one-off backfill per unique product. Only matching advisories are stored. A CVE found in both counts once (by CVE ID) and the higher severity wins. NVD-only matches on libraries are alerted but labelled "verify", because CPE matching produces false positives.
