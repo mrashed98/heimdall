@@ -262,7 +262,9 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
         enc(&default_branch),
         enc(fail_on.as_str().unwrap_or_default()),
     );
-    let client = Client::from_env()?;
+    // The server answers within ~60 s; 120 s leaves room for the upload.
+    // A timeout is an error, so it exits 2 like an unreachable server.
+    let client = Client::from_env()?.with_timeout(std::time::Duration::from_secs(120))?;
     let body = serde_json::json!({ "sbom": sbom, "direct": direct });
     client.post_json(&path, &body).await
 }

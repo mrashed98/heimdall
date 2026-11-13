@@ -22,7 +22,7 @@ use crate::ingest::api::{ingest_sbom_inner, SbomQuery, BODY_LIMIT};
 use crate::model::Severity;
 use crate::purl::{name_key, osv_package, OsvPackage};
 use crate::vuln::ghsa::{self, GhsaClient};
-use crate::vuln::osv::{self, OsvClient};
+use crate::vuln::osv::{self, OsvClient, OsvHit};
 use crate::vuln::severity;
 use crate::{oath, version, AppState};
 
@@ -30,6 +30,8 @@ use crate::{oath, version, AppState};
 const TOTAL_BUDGET: Duration = Duration::from_secs(60);
 /// OSV gets most of it; the rest is left for the GHSA fallback.
 const OSV_BUDGET: Duration = Duration::from_secs(40);
+/// OSV record downloads in flight at once.
+const FETCH_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,20 +139,24 @@ pub async fn run(
     let checked = checkable(&outcome.purls);
     let pool = &state.pool;
 
-    // `timeout` drops the OSV future when the budget runs out, which also
-    // cancels any retry backoff sleeping inside it.
-    let osv_result =
-        tokio::time::timeout(clients.osv_budget, osv_hits(pool, &clients.osv, &checked)).await;
-    let (source, hits, unverified) = match osv_result {
-        Ok(Ok(hits)) => (CheckSource::Osv, hits, Vec::new()),
-        Ok(Err(e)) => {
-            eprintln!("gate: osv failed ({e:#}); falling back to the github advisory db");
+    // Only OSV's own answer decides between OSV and the fallback. `timeout`
+    // drops the query when the budget runs out, which also cancels any retry
+    // backoff sleeping inside it.
+    let pkgs: Vec<OsvPackage> = checked.iter().map(|c| c.pkg.clone()).collect();
+    let batch = tokio::time::timeout(clients.osv_budget, clients.osv.query_batch(&pkgs)).await;
+    let (source, hits, unverified) = match batch {
+        Ok(Ok(all)) => {
+            // OSV has answered: from here on its hits are kept whatever fails.
             let left = clients.total_budget.saturating_sub(started.elapsed());
-            let (hits, unverified) = ghsa_hits(pool, clients.ghsa.as_ref(), &checked, left).await?;
-            (CheckSource::Ghsa, hits, unverified)
+            let (hits, unverified) = osv_hits(pool, &clients.osv, &checked, &all, left).await?;
+            (CheckSource::Osv, hits, unverified)
         }
-        Err(_) => {
-            eprintln!("gate: osv timed out; falling back to the github advisory db");
+        failed => {
+            let why = match failed {
+                Ok(Err(e)) => format!("failed ({e:#})"),
+                _ => "timed out".to_string(),
+            };
+            eprintln!("gate: osv {why}; falling back to the github advisory db");
             let left = clients.total_budget.saturating_sub(started.elapsed());
             let (hits, unverified) = ghsa_hits(pool, clients.ghsa.as_ref(), &checked, left).await?;
             (CheckSource::Ghsa, hits, unverified)
@@ -234,16 +240,19 @@ struct Stored {
     has_nvd: bool,
 }
 
-/// Ask OSV live. Records are fetched only when the stored row is missing,
-/// older than OSV's `modified`, or lacks this component's fixed versions.
+/// Turn OSV's answer into hits. Records are fetched only when the stored row
+/// is missing, older than OSV's `modified`, or lacks this component's fixed
+/// versions. A hit is never dropped: when its record cannot be fetched in
+/// time, the stored row's severity is used, and without a stored row the hit
+/// is kept as unknown and its purl is reported unverified. Returns the hits
+/// and the unverified purls; a database error is an `Err`.
 async fn osv_hits(
     pool: &PgPool,
     client: &OsvClient,
     checked: &[Checked],
-) -> anyhow::Result<Vec<Hit>> {
-    let pkgs: Vec<OsvPackage> = checked.iter().map(|c| c.pkg.clone()).collect();
-    let all = client.query_batch(&pkgs).await?;
-
+    all: &[Vec<OsvHit>],
+    budget: Duration,
+) -> anyhow::Result<(Vec<Hit>, Vec<String>)> {
     let ids: Vec<String> = all
         .iter()
         .flatten()
@@ -262,49 +271,121 @@ async fn osv_hits(
     .map(|s| (s.id.clone(), s))
     .collect();
 
-    let mut records: HashMap<String, Value> = HashMap::new();
+    // (advisory, component) pairs, deduplicated, with what the stored row
+    // can tell us without a fetch.
     let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut out = Vec::new();
-    for (c, hits) in checked.iter().zip(&all) {
+    let mut pairs: Vec<Pair> = Vec::new();
+    for (c, hits) in checked.iter().zip(all) {
         for hit in hits {
             if !seen.insert((hit.id.clone(), c.purl.clone())) {
                 continue;
             }
-            let st = stored.get(&hit.id);
-            let reusable = st.filter(|s| s.modified >= hit.modified).and_then(|s| {
-                let fixed: Vec<String> =
-                    serde_json::from_value(s.fixed.get(&c.name_key)?.clone()).ok()?;
-                Some((s.severity, fixed))
-            });
-            let (sev, fixed_versions) = match reusable {
-                Some(x) => x,
-                None => {
-                    if !records.contains_key(&hit.id) {
-                        let rec = client.get(&hit.id).await?;
-                        records.insert(hit.id.clone(), rec);
-                    }
-                    let rec = &records[&hit.id];
-                    let mut sev = severity::normalize(rec);
-                    // NVD may have raised it; a fresh OSV record must not lower it.
-                    if let Some(s) = st.filter(|s| s.has_nvd) {
-                        sev = severity::merge(sev, s.severity);
-                    }
-                    (sev, osv::fixed_versions(rec, &c.pkg))
-                }
-            };
-            let fixed_refs: Vec<&str> = fixed_versions.iter().map(String::as_str).collect();
-            out.push(Hit {
-                advisory: hit.id.clone(),
-                severity: sev,
-                purl: c.purl.clone(),
-                name_key: c.name_key.clone(),
-                fixed: version::recommend_fix(&c.pkg.ecosystem, &c.pkg.version, &fixed_refs)
-                    .map(|a| a.suggest),
-                oath_ids: vec![hit.id.clone()],
-            });
+            let reusable = stored
+                .get(&hit.id)
+                .filter(|s| s.modified >= hit.modified)
+                .and_then(|s| Some((s.severity, stored_fixed(s, &c.name_key)?)));
+            pairs.push(Pair { c, hit, reusable });
         }
     }
-    Ok(out)
+    let to_fetch: Vec<String> = pairs
+        .iter()
+        .filter(|p| p.reusable.is_none())
+        .map(|p| p.hit.id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let records = fetch_records(client, to_fetch, budget).await;
+
+    let mut out = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
+    for Pair { c, hit, reusable } in pairs {
+        let st = stored.get(&hit.id);
+        let (sev, fixed_versions) = match (reusable, records.get(&hit.id)) {
+            (Some(x), _) => x,
+            (None, Some(rec)) => {
+                let mut sev = severity::normalize(rec);
+                // NVD may have raised it; a fresh OSV record must not lower it.
+                if let Some(s) = st.filter(|s| s.has_nvd) {
+                    sev = severity::merge(sev, s.severity);
+                }
+                (sev, osv::fixed_versions(rec, &c.pkg))
+            }
+            // The record could not be read: fall back on what is stored.
+            (None, None) => match st {
+                Some(s) => (s.severity, stored_fixed(s, &c.name_key).unwrap_or_default()),
+                None => {
+                    if !unverified.contains(&c.purl) {
+                        unverified.push(c.purl.clone());
+                    }
+                    (Severity::Unknown, Vec::new())
+                }
+            },
+        };
+        let fixed_refs: Vec<&str> = fixed_versions.iter().map(String::as_str).collect();
+        out.push(Hit {
+            advisory: hit.id.clone(),
+            severity: sev,
+            purl: c.purl.clone(),
+            name_key: c.name_key.clone(),
+            fixed: version::recommend_fix(&c.pkg.ecosystem, &c.pkg.version, &fixed_refs)
+                .map(|a| a.suggest),
+            oath_ids: vec![hit.id.clone()],
+        });
+    }
+    Ok((out, unverified))
+}
+
+/// One advisory on one component, with what the stored row can tell us
+/// without a fetch (severity, fixed versions).
+struct Pair<'a> {
+    c: &'a Checked,
+    hit: &'a OsvHit,
+    reusable: Option<(Severity, Vec<String>)>,
+}
+
+/// The stored fixed versions for one component, if the row has its key.
+fn stored_fixed(s: &Stored, name_key: &str) -> Option<Vec<String>> {
+    serde_json::from_value(s.fixed.get(name_key)?.clone()).ok()
+}
+
+/// Fetch OSV records, `FETCH_CONCURRENCY` at a time, until `budget` runs
+/// out. Records that fail or are still pending at the deadline are left out
+/// of the map; the caller decides what a missing record means.
+async fn fetch_records(
+    client: &OsvClient,
+    ids: Vec<String>,
+    budget: Duration,
+) -> HashMap<String, Value> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut out = HashMap::new();
+    let mut queue = ids.into_iter();
+    // Spawned tasks must own what they use, hence the client clone per task
+    // (cheap: reqwest clients share one connection pool).
+    let mut running = tokio::task::JoinSet::new();
+    loop {
+        while running.len() < FETCH_CONCURRENCY {
+            let Some(id) = queue.next() else { break };
+            let client = client.clone();
+            running.spawn(async move {
+                let rec = client.get(&id).await;
+                (id, rec)
+            });
+        }
+        match tokio::time::timeout_at(deadline, running.join_next()).await {
+            Ok(None) => break,
+            Ok(Some(Ok((id, Ok(rec))))) => {
+                out.insert(id, rec);
+            }
+            Ok(Some(Ok((id, Err(e))))) => eprintln!("gate: osv record {id}: {e:#}"),
+            Ok(Some(Err(e))) => eprintln!("gate: osv record fetch task failed: {e}"),
+            Err(_) => {
+                // Dropping the JoinSet aborts the fetches still running.
+                eprintln!("gate: osv record fetches ran out of time");
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The fallback. Returns the hits and the purls nothing vouched for:
@@ -693,6 +774,100 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Fail);
         assert_eq!(r.findings[0].severity, Severity::Critical);
         assert_eq!(r.findings[0].fixed.as_deref(), Some("1.9.1"));
+    }
+
+    /// OSV's querybatch reports ADV for widget, but its record cannot be read.
+    async fn osv_hit_without_record() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [{"id": ADV, "modified": "2026-05-01T00:00:00Z"}]}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/vulns/{ADV}")))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn osv_hit_with_failed_record_fetch_is_not_pass(pool: PgPool) {
+        let osv = osv_hit_without_record().await;
+        let gh = ghsa_with(json!([])).await;
+        let r = run(
+            &state(pool),
+            &clients(&osv, Some(&gh)),
+            &query(Severity::High),
+            &body(&[NPM]),
+        )
+        .await
+        .unwrap();
+        assert_ne!(r.verdict, Verdict::Pass);
+        assert_eq!(r.verdict, Verdict::Unverified);
+        assert_eq!(r.source, CheckSource::Osv);
+        assert_eq!(r.unverified, vec![NPM.to_string()]);
+        assert_eq!(r.findings.len(), 1);
+        assert_eq!(r.findings[0].advisory, ADV);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn failed_record_fetch_uses_stored_severity(pool: PgPool) {
+        let osv = osv_hit_without_record().await;
+        // Stored row is older than OSV's `modified`, so a refetch is wanted.
+        sqlx::query(
+            "insert into advisories (id, severity, source, modified, fixed) \
+             values ($1, 'high', 'osv', '2026-01-01T00:00:00Z', '{\"pkg:npm/widget\": [\"1.9.1\"]}')",
+        )
+        .bind(ADV)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = run(
+            &state(pool),
+            &clients(&osv, None),
+            &query(Severity::High),
+            &body(&[NPM]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.verdict, Verdict::Fail);
+        assert_eq!(r.findings[0].severity, Severity::High);
+        assert_eq!(r.findings[0].fixed.as_deref(), Some("1.9.1"));
+        assert!(r.unverified.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn slow_record_fetch_is_bounded_and_kept(pool: PgPool) {
+        let osv = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [{"id": ADV, "modified": "2026-05-01T00:00:00Z"}]}]
+            })))
+            .mount(&osv)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({}))
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&osv)
+            .await;
+        let mut c = clients(&osv, None);
+        c.total_budget = Duration::from_millis(500);
+        let started = Instant::now();
+        let r = run(&state(pool), &c, &query(Severity::High), &body(&[NPM]))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(r.source, CheckSource::Osv);
+        assert_eq!(r.verdict, Verdict::Unverified);
+        assert_eq!(r.findings.len(), 1);
     }
 
     #[sqlx::test(migrations = "./migrations")]

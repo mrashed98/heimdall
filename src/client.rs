@@ -23,6 +23,15 @@ impl Client {
         })
     }
 
+    /// Bound every request made through this client (connect to body).
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> anyhow::Result<Client> {
+        self.http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("building http client")?;
+        Ok(self)
+    }
+
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         let req = self.http.get(self.url(path));
         self.send(req).await
