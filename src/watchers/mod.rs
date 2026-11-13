@@ -9,9 +9,13 @@
 //! 3. opens and resolves findings in one transaction.
 //!
 //! Finding lifecycle (the matcher never touches these kinds):
-//! - MajorRelease (`major_release|target|version`): one per target and major
-//!   line, for the first release of the line. Resolves when the running
-//!   version reaches that major, or when the target leaves the inventory.
+//! - MajorRelease (`major_release|target|version`): at most one per target and
+//!   major line, for the first release of the line. When one run finds several
+//!   new lines (first sight of 16 -> 17, 18) only the highest alerts and the
+//!   lower ones are marked done (`kv` `majorlines_done|<target>`). Resolves
+//!   when the running version reaches that major, or when the target leaves
+//!   the inventory. Go majors are separate modules (`/v2`), so the next one
+//!   is probed as well.
 //! - Eol (`eol|realm|target|cycle`): the realm runs a cycle whose end of
 //!   support is within 60 days. Resolves when the realm stops running it.
 //!
@@ -345,7 +349,13 @@ async fn fetch_target(
             kind,
             source,
         } => tf_registry::fetch(http, &registry_base(ep, registry)?, *kind, source, etag).await?,
-        Origin::GoProxy { module } => go_proxy::fetch(http, &ep.go_proxy, module, etag).await?,
+        Origin::GoProxy { module } => {
+            let mut f = go_proxy::fetch(http, &ep.go_proxy, module, etag).await?;
+            // Asked every run (no ETag): the next major is a separate module.
+            f.releases
+                .extend(go_proxy::fetch_next_major(http, &ep.go_proxy, module).await?);
+            f
+        }
         Origin::Npm { name } => npm::fetch(http, &ep.npm, name, etag).await?,
     };
 

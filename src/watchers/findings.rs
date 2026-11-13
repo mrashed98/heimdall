@@ -69,7 +69,8 @@ async fn open_majors(
             .bind(&t.name)
             .fetch_all(&mut *tx)
             .await?;
-    let done: HashSet<String> = sqlx::query_scalar::<_, Option<String>>(
+    // Lines already alerted (a finding of any status) or passed over.
+    let mut done: HashSet<String> = sqlx::query_scalar::<_, Option<String>>(
         "SELECT details->>'line' FROM findings WHERE kind = 'majorrelease' AND details->>'target' = $1",
     )
     .bind(&t.name)
@@ -78,6 +79,14 @@ async fn open_majors(
     .into_iter()
     .flatten()
     .collect();
+    let done_key = format!("majorlines_done|{}", t.name);
+    let passed_over: Option<String> = sqlx::query_scalar("SELECT value FROM kv WHERE key = $1")
+        .bind(&done_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(json) = passed_over {
+        done.extend(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default());
+    }
     let current_suffix = parse_tag(current).map(|c| c.suffix);
 
     // line -> lowest version in it
@@ -103,8 +112,33 @@ async fn open_majors(
         }
     }
 
+    // Only the highest new line alerts (first sight of 16 -> 17, 18 says
+    // "18 is out", once); the lower ones are marked done so they never do.
+    let mut highest: Option<(String, String)> = None;
+    for (line, version) in &lines {
+        let higher = highest.as_ref().is_none_or(|(_, h)| {
+            compare(t.kind.ecosystem(), version, h) == Some(Ordering::Greater)
+        });
+        if higher {
+            highest = Some((line.clone(), version.clone()));
+        }
+    }
+    if !lines.is_empty() {
+        done.extend(lines.keys().cloned());
+        let mut all: Vec<&String> = done.iter().collect();
+        all.sort();
+        sqlx::query(
+            "INSERT INTO kv (key, value) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&done_key)
+        .bind(serde_json::to_string(&all)?)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     let mut opened = Vec::new();
-    for (line, version) in lines {
+    if let Some((line, version)) = highest {
         let details = json!({
             "target": t.name,
             "watcher": t.kind.label(),

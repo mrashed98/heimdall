@@ -210,12 +210,22 @@ pub fn is_prerelease(v: &str) -> bool {
     let v = v.strip_prefix('v').unwrap_or(v);
     let (_, rest) = split_numeric(v);
     let rest = rest.split('+').next().unwrap_or("").to_ascii_lowercase();
-    // Any word of the tail that names a pre-release stage.
-    rest.split(|c: char| !c.is_ascii_alphabetic())
-        .any(|word| PRERELEASE_WORDS.contains(&word))
+    // Any word of the tail that names a pre-release stage. A lone `a`/`b`
+    // counts only before a digit (`1.0a1`): OpenSSL's `1.1.1a` is a release.
+    rest.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|chunk| {
+            let word_len = chunk
+                .find(|c: char| !c.is_ascii_alphabetic())
+                .unwrap_or(chunk.len());
+            let (word, after) = chunk.split_at(word_len);
+            match word {
+                "a" | "b" => after.starts_with(|c: char| c.is_ascii_digit()),
+                w => PRERELEASE_WORDS.contains(&w),
+            }
+        })
 }
 
-const PRERELEASE_WORDS: [&str; 8] = ["a", "b", "rc", "alpha", "beta", "pre", "preview", "dev"];
+const PRERELEASE_WORDS: [&str; 6] = ["rc", "alpha", "beta", "pre", "preview", "dev"];
 
 /// The major line a version belongs to: its first `major_component + 1`
 /// numbers, one more for a 0.x version (`17.0-alpine` -> `17`,
@@ -422,6 +432,9 @@ mod tests {
         // Patch letters and vendor suffixes are not pre-releases.
         assert!(!is_prerelease("9.6p1"));
         assert!(!is_prerelease("1.1.1t"));
+        // OpenSSL letter releases: a lone a/b is only a pre-release before a digit.
+        assert!(!is_prerelease("1.1.1a"));
+        assert!(!is_prerelease("1.1.1b"));
         assert!(!is_prerelease("24.8.4.13-lts"));
         assert!(!is_prerelease("1.2.3.4"));
     }

@@ -2,8 +2,10 @@
 //! Kubernetes project). Every realm running Kubernetes or k3s gets one K8sCve
 //! finding per feed entry. These findings are one-shot: never resolved here.
 
+use std::collections::BTreeSet;
+
 use anyhow::Context;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -20,6 +22,9 @@ pub const FEED_PATH: &str = "/docs/reference/issues-security/official-cve-feed/i
 
 /// The components that mean a realm runs Kubernetes.
 const KUBERNETES_KEYS: [&str; 2] = ["pkg:generic/kubernetes", "pkg:generic/k3s"];
+
+/// On a realm's first sight of the feed, only items this recent alert.
+const FIRST_SIGHT_DAYS: i64 = 90;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct K8sCve {
@@ -63,10 +68,16 @@ pub async fn fetch(http: &Client, base: &Url) -> anyhow::Result<Vec<K8sCve>> {
         .collect())
 }
 
-/// Open a High K8sCve finding (`k8s_cve|realm|id`) for each CVE this realm
-/// has no finding for yet, when the realm runs Kubernetes or k3s. Returns the
-/// new finding ids. Takes the realm's matcher lock so it never races the
+/// Open a High K8sCve finding (`k8s_cve|realm|id`) for each feed CVE this
+/// realm has not seen, when the realm runs Kubernetes or k3s. Returns the new
+/// finding ids. Takes the realm's matcher lock so it never races the
 /// matcher's writes.
+///
+/// Seen ids live in `kv` under `k8sfeed_seen|<realm>` (a JSON array). On the
+/// realm's first sight of the feed only items published in the last 90 days
+/// alert (undated items count as old), so years of history do not flood
+/// Teams; every item is recorded as seen. After that, any unseen item alerts,
+/// however old.
 pub async fn run(
     pool: &PgPool,
     realm: &str,
@@ -86,8 +97,27 @@ pub async fn run(
         return Ok(Vec::new());
     }
 
+    let seen_key = format!("k8sfeed_seen|{realm}");
+    let stored: Option<String> = sqlx::query_scalar("SELECT value FROM kv WHERE key = $1")
+        .bind(&seen_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let first_sight = stored.is_none();
+    let mut seen: BTreeSet<String> = match stored {
+        Some(json) => serde_json::from_str(&json).context("k8s feed seen ids")?,
+        None => BTreeSet::new(),
+    };
+    let recent_since = now - Duration::days(FIRST_SIGHT_DAYS);
+
     let mut opened = Vec::new();
     for cve in cves {
+        // `insert` is false for an id seen before.
+        if !seen.insert(cve.id.clone()) {
+            continue;
+        }
+        if first_sight && !cve.published.is_some_and(|p| p >= recent_since) {
+            continue;
+        }
         let details = json!({
             "id": cve.id,
             "summary": cve.summary,
@@ -111,6 +141,14 @@ pub async fn run(
         .await?;
         opened.extend(id);
     }
+    sqlx::query(
+        "INSERT INTO kv (key, value) VALUES ($1, $2) \
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(&seen_key)
+    .bind(serde_json::to_string(&seen)?)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(opened)
 }
@@ -187,5 +225,44 @@ mod tests {
                 .unwrap();
         assert_eq!(keys.len(), 3);
         assert!(keys.contains(&("k8s_cve|dev|CVE-2026-116472".into(), "high".into())));
+    }
+
+    fn cve(id: &str, published: Option<DateTime<Utc>>) -> K8sCve {
+        K8sCve {
+            id: id.to_string(),
+            summary: String::new(),
+            url: String::new(),
+            published,
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn first_sight_skips_items_older_than_90_days(pool: PgPool) {
+        component(&pool, "dev", "pkg:generic/kubernetes@1.31.2").await;
+        let now = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+        let days = |d: i64| Some(now - chrono::Duration::days(d));
+        let first = vec![
+            cve("CVE-OLD-1", days(200)),
+            cve("CVE-RECENT", days(10)),
+            cve("CVE-UNDATED", None),
+        ];
+        let opened = run(&pool, "dev", &first, now).await.unwrap();
+        assert_eq!(
+            opened.len(),
+            1,
+            "only the recent item alerts on first sight"
+        );
+        let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM findings")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(keys, ["k8s_cve|dev|CVE-RECENT"]);
+
+        // After the first sight, an unseen item alerts however old it is;
+        // the old ones recorded as seen stay quiet.
+        let mut second = first.clone();
+        second.push(cve("CVE-OLD-2", days(300)));
+        assert_eq!(run(&pool, "dev", &second, now).await.unwrap().len(), 1);
+        assert!(run(&pool, "dev", &second, now).await.unwrap().is_empty());
     }
 }

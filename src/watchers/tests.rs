@@ -283,6 +283,7 @@ async fn oci_tags_handshake_and_paging() {
         .and(header("authorization", "Bearer t0k"))
         .respond_with(
             ResponseTemplate::new(200)
+                .insert_header("etag", "\"p1\"")
                 .insert_header(
                     "link",
                     "</v2/library/postgres/tags/list?last=10.0&n=20>; rel=\"next\"",
@@ -316,6 +317,32 @@ async fn oci_tags_handshake_and_paging() {
     let tags: Vec<&str> = got.releases.iter().map(|r| r.version.as_str()).collect();
     assert_eq!(tags.first(), Some(&"10"));
     assert_eq!(&tags[tags.len() - 2..], ["17.0", "17.0-alpine"]);
+    // Page 1's ETag says nothing about page 2, so none is kept.
+    assert_eq!(got.etag, None);
+}
+
+#[tokio::test]
+async fn oci_single_page_keeps_etag() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/acme/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("etag", "\"one\"")
+                .set_body_json(json!({"tags": ["1.0.0"]})),
+        )
+        .mount(&server)
+        .await;
+    let got = oci::tags(
+        &reqwest::Client::new(),
+        &base(&server),
+        "acme/app",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(got.etag.as_deref(), Some("\"one\""));
 }
 
 #[test]
@@ -630,4 +657,114 @@ async fn zero_x_minor_is_major(pool: PgPool) {
         open_keys(&pool, "majorrelease").await,
         ["major_release|pkg:npm/left-pad|0.4.0"]
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn first_sight_opens_only_highest_major_line(pool: PgPool) {
+    components(&pool, "dev", "web", &[("pkg:npm/x@16.0.0", true)]).await;
+    let server = MockServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = endpoints(&server);
+    let mount = |versions: Value| {
+        let server = &server;
+        async move {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/x"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"versions": versions})),
+                )
+                .mount(server)
+                .await;
+        }
+    };
+    mount(json!({"17.0.0": {}, "17.1.0": {}, "18.0.0": {}})).await;
+    run_with(&pool, &http, &cfg(ONE_REALM), &ep, now())
+        .await
+        .unwrap();
+    assert_eq!(
+        open_keys(&pool, "majorrelease").await,
+        ["major_release|pkg:npm/x|18.0.0"]
+    );
+    // Line 17 was marked done on first sight: a later 17.x stays quiet.
+    mount(json!({"17.0.0": {}, "17.1.0": {}, "17.2.0": {}, "18.0.0": {}})).await;
+    run_with(&pool, &http, &cfg(ONE_REALM), &ep, now())
+        .await
+        .unwrap();
+    assert_eq!(
+        open_keys(&pool, "majorrelease").await,
+        ["major_release|pkg:npm/x|18.0.0"]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn go_next_major_module_probed(pool: PgPool) {
+    components(
+        &pool,
+        "dev",
+        "svc",
+        &[("pkg:golang/github.com/foo/bar@v1.5.0", true)],
+    )
+    .await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/github.com/foo/bar/@v/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v1.5.0\nv1.6.0\n"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/github.com/foo/bar/v2/@v/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v2.0.0\n"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let report = run_with(
+        &pool,
+        &reqwest::Client::new(),
+        &cfg(ONE_REALM),
+        &endpoints(&server),
+        now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.failures, BTreeMap::new());
+    assert_eq!(
+        open_keys(&pool, "majorrelease").await,
+        ["major_release|pkg:golang/github.com/foo/bar|v2.0.0"]
+    );
+}
+
+#[test]
+fn go_next_major_paths() {
+    assert_eq!(
+        go_proxy::next_major_module("github.com/foo/bar"),
+        "github.com/foo/bar/v2"
+    );
+    assert_eq!(
+        go_proxy::next_major_module("github.com/foo/bar/v2"),
+        "github.com/foo/bar/v3"
+    );
+    assert_eq!(
+        go_proxy::next_major_module("github.com/foo/v2go"),
+        "github.com/foo/v2go/v2"
+    );
+}
+
+#[tokio::test]
+async fn go_next_major_absent_is_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/github.com/foo/bar/v2/@v/list"))
+        .respond_with(ResponseTemplate::new(410))
+        .mount(&server)
+        .await;
+    let got = go_proxy::fetch_next_major(
+        &reqwest::Client::new(),
+        &base(&server),
+        "github.com/foo/bar",
+    )
+    .await
+    .unwrap();
+    assert!(got.is_empty());
 }

@@ -64,10 +64,15 @@ pub async fn tags(
         bail!("{what}: HTTP {}", resp.status());
     }
 
-    let new_etag = etag_of(&resp);
+    // Page 1's ETag only vouches for page 1: a new tag on a later page would
+    // hide behind a 304. So it is kept only when the list is a single page.
+    let mut new_etag = etag_of(&resp);
     let mut tags = Vec::new();
     for page in 1.. {
         let next = next_link(&resp);
+        if next.is_some() {
+            new_etag = None;
+        }
         let list: TagList = resp.json().await.with_context(|| format!("{what}: body"))?;
         tags.extend(list.tags.unwrap_or_default());
         let Some(next) = next else { break };
