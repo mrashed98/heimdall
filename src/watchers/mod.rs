@@ -6,7 +6,9 @@
 //!    the inventory, plus the targets configured under `watchers:`;
 //! 2. fetches each target on its own (a failure is logged and counted, the
 //!    rest go on) and stores releases newer than the version we run;
-//! 3. opens and resolves findings in one transaction.
+//! 3. opens and resolves findings in one transaction;
+//! 4. fetches and classifies the notes of new releases (`notes`), which can
+//!    open ReleaseNoteCve findings.
 //!
 //! Finding lifecycle (the matcher never touches these kinds):
 //! - MajorRelease (`major_release|target|version`): at most one per target and
@@ -27,6 +29,7 @@ pub mod github;
 pub mod go_proxy;
 pub mod helm;
 mod http;
+mod notes;
 pub mod npm;
 pub mod oci;
 mod plan;
@@ -149,6 +152,7 @@ pub struct Endpoints {
     pub endoflife: Url,
     pub npm: Url,
     pub go_proxy: Url,
+    pub artifacthub: Url,
     /// Replaces every OCI and Terraform registry host (tests only).
     pub registry_override: Option<Url>,
 }
@@ -161,6 +165,7 @@ impl Default for Endpoints {
             endoflife: url("https://endoflife.date"),
             npm: url("https://registry.npmjs.org"),
             go_proxy: url("https://proxy.golang.org"),
+            artifacthub: url("https://artifacthub.io"),
             registry_override: None,
         }
     }
@@ -265,6 +270,12 @@ pub async fn run_with(
     let (opened, resolved) = update_findings(pool, cfg, &planned, &running, &cycles, now).await?;
     report.opened = opened;
     report.resolved = resolved;
+
+    // Release notes are best effort: a failure here must not lose the run.
+    match notes::run(pool, http, cfg, ep, &planned, now).await {
+        Ok(note_findings) => report.opened.extend(note_findings),
+        Err(e) => eprintln!("warning: release notes: {e:#}"),
+    }
     Ok(report)
 }
 

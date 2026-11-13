@@ -1,0 +1,5 @@
+{
+  "tag_name": "v2.0.0",
+  "html_url": "https://github.com/acme/widget/releases/tag/v2.0.0",
+  "body": "## Breaking changes\n\n- The `--legacy` flag is removed\n- Config key `port` is now `listen.port`\n\n## Features\n\n- New plugin API\n- BREAKING: minimum Go version is 1.22\n"
+}

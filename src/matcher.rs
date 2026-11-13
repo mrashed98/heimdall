@@ -33,7 +33,7 @@ pub fn key(kind: FindingKind, parts: &[&str]) -> String {
         FindingKind::MajorRelease => "major_release",
         FindingKind::Eol => "eol",
         FindingKind::K8sCve => "k8s_cve",
-        FindingKind::ReleaseNoteCve => "release_note_cve",
+        FindingKind::ReleaseNoteCve => "relnote",
     };
     let mut all = vec![prefix];
     all.extend_from_slice(parts);

@@ -732,6 +732,7 @@ dependencies = [
  "http-body-util",
  "packageurl",
  "rand 0.8.8",
+ "regex",
  "reqwest",
  "semver",
  "serde",

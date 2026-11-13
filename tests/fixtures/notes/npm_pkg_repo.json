@@ -1,0 +1,9 @@
+{
+  "name": "vue",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vuejs/core.git"
+  },
+  "versions": {},
+  "time": {}
+}

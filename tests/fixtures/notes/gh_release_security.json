@@ -1,0 +1,5 @@
+{
+  "tag_name": "v1.2.3",
+  "html_url": "https://github.com/acme/widget/releases/tag/v1.2.3",
+  "body": "## Security\r\n\r\n- Fixes CVE-2026-1234, a request smuggling flaw in the parser\r\n- See also GHSA-c2c2-f3f3-g4g4\r\n\r\n## Other\r\n\r\n- Updated docs\r\n"
+}

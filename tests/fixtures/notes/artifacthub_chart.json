@@ -1,0 +1,10 @@
+{
+  "package_id": "00000000-0000-0000-0000-000000000000",
+  "name": "kube-prometheus-stack",
+  "version": "65.1.0",
+  "changes": [
+    {"kind": "changed", "description": "Update Grafana to 11.2"},
+    {"kind": "fixed", "description": "Alertmanager config reload on secret change"},
+    {"kind": "security", "description": "Bump base image to address CVE-2026-1234"}
+  ]
+}

@@ -47,3 +47,10 @@ pub(super) fn etag_of(resp: &Response) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
 }
+
+/// True when `err` came from a 404. The retry helper reports every non-2xx
+/// status as `"{what}: HTTP 404 Not Found"`, so the text is all there is to
+/// match on. Used where a missing page is an answer, not a failure.
+pub(super) fn is_not_found(err: &anyhow::Error) -> bool {
+    err.to_string().contains("HTTP 404")
+}

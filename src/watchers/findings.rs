@@ -156,6 +156,7 @@ async fn open_majors(
                 FindingKind::MajorRelease,
                 realm,
                 &version,
+                Severity::High,
                 &details,
                 now,
             )
@@ -243,7 +244,17 @@ async fn eol_findings(
                 "latest": cycle.latest,
             });
             opened.extend(
-                open_finding(tx, &k, FindingKind::Eol, realm, &cycle.cycle, &details, now).await?,
+                open_finding(
+                    tx,
+                    &k,
+                    FindingKind::Eol,
+                    realm,
+                    &cycle.cycle,
+                    Severity::High,
+                    &details,
+                    now,
+                )
+                .await?,
             );
         }
     }
@@ -284,14 +295,17 @@ fn running_cycle<'a>(cycles: &'a [Cycle], version: &str) -> Option<&'a Cycle> {
         .max_by_key(|c| c.cycle.len())
 }
 
-/// Insert a High finding, or re-open a resolved one with the same key.
-/// Returns its id when it is a new occurrence (None when already open).
-async fn open_finding(
+/// Insert a finding, or re-open a resolved one with the same key. Returns its
+/// id when it is a new occurrence (None when already open). The columns are
+/// all separate arguments on purpose: a one-use struct would hide them.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn open_finding(
     tx: &mut PgConnection,
     k: &str,
     kind: FindingKind,
     realm: &str,
     ref_id: &str,
+    severity: Severity,
     details: &Value,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Option<i64>> {
@@ -307,7 +321,7 @@ async fn open_finding(
     .bind(kind)
     .bind(realm)
     .bind(ref_id)
-    .bind(Severity::High)
+    .bind(severity)
     .bind(details)
     .bind(now)
     .fetch_optional(&mut *tx)

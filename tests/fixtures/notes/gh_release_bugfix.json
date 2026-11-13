@@ -1,0 +1,5 @@
+{
+  "tag_name": "v1.2.4",
+  "html_url": "https://github.com/acme/widget/releases/tag/v1.2.4",
+  "body": "## Bug Fixes\n\n* Correct off-by-one in pager\n* Handle empty config file\n\n## Chores\n\n* Bump dev dependencies\n"
+}

@@ -30,6 +30,7 @@ fn endpoints(server: &MockServer) -> Endpoints {
         endoflife: b.clone(),
         npm: b.clone(),
         go_proxy: b.clone(),
+        artifacthub: b.clone(),
         registry_override: Some(b),
     }
 }

@@ -2,13 +2,15 @@
 //! bearer-token handshake (Docker Hub answers 401 and names `auth.docker.io`)
 //! and `Link`-header paging.
 
+use std::collections::HashMap;
+
 use anyhow::{bail, Context};
-use reqwest::header::{IF_NONE_MATCH, LINK, USER_AGENT, WWW_AUTHENTICATE};
+use reqwest::header::{ACCEPT, IF_NONE_MATCH, LINK, USER_AGENT, WWW_AUTHENTICATE};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use url::Url;
 
-use super::http::{endpoint, etag_of, get};
+use super::http::{endpoint, etag_of, get, is_not_found};
 use super::{Fetched, ReleaseInfo, UA};
 use crate::config::RegistryCred;
 use crate::vuln::retry;
@@ -100,6 +102,131 @@ pub async fn tags(
         etag: new_etag,
         not_modified: false,
     })
+}
+
+/// Manifest types we can read; an index (multi-arch image) lists manifests.
+const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
+    application/vnd.docker.distribution.manifest.list.v2+json, \
+    application/vnd.oci.image.manifest.v1+json, \
+    application/vnd.docker.distribution.manifest.v2+json";
+
+#[derive(Deserialize)]
+struct Descriptor {
+    digest: String,
+}
+
+/// A manifest has a `config`; an index has `manifests` instead.
+#[derive(Deserialize)]
+struct Manifest {
+    config: Option<Descriptor>,
+    manifests: Option<Vec<Descriptor>>,
+}
+
+#[derive(Deserialize)]
+struct ImageConfig {
+    config: Option<ConfigSection>,
+}
+
+#[derive(Deserialize)]
+struct ConfigSection {
+    #[serde(rename = "Labels")]
+    labels: Option<HashMap<String, String>>,
+}
+
+/// The value of image label `label` for `repository:tag`: manifest, then the
+/// config blob it names, then the blob's `config.Labels`. `Ok(None)` when the
+/// image, the blob or the label is not there.
+pub async fn image_label(
+    http: &Client,
+    base: &Url,
+    repository: &str,
+    tag: &str,
+    label: &str,
+    creds: Option<&RegistryCred>,
+) -> anyhow::Result<Option<String>> {
+    let what = format!("oci {repository}:{tag}");
+    let manifest_url = endpoint(base, &format!("v2/{repository}/manifests/{tag}"))?;
+
+    // Same handshake as `tags`: an unauthenticated probe, whose 401 names the
+    // token service. The token then serves the manifest and the blob.
+    let probe = http
+        .get(manifest_url.clone())
+        .header(USER_AGENT, UA)
+        .header(ACCEPT, MANIFEST_ACCEPT)
+        .send()
+        .await
+        .with_context(|| format!("{what}: request failed"))?;
+    let token = match probe.status() {
+        StatusCode::UNAUTHORIZED => Some(bearer_token(http, &probe, repository, creds).await?),
+        StatusCode::NOT_FOUND => return Ok(None),
+        s if !s.is_success() => bail!("{what}: HTTP {s}"),
+        _ => None,
+    };
+
+    let Some(mut manifest) = manifest_at(http, &what, manifest_url, token.as_deref()).await? else {
+        return Ok(None);
+    };
+    // Any platform's manifest carries the same source label: take the first.
+    if let Some(first) = manifest.manifests.as_ref().and_then(|m| m.first()) {
+        let url = endpoint(base, &format!("v2/{repository}/manifests/{}", first.digest))?;
+        match manifest_at(http, &what, url, token.as_deref()).await? {
+            Some(m) => manifest = m,
+            None => return Ok(None),
+        }
+    }
+    let Some(config) = manifest.config else {
+        return Ok(None);
+    };
+    let blob_url = endpoint(base, &format!("v2/{repository}/blobs/{}", config.digest))?;
+    let resp = match retry::send(&what, || {
+        let req = http.get(blob_url.clone()).header(USER_AGENT, UA);
+        match token.as_deref() {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) if is_not_found(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let image: ImageConfig = resp
+        .json()
+        .await
+        .with_context(|| format!("{what}: config"))?;
+    Ok(image
+        .config
+        .and_then(|c| c.labels)
+        .and_then(|mut l| l.remove(label)))
+}
+
+async fn manifest_at(
+    http: &Client,
+    what: &str,
+    url: Url,
+    token: Option<&str>,
+) -> anyhow::Result<Option<Manifest>> {
+    let sent = retry::send(what, || {
+        let req = http
+            .get(url.clone())
+            .header(USER_AGENT, UA)
+            .header(ACCEPT, MANIFEST_ACCEPT);
+        match token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    })
+    .await;
+    match sent {
+        Ok(resp) => Ok(Some(
+            resp.json()
+                .await
+                .with_context(|| format!("{what}: manifest"))?,
+        )),
+        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Answer a `WWW-Authenticate: Bearer realm=..,service=..,scope=..` challenge.
