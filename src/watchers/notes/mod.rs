@@ -32,7 +32,7 @@ use crate::config::HeimdallConfig;
 use crate::matcher::key;
 use crate::model::{FindingKind, Severity};
 use classify::{classify, Classified, NotesClass};
-use source::{fetch, locate};
+use source::{fetch, locate, NotesSource};
 
 /// Releases looked at per target per run: the newest by publish time. A first
 /// sight can store hundreds of versions; the rest follow on later runs, since
@@ -61,8 +61,8 @@ struct Hit<'a> {
 /// Fetch, classify and store notes for every release of the watched targets
 /// that has none yet, and open ReleaseNoteCve findings. Returns the ids of
 /// the findings it opened. A failure for one target or release is logged and
-/// counted against it; only database errors propagate. A 403 or 429 ends the
-/// whole run (the rate limit is shared by every target).
+/// counted against it; only database errors propagate. A 403 or 429 from GitHub
+/// ends the whole run (the rate limit is shared by every GitHub target).
 pub(super) async fn run(
     pool: &PgPool,
     http: &Client,
@@ -91,10 +91,9 @@ pub(super) async fn run(
         let source = match locate(p, http, ep, cfg).await {
             Ok(s) => s,
             Err(e) => {
+                // Locating asks npm, a registry or Artifact Hub, never GitHub:
+                // a 403 here is this target's problem, not a rate limit.
                 eprintln!("warning: release notes {name}: {e:#}");
-                if is_rate_limited(&e) {
-                    break 'targets;
-                }
                 record_failure(pool, name, &pending).await?;
                 continue 'targets;
             }
@@ -105,12 +104,15 @@ pub(super) async fn run(
                     Ok(n) => n,
                     Err(e) => {
                         eprintln!("warning: release notes {name} {version}: {e:#}");
-                        if is_rate_limited(&e) {
+                        // Not a 404: count it, and leave the rest of this
+                        // target for the next run.
+                        record_failure(pool, name, std::slice::from_ref(version)).await?;
+                        // GitHub's rate limit is shared by every GitHub
+                        // target, so asking more only makes it worse. Any
+                        // other source's 403 is just that target failing.
+                        if matches!(src, NotesSource::GithubRepo(_)) && is_rate_limited(&e) {
                             break 'targets;
                         }
-                        // Not a 404: the source is in trouble, so leave the
-                        // rest of this target for the next run.
-                        record_failure(pool, name, std::slice::from_ref(version)).await?;
                         continue 'targets;
                     }
                 },
@@ -521,9 +523,47 @@ mod tests {
         run_gh(&pool, &server, &["widget", "gadget"]).await;
         // One request in all: the second target is not even tried.
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
-        // A rate limit is not the release's fault.
-        assert_eq!(attempts(&pool, "1.2.3").await, 0);
+        // The attempt is still counted, so a permanent 403 reaches the ceiling.
+        assert_eq!(attempts(&pool, "1.2.3").await, 1);
         assert_eq!(attempts(&pool, "2.0.0").await, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn non_github_403_counts_and_continues(pool: PgPool) {
+        let server = MockServer::start().await;
+        // Target A's npm lookup is refused; B's GitHub notes do not exist.
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        add_release(&pool, "pkg:npm/a", "1.1.0").await;
+        add_release(&pool, "widget", "1.2.3").await;
+        let a = planned(
+            "pkg:npm/a",
+            WatchKind::Npm,
+            Origin::Npm {
+                name: "a".to_string(),
+            },
+        );
+        run(
+            &pool,
+            &Client::new(),
+            &cfg(),
+            &endpoints(&server),
+            &[a, gh_planned("widget")],
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts(&pool, "1.1.0").await, 1);
+        // B was still processed (no release found: class none).
+        let class: Option<String> =
+            sqlx::query_scalar("SELECT notes_class FROM releases WHERE version = '1.2.3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(class.as_deref(), Some("none"));
     }
 
     #[sqlx::test(migrations = "./migrations")]
