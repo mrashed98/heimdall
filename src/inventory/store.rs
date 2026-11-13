@@ -176,21 +176,55 @@ pub async fn store_image_sbom(
     Ok(())
 }
 
-/// Image digests that services reference but that have no SBOM yet, with the
-/// purl of a referencing component (the image itself) as its reference.
+/// Image digests that services reference but that have no SBOM yet, each with
+/// a pullable reference `{repository_url}@{digest}`. The repository comes from
+/// the `repository_url` qualifier of a referencing `pkg:oci` purl; digests
+/// with no such purl are skipped with a warning.
 pub async fn pending_image_digests(pool: &PgPool) -> anyhow::Result<Vec<(String, String)>> {
-    let rows = sqlx::query_as(
-        "SELECT sc.via_image_digest, min(c.purl) \
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT sc.via_image_digest, c.purl \
          FROM service_components sc \
          JOIN components c ON c.id = sc.component_id \
          WHERE sc.via_image_digest IS NOT NULL \
            AND NOT EXISTS (SELECT 1 FROM image_sboms i WHERE i.digest = sc.via_image_digest) \
-         GROUP BY sc.via_image_digest \
-         ORDER BY sc.via_image_digest",
+         ORDER BY sc.via_image_digest, c.purl",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+
+    // Rows are sorted by purl within a digest, so the first usable one is
+    // deterministic.
+    let mut by_digest: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for (digest, purl) in rows {
+        let entry = by_digest.entry(digest.clone()).or_insert(None);
+        if entry.is_none() {
+            *entry = oci_repository(&purl).map(|repo| format!("{repo}@{digest}"));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (digest, image_ref) in by_digest {
+        match image_ref {
+            Some(r) => out.push((digest, r)),
+            None => eprintln!(
+                "warning: no pkg:oci purl with repository_url references {digest}; skipping"
+            ),
+        }
+    }
+    Ok(out)
+}
+
+/// The `repository_url` qualifier of a `pkg:oci` purl, if present.
+fn oci_repository(purl: &str) -> Option<String> {
+    let parsed = PackageUrl::from_str(purl).ok()?;
+    if parsed.ty() != "oci" {
+        return None;
+    }
+    // The parser percent-decodes qualifier values.
+    parsed
+        .qualifiers()
+        .get("repository_url")
+        .map(|v| v.to_string())
 }
 
 /// Apply declared components: one replace (source declared) per service.
@@ -207,10 +241,20 @@ pub async fn sync_declared(pool: &PgPool, declared: &[DeclaredComponent]) -> any
                 via_image_digest: None,
             });
     }
+    let mut kept_services: Vec<i64> = Vec::new();
     for ((realm, service), items) in by_service {
         let service_id = upsert_service(pool, &realm, &service).await?;
         replace_components(pool, service_id, Source::Declared, &items).await?;
+        kept_services.push(service_id);
     }
+    // Services dropped from the declared list lose their declared rows
+    // (an empty list clears them all).
+    sqlx::query(
+        "DELETE FROM service_components WHERE source = 'declared' AND service_id <> ALL($1)",
+    )
+    .bind(&kept_services)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -320,7 +364,13 @@ mod tests {
             .await
             .unwrap();
         let pending = pending_image_digests(&pool).await.unwrap();
-        assert!(pending.iter().any(|(d, _)| d == "sha256:d1"));
+        assert_eq!(
+            pending,
+            vec![(
+                "sha256:d1".to_string(),
+                "ghcr.io/o/app@sha256:d1".to_string()
+            )]
+        );
 
         let openssl = "pkg:deb/debian/openssl@3.0.11?distro=debian-12".to_string();
         store_image_sbom(
@@ -430,5 +480,80 @@ mod tests {
         assert_eq!(effective_purls(&pool, "prod").await, set(&[A, B]));
         sync_declared(&pool, &[decl(A)]).await.unwrap();
         assert_eq!(effective_purls(&pool, "prod").await, set(&[A]));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pending_skips_digest_without_repository_url(pool: PgPool) {
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        let image = InventoryItem {
+            purl: "pkg:oci/app@sha256%3Ad2".to_string(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: Some("sha256:d2".to_string()),
+        };
+        replace_components(&pool, svc, Source::Cluster, &[image])
+            .await
+            .unwrap();
+        assert!(pending_image_digests(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn sync_declared_removes_dropped_services(pool: PgPool) {
+        let decl = |realm: &str, service: &str, purl: &str| DeclaredComponent {
+            realm: realm.into(),
+            service: service.into(),
+            purl: purl.into(),
+        };
+        sync_declared(
+            &pool,
+            &[
+                decl("prod", "api", A),
+                decl("prod", "web", B),
+                decl("dev", "api", C),
+            ],
+        )
+        .await
+        .unwrap();
+        sync_declared(&pool, &[decl("prod", "api", A)])
+            .await
+            .unwrap();
+        assert_eq!(effective_purls(&pool, "prod").await, set(&[A]));
+        assert!(effective_purls(&pool, "dev").await.is_empty());
+        sync_declared(&pool, &[]).await.unwrap();
+        assert!(effective_purls(&pool, "prod").await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn empty_items_clears_service_source(pool: PgPool) {
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        replace_components(&pool, svc, Source::Git, &[item(A), item(B)])
+            .await
+            .unwrap();
+        replace_components(&pool, svc, Source::Cluster, &[item(C)])
+            .await
+            .unwrap();
+        let report = replace_components(&pool, svc, Source::Git, &[])
+            .await
+            .unwrap();
+        assert_eq!((report.added, report.removed), (0, 2));
+        assert_eq!(effective_purls(&pool, "prod").await, set(&[C]));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn failed_replace_rolls_back(pool: PgPool) {
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        replace_components(&pool, svc, Source::Git, &[item(A), item(B)])
+            .await
+            .unwrap();
+        let result =
+            replace_components(&pool, svc, Source::Git, &[item(C), item("not a purl")]).await;
+        assert!(result.is_err());
+        assert_eq!(effective_purls(&pool, "prod").await, set(&[A, B]));
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM components WHERE purl = $1")
+            .bind(C)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "component insert must roll back too");
     }
 }
