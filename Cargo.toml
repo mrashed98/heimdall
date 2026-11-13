@@ -18,6 +18,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 packageurl = "0.7.1"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
