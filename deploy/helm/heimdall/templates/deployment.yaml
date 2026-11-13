@@ -49,13 +49,13 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.otlpEndpoint | quote }}
           {{- end }}
+          # Liveness must not depend on Postgres: a database blip would
+          # restart-loop the pod. /healthz (which pings the DB) is readiness only.
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
-            timeoutSeconds: 8
           readinessProbe:
             httpGet:
               path: /healthz

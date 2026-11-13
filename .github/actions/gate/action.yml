@@ -19,6 +19,9 @@ inputs:
   api-key:
     description: API key with ingest scope.
     required: true
+  repository:
+    description: GitHub repository (owner/name) that publishes the heimdall release binaries.
+    default: ${{ github.action_repository }}
   version:
     description: Heimdall release to download (a tag such as v0.1.0, or latest).
     default: latest
@@ -29,12 +32,13 @@ runs:
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
-        REPO: ${{ github.action_repository }}
+        REPO: ${{ inputs.repository }}
         GH_TOKEN: ${{ github.token }}
         RUNNER_OS_NAME: ${{ runner.os }}
         RUNNER_ARCH_NAME: ${{ runner.arch }}
       run: |
         set -euo pipefail
+        [ -n "$REPO" ] || { echo "heimdall gate: the 'repository' input is empty (github.action_repository is not set for local or some runner uses). Set repository: owner/name." >&2; exit 2; }
         [ "$RUNNER_OS_NAME" = "Linux" ] || { echo "heimdall gate supports Linux runners only" >&2; exit 2; }
         case "$RUNNER_ARCH_NAME" in
           X64) arch=amd64 ;;

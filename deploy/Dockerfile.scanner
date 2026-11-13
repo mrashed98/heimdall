@@ -12,13 +12,16 @@ RUN cargo build --release --locked --bin heimdall
 
 # --- runtime: alpine + pinned syft + heimdall ---
 FROM alpine:3.22
-# Pinned release; checksum from syft_1.57.1_checksums.txt on the GitHub release.
-# For arm64 override both: --build-arg SYFT_ARCH=arm64
-#   --build-arg SYFT_SHA256=aa3d3e07344f590bcce8d31043b752daa76c8a56c2aa34ceeee63c6168152582
+# Pinned release; checksums from syft_1.57.1_checksums.txt on the GitHub release.
+# TARGETARCH is set by buildx (amd64 or arm64); plain `docker build` sets it too.
 ARG SYFT_VERSION=1.57.1
-ARG SYFT_ARCH=amd64
-ARG SYFT_SHA256=bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c
+ARG TARGETARCH
 RUN apk add --no-cache ca-certificates curl \
+ && case "${TARGETARCH:-amd64}" in \
+      amd64) SYFT_ARCH=amd64; SYFT_SHA256=bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c ;; \
+      arm64) SYFT_ARCH=arm64; SYFT_SHA256=aa3d3e07344f590bcce8d31043b752daa76c8a56c2aa34ceeee63c6168152582 ;; \
+      *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
  && curl -fsSL -o /tmp/syft.tgz \
     "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${SYFT_ARCH}.tar.gz" \
  && echo "${SYFT_SHA256}  /tmp/syft.tgz" | sha256sum -c - \

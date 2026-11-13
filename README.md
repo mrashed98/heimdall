@@ -146,7 +146,7 @@ helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace \
 What the chart creates:
 
 - Deployment (1 replica, non-root, read-only root filesystem, `/tmp` emptyDir,
-  limits 1Gi/1 CPU, requests 256Mi/100m, probes on `/healthz`), Service on
+  limits 1Gi/1 CPU, requests 256Mi/100m, readiness on `/healthz`, liveness a TCP check so a database outage does not restart the pod), Service on
   port 8080 (named `http`), ConfigMap holding `config:` as `heimdall.yaml`.
 - ClusterRole: read-only `get`/`list` on pods, nodes, deployments,
   statefulsets, daemonsets, replicasets, ArgoCD Applications, and `get` on
@@ -154,7 +154,7 @@ What the chart creates:
 - CronJob `scan-images` (default `0 */6 * * *`, `concurrencyPolicy: Forbid`,
   its own resources). For private registries set
   `scanImages.dockerConfigSecret` to a `kubernetes.io/dockerconfigjson` Secret.
-- ServiceMonitor scraping `/metrics` (`serviceMonitor.enabled`, default true).
+- ServiceMonitor scraping `/metrics` (`serviceMonitor.enabled`, default true; only rendered when the Prometheus Operator CRD `monitoring.coreos.com/v1` exists in the cluster).
 - Ingress, only when `ingress.enabled=true` (default false).
 
 Set `otlpEndpoint` to export traces to an OTel collector. The scanner reaches
@@ -304,6 +304,7 @@ and `GITHUB_EVENT_PATH`. Linux runners only.
 | `fail-on` | `high` | Lowest severity that fails the build. |
 | `heimdall-url` | required | e.g. `http://heimdall.heimdall.svc:8080`. |
 | `api-key` | required | An ingest-scope key (store it as a GitHub secret). |
+| `repository` | the action's own repo | `owner/name` that publishes the release binaries. Set it when the action is used locally (`uses: ./...`) and the default is empty. |
 | `version` | `latest` | Release tag of the binary to download. |
 
 ```yaml

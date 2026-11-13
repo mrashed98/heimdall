@@ -87,12 +87,11 @@ jobs:
           tags: |
             ${{ steps.meta.outputs.repo }}:${{ github.ref_name }}
             ${{ steps.meta.outputs.repo }}:latest
-      # The scanner is amd64 only (its syft checksum is pinned per architecture).
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile.scanner
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ steps.meta.outputs.repo }}-scanner:${{ github.ref_name }}
