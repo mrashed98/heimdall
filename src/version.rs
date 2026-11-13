@@ -28,7 +28,8 @@ pub fn compare(ecosystem: &str, a: &str, b: &str) -> Option<Ordering> {
     // Go, npm and everything else: lenient semver (strips `v`, pads `X.Y`).
     let a = lenient_semver(a)?;
     let b = lenient_semver(b)?;
-    Some(a.cmp(&b))
+    // Precedence ignores build metadata (`+incompatible`, `+k3s1`), as SemVer requires.
+    Some(a.cmp_precedence(&b))
 }
 
 /// Split `s` into its numeric `X[.Y[.Z]]` prefix and the rest.
