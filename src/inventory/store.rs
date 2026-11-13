@@ -274,8 +274,10 @@ pub async fn sync_declared(pool: &PgPool, declared: &[DeclaredComponent]) -> any
 /// What a realm actually runs: direct rows from git/cluster/declared (CI is
 /// excluded) plus the components of images those rows reference. A component
 /// reached by several routes appears once, direct if any route is direct.
+/// Takes any executor (pool or open transaction) so the matcher can read it
+/// inside its transaction.
 pub async fn effective_components(
-    pool: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     realm: &str,
 ) -> anyhow::Result<Vec<EffectiveComponent>> {
     let rows = sqlx::query_as(
@@ -299,7 +301,7 @@ pub async fn effective_components(
          ORDER BY service, purl",
     )
     .bind(realm)
-    .fetch_all(pool)
+    .fetch_all(db)
     .await?;
     Ok(rows)
 }

@@ -172,8 +172,10 @@ async fn add_event(
 /// Only `active` oaths whose date is still ahead of `now` count, so a lapsed
 /// oath stops suppressing even if the scheduler is late. `process_expiries`
 /// stays the one place that changes status, so each expiry is announced once.
+/// Takes any executor (pool or open transaction) so the matcher can read it
+/// inside its transaction.
 pub async fn active_for(
-    pool: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     advisory_id: &str,
     name_key: &str,
     service_name: &str,
@@ -193,15 +195,20 @@ pub async fn active_for(
         .bind(service_name)
         .bind(realm)
         .bind(now)
-        .fetch_optional(pool)
+        .fetch_optional(db)
         .await?;
     Ok(found)
 }
 
 /// Retire every active oath that is due at `now` and return those oaths.
 /// One UPDATE ... RETURNING does the selecting and the marking, so two
-/// processes running at once cannot both get the same oath.
-pub async fn process_expiries(pool: &PgPool, now: DateTime<Utc>) -> anyhow::Result<Vec<Oath>> {
+/// processes running at once cannot both get the same oath. It runs on the
+/// caller's connection so the matcher can roll the expiry back together with
+/// its findings: an expiry is never lost to a failed run.
+pub async fn process_expiries(
+    conn: &mut sqlx::PgConnection,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<Oath>> {
     let sql = format!(
         "WITH due AS ( \
              UPDATE oaths SET status = 'expired' \
@@ -217,7 +224,7 @@ pub async fn process_expiries(pool: &PgPool, now: DateTime<Utc>) -> anyhow::Resu
     );
     let due = sqlx::query_as::<_, Oath>(&sql)
         .bind(now)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await?;
     Ok(due)
 }
@@ -573,27 +580,37 @@ mod tests {
         let snooze_id = create(&pool, snooze(1)).await.unwrap();
         let ignore_id = create(&pool, req(OathKind::Ignore)).await.unwrap();
         // Not yet due.
-        assert!(process_expiries(&pool, Utc::now())
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            process_expiries(&mut pool.acquire().await.unwrap(), Utc::now())
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // Heimdall was down for a while: only the snooze is due 10 days on.
         let later = Utc::now() + Duration::days(10);
-        let due = process_expiries(&pool, later).await.unwrap();
+        let due = process_expiries(&mut pool.acquire().await.unwrap(), later)
+            .await
+            .unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, snooze_id);
         assert_eq!(due[0].status, "expired");
-        assert!(process_expiries(&pool, later).await.unwrap().is_empty());
+        assert!(process_expiries(&mut pool.acquire().await.unwrap(), later)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             events(&pool, snooze_id).await.last().unwrap(),
             &("expired".to_string(), "heimdall".to_string())
         );
 
         // Ignore comes up for review at 90 days.
-        let due = process_expiries(&pool, Utc::now() + Duration::days(91))
-            .await
-            .unwrap();
+        let due = process_expiries(
+            &mut pool.acquire().await.unwrap(),
+            Utc::now() + Duration::days(91),
+        )
+        .await
+        .unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].id, ignore_id);
         // Expired oaths no longer suppress.
@@ -708,9 +725,12 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn extend_reactivates_expired_and_rejects_bad_input(pool: PgPool) {
         let id = create(&pool, snooze(1)).await.unwrap();
-        process_expiries(&pool, Utc::now() + Duration::days(5))
-            .await
-            .unwrap();
+        process_expiries(
+            &mut pool.acquire().await.unwrap(),
+            Utc::now() + Duration::days(5),
+        )
+        .await
+        .unwrap();
         assert_eq!(get(&pool, id).await.status, "expired");
 
         let past = extend(&pool, id, today(), "bob").await.unwrap_err();

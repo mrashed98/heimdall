@@ -69,29 +69,36 @@ struct Wanted {
 /// Bring the realm's findings up to date at `now`:
 /// 1. Vuln and FixAvailable findings from effective components and their
 ///    linked advisories (an active oath is recorded in `details.oath`).
-/// 2. An OathExpired finding for every oath that lapsed.
+/// 2. An OathExpired finding for every lapsed oath whose advisory still
+///    applies to the oath's component and service.
 /// 3. Upsert all of them by key, and resolve open Vuln/FixAvailable findings
 ///    of this realm that were not produced.
 ///
-/// OathExpired findings are one-shot and never resolved here. MajorRelease,
-/// Eol, K8sCve and ReleaseNoteCve belong to the watchers and are left alone.
+/// Everything happens in one transaction, so a failed run also rolls back the
+/// oath expiries and the next run expires them again. OathExpired findings are
+/// one-shot and never resolved here. MajorRelease, Eol, K8sCve and
+/// ReleaseNoteCve belong to the watchers and are left alone.
 pub async fn run(pool: &PgPool, realm: &str, now: DateTime<Utc>) -> anyhow::Result<MatchReport> {
+    let mut tx = pool.begin().await?;
+    // Several loops call the matcher. Runs for one realm wait for each other
+    // here, so each reads the state the previous one committed and they never
+    // race to insert the same key. The lock is released at commit or rollback.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('matcher:' || $1))")
+        .bind(realm)
+        .execute(&mut *tx)
+        .await?;
+
     let mut wanted: BTreeMap<String, Wanted> = BTreeMap::new();
-    for w in component_findings(pool, realm, now).await? {
+    for w in component_findings(&mut tx, realm, now).await? {
         // Two versions of one package in one service share a key; the first
         // (lowest purl) wins so the finding does not flip between runs.
         wanted.entry(w.key.clone()).or_insert(w);
     }
-
-    // Expiries are processed last, right before the write, because each
-    // expired oath is handed out only once: the less that can fail between
-    // here and the commit, the smaller the chance of losing one.
-    let expired = oath::process_expiries(pool, now).await?;
-    for w in expiry_findings(pool, realm, &expired).await? {
+    let expired = oath::process_expiries(&mut tx, now).await?;
+    for w in expiry_findings(&mut tx, realm, &expired).await? {
         wanted.insert(w.key.clone(), w);
     }
 
-    let mut tx = pool.begin().await?;
     let opened = upsert(&mut tx, &wanted, now).await?;
     let keys: Vec<&String> = wanted.keys().collect();
     let resolved = sqlx::query(
@@ -112,11 +119,11 @@ pub async fn run(pool: &PgPool, realm: &str, now: DateTime<Utc>) -> anyhow::Resu
 
 /// Vuln and FixAvailable findings for every effective component of the realm.
 async fn component_findings(
-    pool: &PgPool,
+    tx: &mut PgConnection,
     realm: &str,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Wanted>> {
-    let components = effective_components(pool, realm).await?;
+    let components = effective_components(&mut *tx, realm).await?;
     let ids: Vec<i64> = components.iter().map(|c| c.component_id).collect();
     let links: Vec<Link> = sqlx::query_as(
         "SELECT ca.component_id, c.version, ca.advisory_id, ca.match_source, \
@@ -128,7 +135,7 @@ async fn component_findings(
          ORDER BY ca.component_id, ca.advisory_id",
     )
     .bind(&ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
     let mut by_component: HashMap<i64, Vec<Link>> = HashMap::new();
     for l in links {
@@ -138,9 +145,15 @@ async fn component_findings(
     let mut out = Vec::new();
     for c in &components {
         for link in by_component.get(&c.component_id).into_iter().flatten() {
-            let oath =
-                oath::active_for(pool, &link.advisory_id, &c.name_key, &c.service, realm, now)
-                    .await?;
+            let oath = oath::active_for(
+                &mut *tx,
+                &link.advisory_id,
+                &c.name_key,
+                &c.service,
+                realm,
+                now,
+            )
+            .await?;
             out.extend(findings_for(realm, c, link, oath.map(|o| o.id)));
         }
     }
@@ -217,11 +230,12 @@ fn findings_for(
     out
 }
 
-/// One OathExpired finding per expired oath, with the advisory's severity.
-/// An all-realms oath has no realm of its own, so it is filed under the realm
-/// being matched.
+/// One OathExpired finding per expired oath that still matters, with the
+/// advisory's severity. An oath whose advisory no longer links its component
+/// in its service (the CVE was fixed, the component left) gets no finding;
+/// the expiry stays visible in `oath_events`.
 async fn expiry_findings(
-    pool: &PgPool,
+    tx: &mut PgConnection,
     realm: &str,
     expired: &[Oath],
 ) -> anyhow::Result<Vec<Wanted>> {
@@ -230,17 +244,20 @@ async fn expiry_findings(
         "SELECT id, severity FROM advisories WHERE id = ANY($1)",
     )
     .bind(&advisory_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?
     .into_iter()
     .collect();
 
-    Ok(expired
-        .iter()
-        .map(|o| Wanted {
+    let mut out = Vec::new();
+    for o in expired {
+        let Some(filed_in) = realm_where_oath_applies(tx, o, realm).await? else {
+            continue;
+        };
+        out.push(Wanted {
             key: key(FindingKind::OathExpired, &[&o.id.to_string()]),
             kind: FindingKind::OathExpired,
-            realm: o.realm.clone().unwrap_or_else(|| realm.to_string()),
+            realm: filed_in,
             service_id: None,
             component_id: None,
             ref_id: o.advisory_id.clone(),
@@ -258,8 +275,53 @@ async fn expiry_findings(
                 "reason": o.reason,
                 "version_at_creation": o.version_at_creation,
             }),
-        })
-        .collect())
+        });
+    }
+    Ok(out)
+}
+
+/// The realm in which the oath's advisory still links a component with the
+/// oath's name in the oath's service, or None. A realm oath checks its own
+/// realm. An all-realms oath checks every realm with a service of that name,
+/// preferring the realm being matched, then the first by name.
+async fn realm_where_oath_applies(
+    tx: &mut PgConnection,
+    o: &Oath,
+    current: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut candidates: Vec<String> = match &o.realm {
+        Some(r) => vec![r.clone()],
+        None => {
+            sqlx::query_scalar("SELECT DISTINCT realm FROM services WHERE name = $1 ORDER BY realm")
+                .bind(&o.service_name)
+                .fetch_all(&mut *tx)
+                .await?
+        }
+    };
+    if let Some(pos) = candidates.iter().position(|r| r == current) {
+        let r = candidates.remove(pos);
+        candidates.insert(0, r);
+    }
+    for r in candidates {
+        let ids: Vec<i64> = effective_components(&mut *tx, &r)
+            .await?
+            .into_iter()
+            .filter(|c| c.service == o.service_name && c.name_key == o.name_key)
+            .map(|c| c.component_id)
+            .collect();
+        let linked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM component_advisories \
+             WHERE advisory_id = $1 AND component_id = ANY($2))",
+        )
+        .bind(&o.advisory_id)
+        .bind(&ids)
+        .fetch_one(&mut *tx)
+        .await?;
+        if linked {
+            return Ok(Some(r));
+        }
+    }
+    Ok(None)
 }
 
 /// Write `wanted` by key and return the ids of new occurrences. A new key is
@@ -272,7 +334,10 @@ async fn upsert(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<i64>> {
     let keys: Vec<&String> = wanted.keys().collect();
-    // Lock the existing rows so a concurrent run cannot change them under us.
+    // Runs of one realm are already serialized by the advisory lock in `run`.
+    // FOR UPDATE also holds these rows against other writers (Gjallarhorn
+    // setting notified_at, a run of another realm) between this read and
+    // our write, so the open/resolved decision below stays true.
     let existing: HashMap<String, (i64, String)> = sqlx::query_as::<_, (String, i64, String)>(
         "SELECT key, id, status FROM findings WHERE key = ANY($1) FOR UPDATE",
     )
@@ -726,5 +791,126 @@ mod tests {
         assert_eq!(v.details["advice"], Value::Null);
         // No fixed version known, so no FixAvailable.
         assert!(of_kind(&pool, FindingKind::FixAvailable).await.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn expiry_rolls_back_with_failed_matcher_tx(pool: PgPool) {
+        seed_gin(&pool, "v1.9.0").await;
+        let now = Utc::now();
+        let oath_id = snooze(&pool, now - Duration::hours(1)).await;
+        // Make the findings write fail after process_expiries has run.
+        sqlx::query(
+            "CREATE FUNCTION fail_findings() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'boom'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_findings BEFORE INSERT ON findings \
+             FOR EACH ROW EXECUTE FUNCTION fail_findings()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(run(&pool, REALM, now).await.is_err());
+        let status: String = sqlx::query_scalar("SELECT status FROM oaths WHERE id = $1")
+            .bind(oath_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "active", "the expiry rolled back with the run");
+
+        sqlx::query("DROP TRIGGER fail_findings ON findings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run(&pool, REALM, now).await.unwrap();
+        let expired = of_kind(&pool, FindingKind::OathExpired).await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].details["oath"], json!(oath_id));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn concurrent_runs_same_realm_no_error(pool: PgPool) {
+        seed_gin(&pool, "v1.9.0").await;
+        let now = Utc::now();
+        // Several runs at once, as Task 17's loops will do. Without the realm
+        // lock they race to insert the same keys (unique violation).
+        let mut set = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            set.spawn(async move { run(&pool, REALM, now).await });
+        }
+        let mut opened = 0;
+        while let Some(res) = set.join_next().await {
+            opened += res.unwrap().unwrap().opened.len();
+        }
+        // One run inserted both findings; the others saw them committed.
+        assert_eq!(opened, 2);
+        let all = findings(&pool).await;
+        assert_eq!(all.len(), 2);
+        let mut keys: Vec<&str> = all.iter().map(|f| f.key.as_str()).collect();
+        keys.dedup();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn expired_oath_for_fixed_cve_is_silent(pool: PgPool) {
+        seed_gin(&pool, "v1.9.0").await;
+        let now = Utc::now();
+        let oath_id = snooze(&pool, now - Duration::hours(1)).await;
+        // Upgraded past the fix: OSV no longer links the component.
+        inventory(&pool, Source::Git, &[item(&gin("v1.9.1"), true)]).await;
+
+        run(&pool, REALM, now).await.unwrap();
+        assert!(of_kind(&pool, FindingKind::OathExpired).await.is_empty());
+        let (status, events): (String, i64) = sqlx::query_as(
+            "SELECT o.status, (SELECT count(*) FROM oath_events e \
+                 WHERE e.oath_id = o.id AND e.event = 'expired') \
+             FROM oaths o WHERE o.id = $1",
+        )
+        .bind(oath_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((status.as_str(), events), ("expired", 1));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn all_realms_expiry_filed_where_it_applies(pool: PgPool) {
+        // The service runs in prod (linked) and staging (not linked).
+        seed_gin(&pool, "v1.9.0").await;
+        let staging = upsert_service(&pool, "staging", SERVICE).await.unwrap();
+        replace_components(&pool, staging, Source::Git, &[item(&gin("v1.9.1"), true)])
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let oath_id: i64 = sqlx::query_scalar(
+            "INSERT INTO oaths (advisory_id, name_key, service_name, realm, kind, reason, \
+             version_at_creation, expires_at, created_by) \
+             VALUES ($1, $2, $3, NULL, 'snooze', 'not reachable', '1.9.0', $4, 'alice') \
+             RETURNING id",
+        )
+        .bind(ADV)
+        .bind(GIN_KEY)
+        .bind(SERVICE)
+        .bind(now - Duration::hours(1))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // The staging run processes the expiry, but files it under prod.
+        run(&pool, "staging", now).await.unwrap();
+        let expired = of_kind(&pool, FindingKind::OathExpired).await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].details["oath"], json!(oath_id));
+        let realm: String = sqlx::query_scalar("SELECT realm FROM findings WHERE id = $1")
+            .bind(expired[0].id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(realm, REALM);
     }
 }
