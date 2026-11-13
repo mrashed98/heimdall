@@ -18,6 +18,17 @@ pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::PgPool;
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn migrations_apply(pool: PgPool) {
+        let n: i64 = sqlx::query_scalar("select count(*) from findings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
     #[tokio::test]
     async fn connect_runs_migrations() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");

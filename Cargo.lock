@@ -524,6 +524,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "packageurl",
  "serde",
  "serde_yaml",
  "sqlx",
@@ -871,6 +872,16 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "packageurl"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7719f5f3fc6fbf28f1b6b3d1cddd43958116db8f2e6c97e520757fbb490fcbf"
+dependencies = [
+ "percent-encoding",
+ "thiserror",
+]
 
 [[package]]
 name = "parking"

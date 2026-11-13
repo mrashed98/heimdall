@@ -5,14 +5,7 @@ use chrono::Weekday;
 use chrono_tz::Tz;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
+use crate::model::Severity;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HeimdallConfig {
