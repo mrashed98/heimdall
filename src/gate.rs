@@ -516,53 +516,6 @@ pub fn parse_severity(s: &str) -> Result<Severity, String> {
         .map_err(|_| format!("unknown severity {s:?} (use critical, high, medium, low or unknown)"))
 }
 
-/// The findings as a plain-text table:
-/// severity | advisory | package | version → fixed | oath.
-pub fn table(findings: &[GateFinding]) -> String {
-    let header = [
-        "SEVERITY".to_string(),
-        "ADVISORY".to_string(),
-        "PACKAGE".to_string(),
-        "VERSION → FIXED".to_string(),
-        "OATH".to_string(),
-    ];
-    let mut rows = vec![header];
-    for f in findings {
-        let (package, current) = split_purl(&f.purl);
-        let severity = serde_json::to_value(f.severity)
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-        rows.push([
-            severity,
-            f.advisory.clone(),
-            package,
-            format!("{current} → {}", f.fixed.as_deref().unwrap_or("-")),
-            f.oath
-                .map(|id| format!("#{id}"))
-                .unwrap_or_else(|| "-".into()),
-        ]);
-    }
-    // Width in characters, not bytes, because of the arrow.
-    let mut widths = [0usize; 5];
-    for row in &rows {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.chars().count());
-        }
-    }
-    let mut out = String::new();
-    for row in &rows {
-        let cells: Vec<String> = row
-            .iter()
-            .zip(widths)
-            .map(|(cell, w)| format!("{cell:<w$}"))
-            .collect();
-        out.push_str(cells.join("  ").trim_end());
-        out.push('\n');
-    }
-    out
-}
-
 /// (name key, version) of a purl, for display.
 pub fn split_purl(purl: &str) -> (String, String) {
     let version = packageurl::PackageUrl::from_str(purl)
@@ -997,24 +950,6 @@ mod tests {
         std::fs::write(&file, r#"{"ref":"refs/heads/x"}"#).unwrap();
         assert_eq!(default_branch_from_event(&file).unwrap(), None);
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn table_has_one_row_per_finding() {
-        let t = table(&[GateFinding {
-            advisory: ADV.into(),
-            severity: Severity::High,
-            purl: NPM.into(),
-            fixed: Some("1.9.1".into()),
-            oath: Some(7),
-        }]);
-        let lines: Vec<&str> = t.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("SEVERITY"));
-        assert!(lines[1].starts_with("high"));
-        assert!(lines[1].contains("pkg:npm/widget"));
-        assert!(lines[1].contains("1.2.0 → 1.9.1"));
-        assert!(lines[1].ends_with("#7"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

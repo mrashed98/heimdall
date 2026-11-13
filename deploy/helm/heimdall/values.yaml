@@ -1,13 +1,13 @@
 # Heimdall chart values.
 
 image:
-  repository: ghcr.io/yourorg/heimdall
+  repository: ghcr.io/mrashed98/heimdall
   tag: ""            # default: the chart appVersion
   pullPolicy: IfNotPresent
 
 # The image-SBOM scanner (deploy/Dockerfile.scanner).
 scannerImage:
-  repository: ghcr.io/yourorg/heimdall-scanner
+  repository: ghcr.io/mrashed98/heimdall-scanner
   tag: ""
   pullPolicy: IfNotPresent
 

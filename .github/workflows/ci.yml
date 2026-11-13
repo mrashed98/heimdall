@@ -5,10 +5,36 @@ on:
     tags: ['v*']
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   DATABASE_URL: postgres://heimdall:heimdall@localhost:5432/heimdall
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -28,17 +54,71 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  helm:
+    runs-on: ubuntu-latest
+    env:
+      KUBECONFORM_VERSION: v0.6.7
+      CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -o kubeconform.tar.gz
+          tar -xzf kubeconform.tar.gz kubeconform
+          sudo install kubeconform /usr/local/bin/kubeconform
+      - run: helm lint deploy/helm/heimdall
+      - name: Validate manifests (no ServiceMonitor CRD)
+        run: helm template h deploy/helm/heimdall | kubeconform -strict -summary
+      - name: Validate manifests (with ServiceMonitor CRD)
+        run: |
+          helm template h deploy/helm/heimdall --api-versions monitoring.coreos.com/v1 \
+            | kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
+      - name: ClusterRole must not grant secrets (ADR 0003)
+        run: |
+          helm template h deploy/helm/heimdall --api-versions monitoring.coreos.com/v1 > rendered.yaml
+          grep -q 'kind: ClusterRole' rendered.yaml
+          awk 'BEGIN { RS = "\n---\n" } /kind: ClusterRole\n/ && /secrets/ { print "ClusterRole mentions secrets:"; print; bad = 1 } END { exit bad }' rendered.yaml
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build heimdall image (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=heimdall
+          cache-to: type=gha,mode=max,scope=heimdall
+      - name: Build scanner image (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.scanner
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=scanner
+          cache-to: type=gha,mode=max,scope=scanner
 
   # Everything below runs only for version tags (v0.1.0).
   binaries:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [fmt, clippy, test, helm, audit, docker]
     strategy:
       matrix:
         include:
@@ -61,7 +141,7 @@ jobs:
 
   images:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [fmt, clippy, test, helm, audit, docker]
     runs-on: ubuntu-latest
     permissions:
       contents: read

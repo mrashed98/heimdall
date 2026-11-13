@@ -1,5 +1,13 @@
 # Heimdall
 
+[![CI](https://github.com/mrashed98/heimdall/actions/workflows/ci.yml/badge.svg)](https://github.com/mrashed98/heimdall/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/mrashed98/heimdall)](https://github.com/mrashed98/heimdall/releases)
+[![Docs](https://img.shields.io/badge/docs-mrashed98.github.io%2Fheimdall-informational)](https://mrashed98.github.io/heimdall/)
+
+A lightweight dependency, vulnerability and release tracker for small
+Kubernetes clusters, written in Rust.
+
 Heimdall watches every dependency your team runs, in every environment, and
 warns early about vulnerabilities, new releases and end of support. It is a
 small Rust replacement for Dependency-Track: one binary, one Deployment, an
@@ -22,6 +30,20 @@ Alerts go to Microsoft Teams (Workflows webhook, Adaptive Cards), grouped per
 advisory or release so one CVE is one card, and sent once. Heimdall is **not
 exposed to the internet**: CI runs on self-hosted runners that reach the
 in-cluster Service.
+
+## Why Heimdall
+
+[OWASP Dependency-Track](https://dependencytrack.org) is the inspiration for
+this project and a great fit for large organisations. Heimdall is a lightweight
+Rust alternative for small clusters: one binary that fits in 1 GB RAM and
+1 CPU, with an external Postgres as its only state. It borrows Dependency-Track's
+core idea (keep an inventory of components and match it against advisories)
+and adds release and end-of-support watching.
+
+## Documentation
+
+Full documentation: <https://mrashed98.github.io/heimdall/>. Also see
+[GLOSSARY.md](GLOSSARY.md) and the design decisions in [docs/adr/](docs/adr/).
 
 ## Vocabulary
 
@@ -120,8 +142,8 @@ Images are built from `deploy/Dockerfile` (server, distroless, static musl
 binary) and `deploy/Dockerfile.scanner` (syft + `heimdall scan-images`).
 
 ```bash
-docker build -f deploy/Dockerfile -t ghcr.io/yourorg/heimdall:0.1.0 .
-docker build -f deploy/Dockerfile.scanner -t ghcr.io/yourorg/heimdall-scanner:0.1.0 .
+docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.1.0 .
+docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.1.0 .
 ```
 
 Create a Secret (SOPS-managed in a real setup) with these keys, then install:
@@ -137,8 +159,8 @@ Create a Secret (SOPS-managed in a real setup) with these keys, then install:
 
 ```bash
 helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace \
-  --set image.repository=ghcr.io/yourorg/heimdall \
-  --set scannerImage.repository=ghcr.io/yourorg/heimdall-scanner \
+  --set image.repository=ghcr.io/mrashed98/heimdall \
+  --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \
   --set existingSecret=heimdall-secrets \
   -f my-values.yaml
 ```
@@ -173,7 +195,7 @@ is a complete example.
 | `digest.hour` | `9` | Hour (0-23) in `digest.timezone`. |
 | `digest.timezone` | `UTC` | IANA name, e.g. `Africa/Cairo`. |
 | `admins` | `[]` | Key names allowed to hold an `admin` key (besides `bootstrap`). One key per person. Removing a name disables their admin keys on the next request. Oaths record the admin's name. |
-| `own_registries` | `[]` | Registry hosts or `host/org` prefixes (e.g. `ghcr.io/yourorg`). Those images are CVE-scanned but never release-watched. |
+| `own_registries` | `[]` | Registry hosts or `host/org` prefixes (e.g. `ghcr.io/mrashed98`). Those images are CVE-scanned but never release-watched. |
 | `teams[]` | `[]` | Teams routes. Each: `name`, `webhook_env` (name of the env var holding the webhook URL), `realms` (empty = all), `min_severity` (`critical`, `high`, `medium`, `low`). |
 | `watchers.github[]` | `[]` | `repo`, `inventory_name`, optional `major_component` (see below), optional `cpe`. |
 | `watchers.endoflife[]` | `[]` | `product`, `inventory_name`, optional `major_component`, `cpe`, and `repo` (GitHub repo for release notes). |
@@ -352,7 +374,7 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
-      - uses: yourorg/heimdall/.github/actions/gate@v0.1.0
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
         with:
           service: api
           realm: dev-k3s
@@ -363,10 +385,10 @@ jobs:
 **Monorepos:** call the action once per service, each with its own `path`:
 
 ```yaml
-      - uses: yourorg/heimdall/.github/actions/gate@v0.1.0
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
         with: { service: api, realm: dev-k3s, path: services/api,
                 heimdall-url: "${{ vars.HEIMDALL_URL }}", api-key: "${{ secrets.HEIMDALL_API_KEY }}" }
-      - uses: yourorg/heimdall/.github/actions/gate@v0.1.0
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
         with: { service: web, realm: dev-k3s, path: services/web,
                 heimdall-url: "${{ vars.HEIMDALL_URL }}", api-key: "${{ secrets.HEIMDALL_API_KEY }}" }
 ```
@@ -385,7 +407,7 @@ heimdall gate --service api --realm dev-k3s --sbom sbom.json --fail-on high
 | Code | Meaning |
 |---|---|
 | `0` | Pass: nothing at or above `--fail-on` outside an active oath. |
-| `1` | Vulnerabilities found; a table of advisories is printed. |
+| `1` | Vulnerabilities found; a table of advisories is printed, ending in `verdict: FAIL`. |
 | `2` | Could not verify: Heimdall unreachable, a bad response or input, or neither OSV nor the GitHub Advisory Database could answer for some components. There is no silent pass. |
 
 The server answers within a 60 s bound. If OSV is unreachable the gate falls
@@ -424,7 +446,8 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 - **401 / 403 from the CLI**: wrong key (401), or the key's scope is too low or
   an admin key's name is not in `admins` (403).
 - **Gate exits 2 in CI**: the runner cannot reach Heimdall, or the server
-  could not verify some components. The message after `hofund:` says which.
+  could not verify some components. The final line reads `verdict: UNVERIFIED (checked against …)`, and the
+  `unverified:` lines above it list the components that could not be checked.
 - **No Teams cards**: check the webhook variable named in `teams[].webhook_env`
   exists in the Secret, and watch `heimdall_outbox_pending` and
   `heimdall_teams_failures_total`.
@@ -445,3 +468,27 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 Releases are cut by pushing a `v*` tag: CI builds static linux binaries
 (`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images pushed
 to ghcr.
+
+## Contributing, security and license
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): how to propose changes.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): community standards.
+- [GLOSSARY.md](GLOSSARY.md) and [docs/adr/](docs/adr/): vocabulary and decisions.
+- [LICENSE](LICENSE): Apache-2.0.
+
+## Acknowledgements and data sources
+
+Heimdall stands on the work of these projects and data providers:
+
+- [OWASP Dependency-Track](https://dependencytrack.org): the inspiration.
+- [OSV.dev](https://osv.dev): primary vulnerability data.
+- [NVD](https://nvd.nist.gov): National Vulnerability Database.
+- [GitHub Advisory Database](https://github.com/advisories): gate fallback.
+- Kubernetes official CVE feed: <https://kubernetes.io/docs/reference/issues-security/official-cve-feed/>.
+- [endoflife.date](https://endoflife.date): end-of-support dates.
+- [Anchore syft](https://github.com/anchore/syft): SBOM generation.
+- [CycloneDX](https://cyclonedx.org): SBOM format.
+- [Package URL spec](https://github.com/package-url/purl-spec): component identity.
+
+This product uses data from the NVD API but is not endorsed or certified by the NVD.

@@ -2,7 +2,13 @@
 name = "heimdall"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight vulnerability and release tracker"
+description = "Lightweight dependency, vulnerability and release tracker for small Kubernetes clusters"
+license = "Apache-2.0"
+repository = "https://github.com/mrashed98/heimdall"
+homepage = "https://mrashed98.github.io/heimdall/"
+readme = "README.md"
+keywords = ["vulnerability", "sbom", "kubernetes", "security", "dependency-track"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "heimdall"
