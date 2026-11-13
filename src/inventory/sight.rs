@@ -61,7 +61,15 @@ pub async fn collect(client: KubeClient) -> anyhow::Result<ClusterObjects> {
             .list(&lp)
             .await
             .with_context(|| format!("listing {}", res.plural))?;
-        workloads.extend(list.items);
+        // List items of built-in types carry no apiVersion/kind, so record
+        // the kind here (the pods-to-workload join needs it).
+        for mut obj in list.items {
+            obj.types = Some(kube::api::TypeMeta {
+                api_version: res.api_version.clone(),
+                kind: res.kind.clone(),
+            });
+            workloads.push(obj);
+        }
     }
 
     let argo = ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -255,6 +263,15 @@ fn pod_service_name(pod: &Pod) -> String {
 /// Deployment by dropping the `-<pod-template-hash>` suffix.
 fn pod_workload(pod: &Pod) -> Option<(String, String)> {
     let owner = pod.metadata.owner_references.as_ref()?.first()?;
+    if owner.kind == "Job" {
+        // CronJob runs are named `<cronjob>-<timestamp>`; the service is the
+        // CronJob, or every run would be a new service.
+        let name = match owner.name.rsplit_once('-') {
+            Some((base, n)) if !base.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,
+            _ => owner.name.as_str(),
+        };
+        return Some(("Job".to_string(), name.to_string()));
+    }
     if owner.kind != "ReplicaSet" {
         return Some((owner.kind.clone(), owner.name.clone()));
     }
@@ -432,10 +449,30 @@ mod tests {
         serde_json::from_value(v["items"].clone()).unwrap()
     }
 
+    /// Like `collect`: list items have no kind, so it is set from the list.
+    fn workloads() -> Vec<DynamicObject> {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/k8s/deployments.json"))
+                .unwrap();
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                let mut o: DynamicObject = serde_json::from_value(i["obj"].clone()).unwrap();
+                o.types = Some(kube::api::TypeMeta {
+                    api_version: "apps/v1".into(),
+                    kind: i["kind"].as_str().unwrap().into(),
+                });
+                o
+            })
+            .collect()
+    }
+
     fn fixture() -> ClusterObjects {
         ClusterObjects {
             pods: items_of(include_str!("../../tests/fixtures/k8s/pods.json")),
-            workloads: items_of(include_str!("../../tests/fixtures/k8s/deployments.json")),
+            workloads: workloads(),
             nodes: items_of(include_str!("../../tests/fixtures/k8s/nodes.json")),
             argo_apps: items_of(include_str!("../../tests/fixtures/k8s/argo_apps.json")),
             server_version: serde_json::from_str(include_str!(
@@ -490,6 +527,21 @@ mod tests {
         objs.pods = vec![serde_json::from_value(v).unwrap()];
         let inv = build_inventory("prod", &objs);
         assert!(inv.services.iter().any(|s| s.name == "kafka"));
+    }
+
+    #[test]
+    fn cronjob_pod_service_is_cronjob_name() {
+        let mut v = pod_json(
+            r#","ownerReferences":[{"apiVersion":"batch/v1","kind":"Job","name":"scan-images-29012345","uid":"u"}]"#,
+        );
+        v["spec"]["containers"] = serde_json::json!([{"name":"c","image":"x:1"}]);
+        v["status"] = serde_json::json!({"containerStatuses":[{"name":"c","image":"x:1",
+            "imageID":"docker.io/library/x@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "ready":true,"restartCount":0}]});
+        let mut objs = fixture();
+        objs.pods = vec![serde_json::from_value(v).unwrap()];
+        let inv = build_inventory("prod", &objs);
+        assert!(inv.services.iter().any(|s| s.name == "scan-images"));
     }
 
     #[test]

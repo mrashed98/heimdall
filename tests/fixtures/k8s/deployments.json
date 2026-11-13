@@ -1,7 +1,41 @@
-{"apiVersion":"apps/v1","kind":"DeploymentList","items":[
- {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"web","namespace":"prod","labels":{"helm.sh/chart":"web-0.3.1"}}},
- {"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"monitoring-operator","namespace":"monitoring",
-   "labels":{"helm.sh/chart":"kube-prometheus-stack-65.1.0"}}},
- {"apiVersion":"apps/v1","kind":"StatefulSet","metadata":{"name":"db-sts","namespace":"prod",
-   "labels":{"helm.sh/chart":"postgresql-15.5.38","app.kubernetes.io/name":"db"}}}
-]}
+{
+ "items": [
+  {
+   "kind": "Deployment",
+   "obj": {
+    "metadata": {
+     "name": "web",
+     "namespace": "prod",
+     "labels": {
+      "helm.sh/chart": "web-0.3.1"
+     }
+    }
+   }
+  },
+  {
+   "kind": "Deployment",
+   "obj": {
+    "metadata": {
+     "name": "monitoring-operator",
+     "namespace": "monitoring",
+     "labels": {
+      "helm.sh/chart": "kube-prometheus-stack-65.1.0"
+     }
+    }
+   }
+  },
+  {
+   "kind": "StatefulSet",
+   "obj": {
+    "metadata": {
+     "name": "db-sts",
+     "namespace": "prod",
+     "labels": {
+      "helm.sh/chart": "postgresql-15.5.38",
+      "app.kubernetes.io/name": "db"
+     }
+    }
+   }
+  }
+ ]
+}
