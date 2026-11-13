@@ -1,0 +1,107 @@
+name: Heimdall gate (Hofund)
+description: Generate an SBOM with syft and block the build when Heimdall finds vulnerabilities.
+inputs:
+  service:
+    description: Service name (same name Sight uses in the cluster).
+    required: true
+  realm:
+    description: Realm the service belongs to.
+    required: true
+  path:
+    description: Directory to scan. Monorepos call this action once per service.
+    default: "."
+  fail-on:
+    description: Lowest severity that fails the build (critical, high, medium, low).
+    default: high
+  heimdall-url:
+    description: Base URL of Heimdall, e.g. http://heimdall.heimdall.svc:8080
+    required: true
+  api-key:
+    description: API key with ingest scope.
+    required: true
+  version:
+    description: Heimdall release to download (a tag such as v0.1.0, or latest).
+    default: latest
+runs:
+  using: composite
+  steps:
+    - name: Install heimdall
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REPO: ${{ github.action_repository }}
+        GH_TOKEN: ${{ github.token }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+        [ "$RUNNER_OS_NAME" = "Linux" ] || { echo "heimdall gate supports Linux runners only" >&2; exit 2; }
+        case "$RUNNER_ARCH_NAME" in
+          X64) arch=amd64 ;;
+          ARM64) arch=arm64 ;;
+          *) echo "unsupported runner arch $RUNNER_ARCH_NAME" >&2; exit 2 ;;
+        esac
+        bin="$RUNNER_TEMP/heimdall-bin"
+        mkdir -p "$bin"
+        asset="heimdall-linux-${arch}"
+        if [ "$VERSION" = "latest" ]; then
+          url="https://github.com/${REPO}/releases/latest/download/${asset}"
+        else
+          url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
+        fi
+        curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -o "$bin/heimdall" "$url"
+        chmod +x "$bin/heimdall"
+        echo "$bin" >> "$GITHUB_PATH"
+
+    - name: Install syft (pinned, checksum verified)
+      shell: bash
+      env:
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+        # Checksums from syft_1.57.1_checksums.txt on the GitHub release.
+        SYFT_VERSION=1.57.1
+        case "$RUNNER_ARCH_NAME" in
+          X64)
+            arch=amd64
+            sha=bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c ;;
+          ARM64)
+            arch=arm64
+            sha=aa3d3e07344f590bcce8d31043b752daa76c8a56c2aa34ceeee63c6168152582 ;;
+          *) echo "unsupported runner arch $RUNNER_ARCH_NAME" >&2; exit 2 ;;
+        esac
+        tmp="$(mktemp -d)"
+        curl -fsSL -o "$tmp/syft.tgz" \
+          "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${arch}.tar.gz"
+        echo "${sha}  $tmp/syft.tgz" | sha256sum -c -
+        tar -xzf "$tmp/syft.tgz" -C "$tmp" syft
+        mkdir -p "$RUNNER_TEMP/syft-bin"
+        mv "$tmp/syft" "$RUNNER_TEMP/syft-bin/syft"
+        echo "$RUNNER_TEMP/syft-bin" >> "$GITHUB_PATH"
+
+    - name: Generate SBOM
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        SYFT_CHECK_FOR_APP_UPDATE: "false"
+      run: syft "dir:${SCAN_PATH}" -o cyclonedx-json > "$RUNNER_TEMP/sbom.json"
+
+    - name: Hofund gate
+      shell: bash
+      env:
+        HEIMDALL_URL: ${{ inputs.heimdall-url }}
+        HEIMDALL_API_KEY: ${{ inputs.api-key }}
+        SERVICE: ${{ inputs.service }}
+        REALM: ${{ inputs.realm }}
+        SCAN_PATH: ${{ inputs.path }}
+        FAIL_ON: ${{ inputs.fail-on }}
+      # Branch comes from GITHUB_REF_NAME and the default branch from
+      # GITHUB_EVENT_PATH; both are set by the runner. Exit 0 pass, 1
+      # vulnerabilities, 2 could not verify.
+      run: |
+        heimdall gate \
+          --service "$SERVICE" \
+          --realm "$REALM" \
+          --sbom "$RUNNER_TEMP/sbom.json" \
+          --fail-on "$FAIL_ON" \
+          --repo-root "$SCAN_PATH"

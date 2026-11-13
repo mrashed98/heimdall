@@ -1,0 +1,80 @@
+{{- if .Values.scanImages.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "heimdall.name" . }}-scan-images
+  labels:
+    {{- include "heimdall.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.scanImages.schedule | quote }}
+  # A slow run must never overlap the next one.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "heimdall.labels" . | nindent 12 }}
+            app.kubernetes.io/component: scanner
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: scanner
+              image: "{{ .Values.scannerImage.repository }}:{{ .Values.scannerImage.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.scannerImage.pullPolicy }}
+              args: ["--max", {{ .Values.scanImages.max | quote }}]
+              env:
+                - name: HEIMDALL_URL
+                  value: "http://{{ include "heimdall.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}"
+                - name: HEIMDALL_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.existingSecret }}
+                      key: HEIMDALL_API_KEY
+                - name: SYFT_CHECK_FOR_APP_UPDATE
+                  value: "false"
+                - name: XDG_CACHE_HOME
+                  value: /cache
+                {{- if .Values.scanImages.dockerConfigSecret }}
+                - name: DOCKER_CONFIG
+                  value: /docker
+                {{- end }}
+              resources:
+                {{- toYaml .Values.scanImages.resources | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: cache
+                  mountPath: /cache
+                {{- if .Values.scanImages.dockerConfigSecret }}
+                - name: docker-config
+                  mountPath: /docker
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: cache
+              emptyDir: {}
+            {{- if .Values.scanImages.dockerConfigSecret }}
+            - name: docker-config
+              secret:
+                secretName: {{ .Values.scanImages.dockerConfigSecret }}
+                items:
+                  - key: .dockerconfigjson
+                    path: config.json
+            {{- end }}
+{{- end }}

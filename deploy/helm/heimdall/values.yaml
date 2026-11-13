@@ -1,0 +1,82 @@
+# Heimdall chart values.
+
+image:
+  repository: ghcr.io/yourorg/heimdall
+  tag: ""            # default: the chart appVersion
+  pullPolicy: IfNotPresent
+
+# The image-SBOM scanner (deploy/Dockerfile.scanner).
+scannerImage:
+  repository: ghcr.io/yourorg/heimdall-scanner
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Rendered into the ConfigMap as heimdall.yaml. See heimdall.example.yaml
+# in the repo for every option.
+config:
+  realms:
+    - dev-k3s
+  own_registries: []
+  admins: []
+  teams:
+    - name: default
+      webhook_env: TEAMS_WEBHOOK_DEFAULT
+      realms: []
+      min_severity: high
+  sight:
+    realm: dev-k3s
+
+# An existing Secret (SOPS-managed outside the chart). Every key becomes an
+# environment variable. Expected keys:
+#   DATABASE_URL, GITHUB_TOKEN, NVD_API_KEY, HEIMDALL_BOOTSTRAP_ADMIN_KEY,
+#   one TEAMS_WEBHOOK_* per `teams[].webhook_env`,
+#   HEIMDALL_API_KEY (an ingest-scope key, used by the scanner CronJob).
+existingSecret: heimdall-secrets
+
+# Optional: send traces to an OTel collector (OTLP/HTTP).
+otlpEndpoint: ""
+
+resources:
+  limits:
+    memory: 1Gi
+    cpu: "1"
+  requests:
+    memory: 256Mi
+    cpu: 100m
+
+terminationGracePeriodSeconds: 30
+
+service:
+  port: 8080
+
+scanImages:
+  enabled: true
+  schedule: "0 */6 * * *"
+  # Most images scanned per run.
+  max: 20
+  # Secret of type kubernetes.io/dockerconfigjson, mounted so syft can pull
+  # private images. Leave empty for public images only.
+  dockerConfigSecret: ""
+  resources:
+    limits:
+      memory: 1Gi
+      cpu: "1"
+    requests:
+      memory: 256Mi
+      cpu: 100m
+
+serviceMonitor:
+  enabled: true
+  interval: 60s
+  # Labels so kube-prometheus-stack selects it.
+  labels: {}
+
+# Not internet-exposed by default (CI runs on self-hosted runners).
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: heimdall.internal.example
+  tls: []
