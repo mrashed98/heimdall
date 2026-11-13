@@ -215,23 +215,32 @@ pub fn is_prerelease(v: &str) -> bool {
 /// Pick the smallest fixed version above `current` that keeps its major,
 /// falling back to the smallest fixed version above it. `latest` is the
 /// highest fixed version. Unparseable or not-newer versions are ignored.
+///
+/// A linear scan, never a sort: `compare` mixes semver and dpkg ordering, so
+/// it is not always a total order, and the standard sort may panic on that.
 pub fn recommend_fix(ecosystem: &str, current: &str, fixed: &[&str]) -> Option<FixAdvice> {
-    let mut newer: Vec<&str> = fixed
-        .iter()
-        .copied()
-        .filter(|f| compare(ecosystem, f, f).is_some())
-        .filter(|f| compare(ecosystem, f, current) == Some(Ordering::Greater))
-        .collect();
-    // Both sides parsed above, so the comparison always has an answer.
-    newer.sort_by(|a, b| compare(ecosystem, a, b).unwrap_or(Ordering::Equal));
-    let latest = newer.last()?;
-    let suggest = newer
-        .iter()
-        .find(|f| !is_major(current, f, 0))
-        .unwrap_or(&newer[0]);
+    let is = |a: &str, b: &str, want: Ordering| compare(ecosystem, a, b) == Some(want);
+    let mut latest: Option<&str> = None;
+    let mut smallest: Option<&str> = None;
+    let mut smallest_same_major: Option<&str> = None;
+    for &f in fixed {
+        if !is(f, current, Ordering::Greater) {
+            continue;
+        }
+        if latest.is_none_or(|l| is(f, l, Ordering::Greater)) {
+            latest = Some(f);
+        }
+        if smallest.is_none_or(|s| is(f, s, Ordering::Less)) {
+            smallest = Some(f);
+        }
+        if !is_major(current, f, 0) && smallest_same_major.is_none_or(|s| is(f, s, Ordering::Less))
+        {
+            smallest_same_major = Some(f);
+        }
+    }
     Some(FixAdvice {
-        suggest: suggest.to_string(),
-        latest: latest.to_string(),
+        suggest: smallest_same_major.or(smallest)?.to_string(),
+        latest: latest?.to_string(),
     })
 }
 
@@ -332,6 +341,29 @@ mod tests {
             })
         );
         assert_eq!(recommend_fix("npm", "2.6.0", &["2.5.0", "junk"]), None);
+    }
+
+    #[test]
+    fn recommend_fix_survives_non_total_order() {
+        // Semver says rc1 < 1.0.0; "1.0.0-a.01" is not semver (leading zero),
+        // so it is ordered by dpkg against both: above 1.0.0, below rc1. A cycle.
+        let mixed = ["1.0.0-rc1", "1.0.0", "1.0.0-a.01"];
+        let advice = recommend_fix("PyPI", "0.9.0", &mixed).unwrap();
+        assert!(mixed.contains(&advice.suggest.as_str()));
+        assert!(mixed.contains(&advice.latest.as_str()));
+
+        // A longer list makes the standard sort check its comparator.
+        let many: Vec<String> = (0..40)
+            .flat_map(|i| {
+                [
+                    format!("1.{i}.0-rc1"),
+                    format!("1.{i}.0"),
+                    format!("1.{i}.0-a.01"),
+                ]
+            })
+            .collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(recommend_fix("PyPI", "0.9.0", &many).is_some());
     }
 
     #[test]

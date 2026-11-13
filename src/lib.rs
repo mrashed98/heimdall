@@ -7,6 +7,7 @@ pub mod db;
 pub mod error;
 pub mod ingest;
 pub mod inventory;
+pub mod matcher;
 pub mod model;
 pub mod oath;
 pub mod purl;
