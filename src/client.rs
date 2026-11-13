@@ -37,6 +37,19 @@ impl Client {
         self.send(req).await
     }
 
+    /// Percent-encode one path segment so names cannot alter the route.
+    pub fn encode_segment(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        out
+    }
+
     pub async fn delete(&self, path: &str) -> anyhow::Result<()> {
         let req = self.http.delete(self.url(path));
         let _: serde_json::Value = self.send(req).await?;

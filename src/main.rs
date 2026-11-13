@@ -74,7 +74,9 @@ async fn keys(action: KeysAction) -> anyhow::Result<()> {
             }
         }
         KeysAction::Revoke { name } => {
-            client.delete(&format!("/api/v1/keys/{name}")).await?;
+            client
+                .delete(&format!("/api/v1/keys/{}", Client::encode_segment(&name)))
+                .await?;
             println!("revoked {name}");
         }
     }
