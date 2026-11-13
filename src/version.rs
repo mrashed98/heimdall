@@ -267,6 +267,26 @@ mod tests {
     }
 
     #[test]
+    fn go_incompatible_equal_precedence() {
+        assert_eq!(
+            compare("Go", "v2.0.0+incompatible", "v2.0.0"),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn build_metadata_ignored_in_order() {
+        assert_eq!(
+            compare("npm", "1.0.0+a", "1.0.0+b"),
+            Some(std::cmp::Ordering::Equal)
+        );
+        assert_eq!(
+            recommend_fix("Go", "v2.0.0", &["v2.0.0+incompatible"]),
+            None
+        );
+    }
+
+    #[test]
     fn compare_falls_back_to_lenient_and_none() {
         assert_eq!(
             compare("PyPI", "1.2", "1.2.1"),
