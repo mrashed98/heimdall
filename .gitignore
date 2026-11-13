@@ -3,3 +3,4 @@
 .env
 /target
 heimdall.yaml
+.DS_Store
