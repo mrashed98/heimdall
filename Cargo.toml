@@ -19,6 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+cvss = "3.0.0"
 packageurl = "0.7.1"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -29,8 +30,10 @@ serde_yaml = "0.9"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+url = "2.5.8"
 walkdir = "2.5.0"
 
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6.5"

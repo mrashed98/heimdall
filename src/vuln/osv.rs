@@ -1,0 +1,682 @@
+//! OSV.dev client and advisory refresh.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use anyhow::{anyhow, Context};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use sqlx::PgPool;
+use url::Url;
+
+use crate::model::Severity;
+use crate::purl::{name_key, osv_package, OsvPackage};
+use crate::vuln::severity;
+
+const BATCH_SIZE: usize = 1000;
+/// Safety valve against a server that keeps returning page tokens.
+const MAX_PAGES: usize = 100;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OsvHit {
+    pub id: String,
+    pub modified: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct BatchResponse {
+    results: Vec<BatchResult>,
+}
+
+#[derive(Deserialize, Default)]
+struct BatchResult {
+    #[serde(default)]
+    vulns: Vec<OsvHit>,
+    next_page_token: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct OsvClient {
+    pub base: Url,
+    pub http: reqwest::Client,
+}
+
+impl OsvClient {
+    pub fn new(http: reqwest::Client) -> OsvClient {
+        OsvClient {
+            base: Url::parse("https://api.osv.dev").expect("static url"),
+            http,
+        }
+    }
+
+    /// One result list per input package, in the same order.
+    pub async fn query_batch(&self, pkgs: &[OsvPackage]) -> anyhow::Result<Vec<Vec<OsvHit>>> {
+        let mut out = Vec::with_capacity(pkgs.len());
+        for chunk in pkgs.chunks(BATCH_SIZE) {
+            out.extend(self.query_chunk(chunk).await?);
+        }
+        Ok(out)
+    }
+
+    async fn query_chunk(&self, chunk: &[OsvPackage]) -> anyhow::Result<Vec<Vec<OsvHit>>> {
+        let url = self.base.join("v1/querybatch")?;
+        let mut hits: Vec<Vec<OsvHit>> = vec![Vec::new(); chunk.len()];
+        // Page token per query index; None on the first round.
+        let mut pending: Vec<(usize, Option<String>)> =
+            (0..chunk.len()).map(|i| (i, None)).collect();
+
+        for _ in 0..MAX_PAGES {
+            if pending.is_empty() {
+                break;
+            }
+            let queries: Vec<Value> = pending
+                .iter()
+                .map(|(i, token)| {
+                    let p = &chunk[*i];
+                    let mut q = json!({
+                        "package": {"name": p.name, "ecosystem": p.ecosystem},
+                        "version": p.version,
+                    });
+                    if let Some(t) = token {
+                        q["page_token"] = json!(t);
+                    }
+                    q
+                })
+                .collect();
+            let resp: BatchResponse = self
+                .http
+                .post(url.clone())
+                .json(&json!({ "queries": queries }))
+                .send()
+                .await
+                .context("osv querybatch request")?
+                .error_for_status()
+                .context("osv querybatch status")?
+                .json()
+                .await
+                .context("osv querybatch body")?;
+            if resp.results.len() != pending.len() {
+                return Err(anyhow!(
+                    "osv returned {} results for {} queries",
+                    resp.results.len(),
+                    pending.len()
+                ));
+            }
+            // Only queries that came back with a token are asked again.
+            let mut next = Vec::new();
+            for ((i, _), result) in pending.iter().zip(resp.results) {
+                hits[*i].extend(result.vulns);
+                if let Some(t) = result.next_page_token.filter(|t| !t.is_empty()) {
+                    next.push((*i, Some(t)));
+                }
+            }
+            pending = next;
+        }
+        Ok(hits)
+    }
+
+    pub async fn get(&self, id: &str) -> anyhow::Result<Value> {
+        // Build the path by segment so odd characters in an id are encoded.
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("osv base url cannot be a base"))?
+            .pop_if_empty()
+            .extend(["v1", "vulns", id]);
+        self.http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("osv get {id}"))?
+            .error_for_status()
+            .with_context(|| format!("osv get {id} status"))?
+            .json()
+            .await
+            .with_context(|| format!("osv get {id} body"))
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RefreshReport {
+    /// Components OSV could be asked about (purl maps to an OSV ecosystem).
+    pub checked: usize,
+    pub new_links: usize,
+    /// Full advisory records downloaded.
+    pub fetched: usize,
+}
+
+/// A component we asked OSV about.
+struct Checked {
+    component_id: i64,
+    name_key: String,
+    pkg: OsvPackage,
+}
+
+/// The parts of an existing advisory row that decide whether to refetch.
+struct Stored {
+    modified: DateTime<Utc>,
+    fixed: Value,
+    severity: Severity,
+    has_nvd: bool,
+}
+
+/// What we keep per advisory before it is written.
+struct Advisory {
+    id: String,
+    aliases: Vec<String>,
+    severity: Severity,
+    summary: String,
+    fixed: BTreeMap<String, Vec<String>>,
+    modified: DateTime<Utc>,
+    score: Option<f64>,
+    cve_id: Option<String>,
+}
+
+/// Ask OSV about every component, upsert the advisories it reports and replace
+/// the OSV links of the checked components. NVD-only links are left alone.
+pub async fn refresh(
+    pool: &PgPool,
+    client: &OsvClient,
+    components: &[(i64, String)],
+) -> anyhow::Result<RefreshReport> {
+    let mut checked = Vec::new();
+    for (component_id, purl) in components {
+        if let Some(pkg) = osv_package(purl) {
+            checked.push(Checked {
+                component_id: *component_id,
+                name_key: name_key(purl)?,
+                pkg,
+            });
+        }
+    }
+    let pkgs: Vec<OsvPackage> = checked.iter().map(|c| c.pkg.clone()).collect();
+    let all_hits = client.query_batch(&pkgs).await?;
+
+    // advisory id -> newest `modified` reported, and which checked components hit it.
+    let mut newest: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut hit_by: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
+    for (idx, hits) in all_hits.iter().enumerate() {
+        for hit in hits {
+            let e = newest.entry(hit.id.clone()).or_insert(hit.modified);
+            *e = (*e).max(hit.modified);
+            hit_by.entry(hit.id.clone()).or_default().push(idx);
+            desired.insert((checked[idx].component_id, hit.id.clone()));
+        }
+    }
+
+    let ids: Vec<String> = newest.keys().cloned().collect();
+    let stored: Vec<(String, DateTime<Utc>, Value, Severity, bool)> = sqlx::query_as(
+        "select id, modified, fixed, severity, scores ? 'nvd' from advisories where id = any($1)",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let stored: HashMap<String, Stored> = stored
+        .into_iter()
+        .map(|(id, modified, fixed, severity, has_nvd)| {
+            (
+                id,
+                Stored {
+                    modified,
+                    fixed,
+                    severity,
+                    has_nvd,
+                },
+            )
+        })
+        .collect();
+
+    let mut fetched = Vec::new();
+    for (id, modified) in &newest {
+        // `fixed` has a key for every component that was ever checked against
+        // the advisory (empty list when there is no fix), so a missing key
+        // means a new component and the record must be read again.
+        let up_to_date = stored.get(id).is_some_and(|st| {
+            st.modified >= *modified
+                && hit_by[id]
+                    .iter()
+                    .all(|i| st.fixed.get(&checked[*i].name_key).is_some())
+        });
+        if up_to_date {
+            continue;
+        }
+        let vuln = client.get(id).await?;
+        let keys: Vec<&Checked> = hit_by[id].iter().map(|i| &checked[*i]).collect();
+        let mut adv = build_advisory(&vuln, &keys)?;
+        // NVD may already have raised the severity; an OSV refresh must not lower it.
+        if let Some(st) = stored.get(id).filter(|st| st.has_nvd) {
+            adv.severity = severity::merge(adv.severity, st.severity);
+        }
+        fetched.push(adv);
+    }
+
+    let mut tx = pool.begin().await?;
+    for adv in &fetched {
+        upsert_advisory(&mut tx, adv).await?;
+    }
+
+    let checked_ids: Vec<i64> = checked.iter().map(|c| c.component_id).collect();
+    let before: BTreeSet<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        "select component_id, advisory_id from component_advisories \
+         where component_id = any($1) and match_source in ('osv', 'both')",
+    )
+    .bind(&checked_ids)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect();
+
+    // Drop OSV's side of every link first, then re-add what OSV reports now:
+    // osv rows vanish, both -> nvd, and the insert below turns nvd -> both again.
+    sqlx::query(
+        "delete from component_advisories where component_id = any($1) and match_source = 'osv'",
+    )
+    .bind(&checked_ids)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("update component_advisories set match_source = 'nvd' where component_id = any($1) and match_source = 'both'")
+        .bind(&checked_ids)
+        .execute(&mut *tx)
+        .await?;
+    let (cids, aids): (Vec<i64>, Vec<String>) = desired.iter().cloned().unzip();
+    sqlx::query(
+        "insert into component_advisories (component_id, advisory_id, match_source) \
+         select c, a, 'osv' from unnest($1::bigint[], $2::text[]) as t(c, a) \
+         on conflict (component_id, advisory_id) do update set match_source = 'both'",
+    )
+    .bind(&cids)
+    .bind(&aids)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(RefreshReport {
+        checked: checked.len(),
+        new_links: desired.difference(&before).count(),
+        fetched: fetched.len(),
+    })
+}
+
+async fn upsert_advisory(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    adv: &Advisory,
+) -> anyhow::Result<()> {
+    let scores = match adv.score {
+        Some(s) => json!({ "osv": s }),
+        None => json!({}),
+    };
+    // `fixed` is merged so keys from other components survive; `scores` keeps
+    // an existing NVD score while the osv key is replaced (or dropped).
+    sqlx::query(
+        "insert into advisories (id, aliases, severity, summary, fixed, modified, source, scores, cve_id) \
+         values ($1, $2, $3, $4, $5, $6, 'osv', $7, $8) \
+         on conflict (id) do update set \
+           aliases = excluded.aliases, \
+           severity = excluded.severity, \
+           summary = excluded.summary, \
+           fixed = advisories.fixed || excluded.fixed, \
+           modified = excluded.modified, \
+           scores = (advisories.scores - 'osv') || excluded.scores, \
+           cve_id = excluded.cve_id",
+    )
+    .bind(&adv.id)
+    .bind(&adv.aliases)
+    .bind(adv.severity)
+    .bind(&adv.summary)
+    .bind(serde_json::to_value(&adv.fixed)?)
+    .bind(adv.modified)
+    .bind(scores)
+    .bind(&adv.cve_id)
+    .execute(&mut **tx)
+    .await
+    .with_context(|| format!("upserting advisory {}", adv.id))?;
+    Ok(())
+}
+
+fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory> {
+    let id = vuln["id"]
+        .as_str()
+        .context("osv record without id")?
+        .to_string();
+    let aliases: Vec<String> = vuln["aliases"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let modified = vuln["modified"]
+        .as_str()
+        .context("osv record without modified")?
+        .parse::<DateTime<Utc>>()
+        .context("osv modified is not RFC 3339")?;
+    let summary = match vuln["summary"].as_str() {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => vuln["details"]
+            .as_str()
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string(),
+    };
+    let cve_id = std::iter::once(&id)
+        .chain(aliases.iter())
+        .find(|a| is_cve_id(a))
+        .cloned();
+
+    let mut fixed = BTreeMap::new();
+    for c in hitting {
+        fixed.insert(c.name_key.clone(), fixed_versions(vuln, &c.pkg));
+    }
+    Ok(Advisory {
+        severity: severity::normalize(vuln),
+        score: severity::cvss_score(vuln),
+        id,
+        aliases,
+        summary,
+        fixed,
+        modified,
+        cve_id,
+    })
+}
+
+/// `^CVE-\d{4}-\d+$` without pulling in the regex crate.
+fn is_cve_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("CVE-") else {
+        return false;
+    };
+    let Some((year, seq)) = rest.split_once('-') else {
+        return false;
+    };
+    year.len() == 4
+        && year.bytes().all(|b| b.is_ascii_digit())
+        && !seq.is_empty()
+        && seq.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `fixed` events of the `affected[]` entries for exactly this package,
+/// first-seen order, no duplicates.
+fn fixed_versions(vuln: &Value, pkg: &OsvPackage) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let affected = vuln["affected"].as_array().into_iter().flatten();
+    for a in affected {
+        if a["package"]["ecosystem"] != pkg.ecosystem.as_str()
+            || a["package"]["name"] != pkg.name.as_str()
+        {
+            continue;
+        }
+        let events = a["ranges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|r| r["events"].as_array().into_iter().flatten());
+        for e in events {
+            if let Some(f) = e["fixed"].as_str() {
+                if !out.iter().any(|x| x == f) {
+                    out.push(f.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+    use sqlx::PgPool;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    const CVSS_ID: &str = "GHSA-h7vf-3kq9-m2wx";
+    const WORDS_ID: &str = "GHSA-9c4p-j6rt-v5nz";
+    const PURL: &str = "pkg:npm/widget@1.2.0";
+    const NAME_KEY: &str = "pkg:npm/widget";
+
+    fn fixture(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    async fn osv_mock() -> (MockServer, OsvClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(fixture(include_str!(
+                    "../../tests/fixtures/osv/querybatch.json"
+                ))),
+            )
+            .mount(&server)
+            .await;
+        for (id, body) in [
+            (
+                CVSS_ID,
+                include_str!("../../tests/fixtures/osv/GHSA-h7vf-3kq9-m2wx.json"),
+            ),
+            (
+                WORDS_ID,
+                include_str!("../../tests/fixtures/osv/GHSA-9c4p-j6rt-v5nz.json"),
+            ),
+        ] {
+            // expect(1): a second refresh with unchanged `modified` must not refetch.
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/vulns/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(fixture(body)))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        (server, client)
+    }
+
+    async fn seed_component(pool: &PgPool, purl: &str) -> i64 {
+        sqlx::query_scalar(
+            "insert into components (purl, name_key, ecosystem, version) \
+             values ($1, $2, 'npm', '1.2.0') returning id",
+        )
+        .bind(purl)
+        .bind(NAME_KEY)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn refresh_links_and_skips_unchanged(pool: PgPool) {
+        let (_server, client) = osv_mock().await;
+        let cid = seed_component(&pool, PURL).await;
+        let comps = vec![(cid, PURL.to_string())];
+
+        let first = refresh(&pool, &client, &comps).await.unwrap();
+        assert_eq!(
+            first,
+            RefreshReport {
+                checked: 1,
+                new_links: 2,
+                fetched: 2
+            }
+        );
+        let linked: i64 = sqlx::query_scalar(
+            "select count(*) from component_advisories where component_id = $1 and match_source = 'osv'",
+        )
+        .bind(cid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 2);
+
+        let second = refresh(&pool, &client, &comps).await.unwrap();
+        assert_eq!(second.fetched, 0);
+        assert_eq!(second.new_links, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn fixed_versions_recorded(pool: PgPool) {
+        let (_server, client) = osv_mock().await;
+        let cid = seed_component(&pool, PURL).await;
+        refresh(&pool, &client, &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+        let fixed: Value = sqlx::query_scalar("select fixed from advisories where id = $1")
+            .bind(CVSS_ID)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // Only the queried package's events count, not `other-package`'s.
+        assert_eq!(fixed[NAME_KEY], json!(["1.9.1"]));
+        assert_eq!(fixed.as_object().unwrap().len(), 1);
+        let no_fix: Value = sqlx::query_scalar("select fixed from advisories where id = $1")
+            .bind(WORDS_ID)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(no_fix[NAME_KEY], json!([]));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cve_alias_recorded(pool: PgPool) {
+        let (_server, client) = osv_mock().await;
+        let cid = seed_component(&pool, PURL).await;
+        refresh(&pool, &client, &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+        let (cve, scores, sev): (Option<String>, Value, String) =
+            sqlx::query_as("select cve_id, scores, severity from advisories where id = $1")
+                .bind(CVSS_ID)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cve.as_deref(), Some("CVE-2026-1111"));
+        assert_eq!(scores["osv"], json!(9.8));
+        assert_eq!(sev, "critical");
+        let (cve, scores): (Option<String>, Value) =
+            sqlx::query_as("select cve_id, scores from advisories where id = $1")
+                .bind(WORDS_ID)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cve, None);
+        assert!(scores.get("osv").is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nvd_links_survive_and_both_reverts(pool: PgPool) {
+        let (_server, client) = osv_mock().await;
+        let cid = seed_component(&pool, PURL).await;
+        let comps = vec![(cid, PURL.to_string())];
+        refresh(&pool, &client, &comps).await.unwrap();
+
+        // An NVD-only advisory, and an NVD link on an advisory OSV reports.
+        sqlx::query(
+            "insert into advisories (id, severity, source) values ('CVE-2026-9999', 'high', 'nvd')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into component_advisories values ($1, 'CVE-2026-9999', 'nvd')")
+            .bind(cid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Pretend NVD also matched the CVSS advisory.
+        sqlx::query("update component_advisories set match_source = 'both' where advisory_id = $1")
+            .bind(CVSS_ID)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        refresh(&pool, &client, &comps).await.unwrap();
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "select advisory_id, match_source from component_advisories order by advisory_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(rows.contains(&("CVE-2026-9999".into(), "nvd".into())));
+        assert!(rows.contains(&(CVSS_ID.into(), "both".into())));
+        assert!(rows.contains(&(WORDS_ID.into(), "osv".into())));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn both_goes_back_to_nvd_when_osv_drops_it(pool: PgPool) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": [{}]})))
+            .mount(&server)
+            .await;
+        let client = OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        let cid = seed_component(&pool, PURL).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source) values ('GHSA-gone', 'high', 'osv')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into component_advisories values ($1, 'GHSA-gone', 'both')")
+            .bind(cid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh(&pool, &client, &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+        let ms: String = sqlx::query_scalar(
+            "select match_source from component_advisories where advisory_id = 'GHSA-gone'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ms, "nvd");
+    }
+
+    #[tokio::test]
+    async fn query_batch_follows_page_tokens() {
+        let server = MockServer::start().await;
+        // Page 1 has a token; page 2 (request carries the token) has none.
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"queries": [{"page_token": "t2"}]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [{"id": "B", "modified": "2026-01-02T00:00:00Z"}]}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "vulns": [{"id": "A", "modified": "2026-01-01T00:00:00Z"}],
+                    "next_page_token": "t2"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let client = OsvClient {
+            base: Url::parse(&server.uri()).unwrap(),
+            http: reqwest::Client::new(),
+        };
+        let pkg = OsvPackage {
+            ecosystem: "npm".into(),
+            name: "widget".into(),
+            version: "1.2.0".into(),
+        };
+        let hits = client.query_batch(&[pkg]).await.unwrap();
+        let ids: Vec<&str> = hits[0].iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["A", "B"]);
+    }
+}

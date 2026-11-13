@@ -11,6 +11,7 @@ pub mod model;
 pub mod purl;
 pub mod server;
 pub mod version;
+pub mod vuln;
 
 /// Shared state for every HTTP handler (axum router state).
 #[derive(Clone)]
