@@ -8,6 +8,7 @@ pub mod error;
 pub mod ingest;
 pub mod inventory;
 pub mod model;
+pub mod oath;
 pub mod purl;
 pub mod server;
 pub mod version;
