@@ -273,6 +273,37 @@ pub async fn versions_behind(
     Ok(out)
 }
 
+/// What runs, per planned watch target name: the current (lowest running)
+/// version and the ecosystem its versions compare in. `None` means the
+/// version is unknown; several entries of one name keep the lowest, and an
+/// unknown one wins (it cannot be compared, so callers stay cautious).
+pub async fn watched_versions(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+) -> anyhow::Result<HashMap<String, (Option<String>, &'static str)>> {
+    let planned = plan(cfg, &running(pool, cfg).await?);
+    let mut out: HashMap<String, (Option<String>, &'static str)> = HashMap::new();
+    for p in planned {
+        let eco = p.target.kind.ecosystem();
+        match out.get_mut(&p.target.name) {
+            None => {
+                out.insert(p.target.name, (p.target.current, eco));
+            }
+            Some((seen, _)) => {
+                let lower = match (&seen, &p.target.current) {
+                    (Some(a), Some(b)) => compare(eco, b, a) == Some(Ordering::Less),
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if lower {
+                    *seen = p.target.current;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub async fn run_all(state: &crate::AppState, now: DateTime<Utc>) -> anyhow::Result<WatchReport> {
     run_with(
         &state.pool,
@@ -506,7 +537,7 @@ fn newest(t: &WatchTarget, releases: &[ReleaseInfo]) -> Option<String> {
 }
 
 /// Insert releases not seen before; returns how many were new.
-async fn store_releases(
+pub(crate) async fn store_releases(
     pool: &PgPool,
     t: &WatchTarget,
     releases: &[ReleaseInfo],

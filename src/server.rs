@@ -194,6 +194,7 @@ struct FindingsQuery {
     status: Option<String>,
     kind: Option<String>,
     min_severity: Option<String>,
+    limit: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -205,11 +206,28 @@ struct RealmQuery {
 struct ReleasesQuery {
     target: Option<String>,
     since: Option<String>,
+    limit: Option<String>,
 }
 
 /// Empty query values count as absent (`?realm=`).
 fn given(v: &Option<String>) -> Option<&str> {
     v.as_deref().filter(|s| !s.is_empty())
+}
+
+/// Rows a list returns: `limit`, default 500, at most 5000. Bounded so one
+/// request cannot load a whole table into a 256 MB process.
+fn parse_limit(v: &Option<String>) -> Result<i64, ApiError> {
+    const DEFAULT: i64 = 500;
+    const MAX: i64 = 5000;
+    let Some(s) = given(v) else {
+        return Ok(DEFAULT);
+    };
+    match s.parse::<i64>() {
+        Ok(n) if (1..=MAX).contains(&n) => Ok(n),
+        _ => Err(ApiError::BadRequest(format!(
+            "limit {s:?} must be a number from 1 to {MAX}"
+        ))),
+    }
 }
 
 fn check_realm(cfg: &HeimdallConfig, realm: Option<&str>) -> Result<(), ApiError> {
@@ -257,6 +275,7 @@ async fn findings_handler(
     require(&authed, Scope::Read)?;
     let realm = given(&q.realm);
     check_realm(&state.cfg, realm)?;
+    let limit = parse_limit(&q.limit)?;
     let status = given(&q.status).unwrap_or("open");
     if status != "open" && status != "resolved" {
         return Err(ApiError::BadRequest(format!(
@@ -296,12 +315,14 @@ async fn findings_handler(
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
-         ORDER BY f.opened_at DESC, f.id DESC",
+         ORDER BY f.opened_at DESC, f.id DESC \
+         LIMIT $5",
     )
     .bind(status)
     .bind(realm)
     .bind(kind)
     .bind(&severities)
+    .bind(limit)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -368,6 +389,7 @@ async fn releases_handler(
     Query(q): Query<ReleasesQuery>,
 ) -> Result<Json<Vec<ReleaseRow>>, ApiError> {
     require(&authed, Scope::Read)?;
+    let limit = parse_limit(&q.limit)?;
     let since = match given(&q.since) {
         Some(s) => Some(parse_since(s)?),
         None => None,
@@ -377,10 +399,12 @@ async fn releases_handler(
          FROM releases \
          WHERE ($1::text IS NULL OR target = $1) \
            AND ($2::timestamptz IS NULL OR published_at >= $2) \
-         ORDER BY published_at DESC NULLS LAST, id DESC",
+         ORDER BY published_at DESC NULLS LAST, id DESC \
+         LIMIT $3",
     )
     .bind(given(&q.target))
     .bind(since)
+    .bind(limit)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -538,5 +562,50 @@ mod tests {
         pool.close().await;
         let (status, _) = get(&app, "/healthz", None).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn read_api_limit(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "vuln|1", "high").await;
+        seed_finding(&pool, "prod", "api", "vuln|2", "high").await;
+        seed_finding(&pool, "prod", "api", "vuln|3", "high").await;
+        for (v, days) in [("1.0.0", 30), ("2.0.0", 20), ("3.0.0", 10)] {
+            sqlx::query(
+                "INSERT INTO releases (target, version, published_at) \
+                 VALUES ('x', $1, now() - make_interval(days => $2))",
+            )
+            .bind(v)
+            .bind(days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let (_, handle) = local_metrics();
+        let app = app(state(pool), handle);
+
+        // Newest first, cut at the limit.
+        let (status, body) = get(&app, "/api/v1/findings?limit=2", Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        let keys: Vec<&str> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["vuln|3", "vuln|2"]);
+
+        let (status, body) = get(&app, "/api/v1/releases?limit=1", Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["version"], "3.0.0");
+
+        let (_, body) = get(&app, "/api/v1/findings?limit=5000", Some(&key)).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 3);
+
+        for path in ["/api/v1/findings", "/api/v1/releases"] {
+            for bad in ["0", "5001", "-1", "many"] {
+                let (status, _) = get(&app, &format!("{path}?limit={bad}"), Some(&key)).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{path} limit={bad}");
+            }
+        }
     }
 }

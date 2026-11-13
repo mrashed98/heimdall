@@ -7,6 +7,8 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::PgPool;
 
 use crate::config::HeimdallConfig;
+use crate::version::compare;
+use crate::watchers;
 
 /// Rows one cleanup deleted.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -31,12 +33,7 @@ pub async fn cleanup(
             .execute(pool)
             .await?
             .rows_affected();
-    // Undated releases are kept: there is no age to judge them by.
-    let releases = sqlx::query("DELETE FROM releases WHERE published_at < $1")
-        .bind(days(r.releases_days))
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let releases = old_releases(pool, cfg, days(r.releases_days)).await?;
     // `sent_at < $1` is false for NULL, so unsent rows always stay.
     let outbox = sqlx::query("DELETE FROM outbox WHERE sent_at < $1")
         .bind(days(r.outbox_days))
@@ -48,6 +45,46 @@ pub async fn cleanup(
         releases,
         outbox,
     })
+}
+
+/// Delete releases published before `cutoff` that no longer matter: their
+/// target is not watched any more, or they are not newer than what runs.
+/// An old release still newer than what runs is kept, or the watchers would
+/// insert it again as new (fresh id, notes refetched, alerts repeated).
+/// Undated releases are kept: there is no age to judge them by.
+async fn old_releases(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+    cutoff: DateTime<Utc>,
+) -> anyhow::Result<u64> {
+    let old: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, target, version FROM releases WHERE published_at < $1")
+            .bind(cutoff)
+            .fetch_all(pool)
+            .await?;
+    if old.is_empty() {
+        return Ok(0);
+    }
+    let watched = watchers::watched_versions(pool, cfg).await?;
+    let ids: Vec<i64> = old
+        .into_iter()
+        .filter(|(_, target, version)| match watched.get(target) {
+            None => true,
+            Some((Some(current), eco)) => matches!(
+                compare(eco, version, current),
+                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+            ),
+            // Unknown current version: cannot tell, so keep it.
+            Some((None, _)) => false,
+        })
+        .map(|(id, _, _)| id)
+        .collect();
+    let deleted = sqlx::query("DELETE FROM releases WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -155,5 +192,105 @@ mod tests {
         assert_eq!(groups, vec!["b", "c"]);
         assert_eq!(count(&pool, "oaths").await, 1);
         assert_eq!(count(&pool, "oath_events").await, 1);
+    }
+
+    // ---- releases --------------------------------------------------------
+
+    /// prod runs kubernetes 1.30.2, a watched GitHub target.
+    async fn k8s_setup(pool: &PgPool) -> HeimdallConfig {
+        use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
+        let svc = upsert_service(pool, "prod", "cluster").await.unwrap();
+        let item = InventoryItem {
+            purl: "pkg:generic/kubernetes@1.30.2".into(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: None,
+        };
+        replace_components(pool, svc, crate::model::Source::Cluster, &[item])
+            .await
+            .unwrap();
+        serde_yaml::from_str(
+            "realms: [prod]\nwatchers:\n  github:\n    - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }\n",
+        )
+        .unwrap()
+    }
+
+    fn now() -> DateTime<Utc> {
+        "2026-11-13T00:00:00Z".parse().unwrap()
+    }
+
+    async fn old_release(pool: &PgPool, target: &str, version: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO releases (target, version, published_at) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(target)
+        .bind(version)
+        .bind(now() - Duration::days(400))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn release_ids(pool: &PgPool) -> Vec<i64> {
+        sqlx::query_scalar("SELECT id FROM releases ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retention_keeps_old_release_still_newer_than_running(pool: PgPool) {
+        let cfg = k8s_setup(&pool).await;
+        let id = old_release(&pool, "kubernetes", "1.31.0").await;
+        let r = cleanup(&pool, &cfg, now()).await.unwrap();
+        assert_eq!(r.releases, 0);
+        assert_eq!(release_ids(&pool).await, vec![id]);
+
+        // The watchers store it again: same row, no new id.
+        let target = watchers::WatchTarget {
+            name: "kubernetes".into(),
+            kind: watchers::WatchKind::Github,
+            current: Some("1.30.2".into()),
+            major_component: 1,
+            repo: Some("kubernetes/kubernetes".into()),
+            name_key: None,
+        };
+        let info = watchers::ReleaseInfo {
+            version: "1.31.0".into(),
+            published_at: Some(now() - Duration::days(400)),
+        };
+        let new = watchers::store_releases(&pool, &target, &[info])
+            .await
+            .unwrap();
+        assert_eq!(new, 0);
+        assert_eq!(release_ids(&pool).await, vec![id]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retention_deletes_old_superseded_release(pool: PgPool) {
+        let cfg = k8s_setup(&pool).await;
+        old_release(&pool, "kubernetes", "1.30.0").await;
+        old_release(&pool, "kubernetes", "1.30.2").await;
+        let keep = old_release(&pool, "kubernetes", "1.31.0").await;
+        let r = cleanup(&pool, &cfg, now()).await.unwrap();
+        assert_eq!(r.releases, 2);
+        assert_eq!(release_ids(&pool).await, vec![keep]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retention_deletes_release_of_unplanned_target(pool: PgPool) {
+        let cfg = k8s_setup(&pool).await;
+        old_release(&pool, "retired-thing", "9.0.0").await;
+        // Recent releases of an unplanned target are not old enough yet.
+        let recent: i64 = sqlx::query_scalar(
+            "INSERT INTO releases (target, version, published_at) VALUES ('retired-thing', '9.1.0', $1) RETURNING id",
+        )
+        .bind(now() - Duration::days(10))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let r = cleanup(&pool, &cfg, now()).await.unwrap();
+        assert_eq!(r.releases, 1);
+        assert_eq!(release_ids(&pool).await, vec![recent]);
     }
 }
