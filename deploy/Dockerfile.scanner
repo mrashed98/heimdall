@@ -11,7 +11,7 @@ COPY migrations ./migrations
 RUN cargo build --release --locked --bin heimdall
 
 # --- runtime: alpine + pinned syft + heimdall ---
-FROM alpine:3.22
+FROM alpine:3.24
 # Pinned release; checksums from syft_1.57.1_checksums.txt on the GitHub release.
 # TARGETARCH is set by buildx (amd64 or arm64); plain `docker build` sets it too.
 ARG SYFT_VERSION=1.57.1
