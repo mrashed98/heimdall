@@ -20,6 +20,25 @@ teams:
     realms: []          # empty = all realms
     min_severity: high
 
+# More alert channels: slack, discord, telegram, pagerduty, alertmanager,
+# webhook, email (and teams). Names are unique across `teams` and `channels`;
+# `*_env` keys name environment variables, never the secret itself.
+# channels:
+#   - { type: slack, name: dev-chat, webhook_env: SLACK_WEBHOOK_DEV, realms: [dev-k3s], min_severity: high }
+#   - { type: telegram, name: ops, bot_token_env: TELEGRAM_BOT_TOKEN, chat_id: -1001234567890, min_severity: high }
+#   - { type: pagerduty, name: oncall, routing_key_env: PAGERDUTY_ROUTING_KEY, min_severity: critical }
+#   - { type: alertmanager, name: am, url: "http://alertmanager:9093", min_severity: high }
+#   - { type: webhook, name: siem, url_env: SIEM_WEBHOOK_URL, secret_env: SIEM_WEBHOOK_SECRET, min_severity: low }
+#   - type: email
+#     name: security
+#     host: smtp.example.com
+#     security: starttls    # or tls, none
+#     username_env: SMTP_USERNAME
+#     password_env: SMTP_PASSWORD
+#     from: Heimdall <heimdall@example.com>
+#     to: [security@example.com]
+#     min_severity: high
+
 watchers:
   github:
     - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }

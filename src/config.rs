@@ -770,6 +770,21 @@ channels:\n\
     }
 
     #[test]
+    fn example_channels_block_parses() {
+        // The commented `channels:` example in heimdall.example.yaml.
+        let text = std::fs::read_to_string("heimdall.example.yaml").unwrap();
+        let block: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("# channels:"))
+            .take_while(|l| l.starts_with("# "))
+            .map(|l| &l[2..])
+            .collect();
+        assert!(block.len() > 5, "example block not found");
+        let cfg = load_str(&format!("realms: [dev-k3s]\n{}", block.join("\n"))).unwrap();
+        assert_eq!(cfg.channels.len(), 6);
+    }
+
+    #[test]
     fn channel_keys_are_checked_per_type() {
         // A key of another type is unknown here.
         let e = err("realms: [a]\nchannels:\n  - {type: slack, name: s, webhook_env: X, chat_id: 1, min_severity: high}");
