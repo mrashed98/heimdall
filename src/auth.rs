@@ -154,6 +154,28 @@ pub async fn ensure_bootstrap(pool: &PgPool, key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Apply `HEIMDALL_BOOTSTRAP_ADMIN_KEY` (its value, None when unset) at
+/// startup. Set: the `bootstrap` admin key is created or rotated. Unset or
+/// empty: the `bootstrap` key is deleted, so removing the variable really
+/// revokes the key instead of leaving it valid in the database.
+pub async fn sync_bootstrap(pool: &PgPool, key: Option<&str>) -> anyhow::Result<()> {
+    if let Some(k) = key.filter(|k| !k.is_empty()) {
+        return ensure_bootstrap(pool, k).await;
+    }
+    let deleted = sqlx::query("DELETE FROM api_keys WHERE name = $1")
+        .bind(BOOTSTRAP)
+        .execute(pool)
+        .await
+        .context("removing the bootstrap key")?
+        .rows_affected();
+    if deleted > 0 {
+        tracing::info!("HEIMDALL_BOOTSTRAP_ADMIN_KEY is not set; removed the bootstrap key");
+    } else {
+        tracing::info!("HEIMDALL_BOOTSTRAP_ADMIN_KEY is not set; no bootstrap key");
+    }
+    Ok(())
+}
+
 impl FromRequestParts<AppState> for Authed {
     type Rejection = ApiError;
 
@@ -461,6 +483,28 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(status(&app, "/admin", Some(BOOT2)).await, StatusCode::OK);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn bootstrap_key_removed_when_env_unset(pool: PgPool) {
+        sync_bootstrap(&pool, Some(BOOT)).await.unwrap();
+        let other = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        // HEIMDALL_BOOTSTRAP_ADMIN_KEY removed (unset or empty) on restart.
+        for unset in [None, Some("")] {
+            sync_bootstrap(&pool, unset).await.unwrap();
+            let app = app(state(pool.clone(), &[]));
+            assert_eq!(
+                status(&app, "/admin", Some(BOOT)).await,
+                StatusCode::UNAUTHORIZED,
+                "{unset:?}"
+            );
+        }
+        // Other keys are untouched.
+        let app = app(state(pool, &[]));
+        assert_ne!(
+            status(&app, "/admin", Some(&other)).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

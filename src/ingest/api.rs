@@ -14,8 +14,8 @@ use crate::auth::{require, Authed, Scope};
 pub use crate::error::ApiError;
 use crate::ingest::sbom;
 use crate::inventory::store::{
-    replace_components, replace_components_in, store_image_components, upsert_service,
-    InventoryItem,
+    record_image_failure, replace_components, replace_components_in, store_image_components,
+    upsert_service, InventoryItem,
 };
 use crate::model::Source;
 use crate::purl::name_key;
@@ -124,6 +124,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/ingest/cluster", post(ingest_cluster))
         .route("/api/v1/ingest/image/{digest}", post(ingest_image))
         .route("/api/v1/images/pending", get(pending_images))
+        .route("/api/v1/images/{digest}/failed", post(image_failed))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
@@ -318,6 +319,29 @@ async fn ingest_image(
         "components": components.len(),
         "skipped_without_purl": parsed.skipped_without_purl,
     })))
+}
+
+#[derive(Deserialize)]
+struct ScanFailure {
+    error: String,
+}
+
+/// scan-images reports an image it could not scan; the digest moves to the
+/// back of the pending queue (see `pending_image_digests`).
+async fn image_failed(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(digest): Path<String>,
+    Json(body): Json<ScanFailure>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require(&authed, Scope::Ingest)?;
+    if !is_valid_digest(&digest) {
+        return Err(ApiError::BadRequest(
+            "digest must be sha256:<64 hex characters>".into(),
+        ));
+    }
+    record_image_failure(&state.pool, &digest, &body.error).await?;
+    Ok(Json(serde_json::json!({ "digest": digest })))
 }
 
 async fn pending_images(
@@ -634,6 +658,40 @@ mod tests {
         let eff = effective_components(&pool, "dev-k3s").await.unwrap();
         assert_eq!(eff.len(), 1);
         assert_eq!(eff[0].service, "web");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn image_scan_failure_is_recorded(pool: PgPool) {
+        let (app, key, pool) = setup(pool).await;
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let uri = format!("/api/v1/images/{digest}/failed");
+        let body = br#"{"error":"syft exited with 1: pull denied"}"#.to_vec();
+        let (st, _) = call(&app, &key, "POST", &uri, body.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&app, &key, "POST", &uri, body.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (attempts, error): (i32, String) = sqlx::query_as(
+            "SELECT attempts, last_error FROM image_scan_attempts WHERE digest = $1",
+        )
+        .bind(&digest)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(error.contains("pull denied"));
+
+        let (st, _) = call(
+            &app,
+            &key,
+            "POST",
+            "/api/v1/images/nope/failed",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let read = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let (st, _) = call(&app, &read, "POST", &uri, body).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
     #[sqlx::test(migrations = "./migrations")]

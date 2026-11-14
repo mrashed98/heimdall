@@ -59,10 +59,8 @@ pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
 
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
     let pool = db::connect(&url).await?;
-    match std::env::var("HEIMDALL_BOOTSTRAP_ADMIN_KEY") {
-        Ok(key) if !key.is_empty() => auth::ensure_bootstrap(&pool, &key).await?,
-        _ => tracing::info!("HEIMDALL_BOOTSTRAP_ADMIN_KEY is not set; no bootstrap key"),
-    }
+    let bootstrap = std::env::var("HEIMDALL_BOOTSTRAP_ADMIN_KEY").ok();
+    auth::sync_bootstrap(&pool, bootstrap.as_deref()).await?;
     crate::inventory::store::sync_declared(&pool, &cfg.declared)
         .await
         .context("syncing declared components")?;

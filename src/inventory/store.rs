@@ -1,6 +1,6 @@
 //! Inventory store: which components each service uses, per source.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
 use anyhow::Context;
@@ -190,6 +190,11 @@ pub async fn store_image_components(
         .bind(digest)
         .execute(&mut *tx)
         .await?;
+    // Scanned at last: earlier failures no longer matter.
+    sqlx::query("DELETE FROM image_scan_attempts WHERE digest = $1")
+        .bind(digest)
+        .execute(&mut *tx)
+        .await?;
     for (purl, cpes) in components {
         let component_id = upsert_component(&mut tx, purl, cpes).await?;
         sqlx::query(
@@ -205,35 +210,52 @@ pub async fn store_image_components(
     Ok(())
 }
 
+/// Failed scans after which a digest is offered only once a day.
+const SCAN_ATTEMPTS_BEFORE_BACKOFF: i32 = 5;
+
 /// Image digests that services reference but that have no SBOM yet, each with
 /// a pullable reference `{repository_url}@{digest}`. The repository comes from
 /// the `repository_url` qualifier of a referencing `pkg:oci` purl; digests
 /// with no such purl are skipped with a warning.
+///
+/// Never-tried digests come first, then the least recently tried, so a
+/// digest that keeps failing cannot starve the others (scan-images takes
+/// only the first few). One that failed `SCAN_ATTEMPTS_BEFORE_BACKOFF` times
+/// is offered again only a day after its last try.
 pub async fn pending_image_digests(pool: &PgPool) -> anyhow::Result<Vec<(String, String)>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT sc.via_image_digest, c.purl \
+        "SELECT sc.via_image_digest, c.purl \
          FROM service_components sc \
          JOIN components c ON c.id = sc.component_id \
+         LEFT JOIN image_scan_attempts a ON a.digest = sc.via_image_digest \
          WHERE sc.via_image_digest IS NOT NULL \
            AND NOT EXISTS (SELECT 1 FROM image_sboms i WHERE i.digest = sc.via_image_digest) \
-         ORDER BY sc.via_image_digest, c.purl",
+           AND (a.digest IS NULL OR a.attempts < $1 \
+                OR a.last_attempt_at < now() - interval '24 hours') \
+         GROUP BY sc.via_image_digest, c.purl, a.last_attempt_at \
+         ORDER BY a.last_attempt_at NULLS FIRST, sc.via_image_digest, c.purl",
     )
+    .bind(SCAN_ATTEMPTS_BEFORE_BACKOFF)
     .fetch_all(pool)
     .await?;
 
-    // Rows are sorted by purl within a digest, so the first usable one is
-    // deterministic.
-    let mut by_digest: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // Rows are in queue order, and sorted by purl within a digest, so the
+    // first usable purl is deterministic. `order` keeps the queue order.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_digest: HashMap<String, Option<String>> = HashMap::new();
     for (digest, purl) in rows {
-        let entry = by_digest.entry(digest.clone()).or_insert(None);
+        let entry = by_digest.entry(digest.clone()).or_insert_with(|| {
+            order.push(digest.clone());
+            None
+        });
         if entry.is_none() {
             *entry = oci_repository(&purl).map(|repo| format!("{repo}@{digest}"));
         }
     }
 
     let mut out = Vec::new();
-    for (digest, image_ref) in by_digest {
-        match image_ref {
+    for digest in order {
+        match by_digest.remove(&digest).flatten() {
             Some(r) => out.push((digest, r)),
             None => tracing::warn!(
                 digest = %digest,
@@ -242,6 +264,23 @@ pub async fn pending_image_digests(pool: &PgPool) -> anyhow::Result<Vec<(String,
         }
     }
     Ok(out)
+}
+
+/// Record a failed scan of `digest` (scan-images reports it), which moves
+/// the digest to the back of the queue. The error is kept, shortened.
+pub async fn record_image_failure(pool: &PgPool, digest: &str, error: &str) -> anyhow::Result<()> {
+    let error: String = error.chars().take(1000).collect();
+    sqlx::query(
+        "INSERT INTO image_scan_attempts (digest, attempts, last_attempt_at, last_error) \
+         VALUES ($1, 1, now(), $2) \
+         ON CONFLICT (digest) DO UPDATE SET attempts = image_scan_attempts.attempts + 1, \
+             last_attempt_at = now(), last_error = EXCLUDED.last_error",
+    )
+    .bind(digest)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// The `repository_url` qualifier of a `pkg:oci` purl, if present.
@@ -381,6 +420,92 @@ mod tests {
             .await
             .unwrap();
         assert!(effective_purls(&pool, "prod").await.is_empty());
+    }
+
+    /// A cluster item that runs image `digest` from ghcr.io/o/<name>.
+    fn image(name: &str, digest: &str) -> InventoryItem {
+        InventoryItem {
+            purl: format!(
+                "pkg:oci/{name}@{}?repository_url=ghcr.io/o/{name}",
+                digest.replace(':', "%3A")
+            ),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: Some(digest.to_string()),
+        }
+    }
+
+    async fn pending_digests(pool: &PgPool) -> Vec<String> {
+        pending_image_digests(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(d, _)| d)
+            .collect()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn failed_images_go_to_the_back_of_the_queue(pool: PgPool) {
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        let items = [image("a", "sha256:d1"), image("b", "sha256:d2")];
+        replace_components(&pool, svc, Source::Cluster, &items)
+            .await
+            .unwrap();
+        assert_eq!(pending_digests(&pool).await, ["sha256:d1", "sha256:d2"]);
+        // d1 cannot be pulled: d2 is tried first from now on, so one broken
+        // image cannot starve the rest.
+        record_image_failure(&pool, "sha256:d1", "pull denied")
+            .await
+            .unwrap();
+        assert_eq!(pending_digests(&pool).await, ["sha256:d2", "sha256:d1"]);
+        let (attempts, error): (i32, String) = sqlx::query_as(
+            "SELECT attempts, last_error FROM image_scan_attempts WHERE digest = 'sha256:d1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((attempts, error.as_str()), (1, "pull denied"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn image_failing_five_times_waits_a_day(pool: PgPool) {
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        replace_components(&pool, svc, Source::Cluster, &[image("a", "sha256:d1")])
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            record_image_failure(&pool, "sha256:d1", "x").await.unwrap();
+        }
+        assert_eq!(
+            pending_digests(&pool).await,
+            ["sha256:d1"],
+            "4 tries: still due"
+        );
+        record_image_failure(&pool, "sha256:d1", "x").await.unwrap();
+        assert!(
+            pending_digests(&pool).await.is_empty(),
+            "5 tries: backs off"
+        );
+
+        sqlx::query("UPDATE image_scan_attempts SET last_attempt_at = now() - interval '25 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_digests(&pool).await,
+            ["sha256:d1"],
+            "a day later: due again"
+        );
+
+        // A successful scan clears the record.
+        store_image_sbom(&pool, "sha256:d1", "ghcr.io/o/a", &[])
+            .await
+            .unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM image_scan_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]

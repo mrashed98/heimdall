@@ -1,11 +1,15 @@
 use anyhow::Context;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
-/// Connect to Postgres (max 5 connections) and apply pending migrations.
+/// Pool size. Ten leaves room for the scheduled loops, a few requests and
+/// `/healthz` at once, so a busy minute does not time out the readiness probe.
+pub const MAX_CONNECTIONS: u32 = 10;
+
+/// Connect to Postgres (`MAX_CONNECTIONS`) and apply pending migrations.
 /// Migrations are embedded in the binary at compile time from `./migrations`.
 pub async fn connect(url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(MAX_CONNECTIONS)
         .connect(url)
         .await
         .context("connecting to postgres")?;

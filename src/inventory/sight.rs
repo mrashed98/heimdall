@@ -150,8 +150,8 @@ pub fn build_inventory(realm: &str, objs: &ClusterObjects) -> ClusterInventory {
                 .entry((kind, ns, owner))
                 .or_insert_with(|| name.clone());
         }
-        for (image, digest) in pod_images(pod) {
-            services.add(&name, image_item(&image, &digest));
+        for img in pod_images(pod) {
+            services.add(&name, image_item(&img));
         }
     }
 
@@ -291,9 +291,19 @@ fn pod_workload(pod: &Pod) -> Option<(String, String)> {
     Some(("Deployment".to_string(), name.to_string()))
 }
 
-/// (image field from the spec, digest) for every container with a known digest,
-/// init containers included.
-fn pod_images(pod: &Pod) -> Vec<(String, String)> {
+/// A container image as Sight reports it.
+struct PodImage {
+    /// The image field from the spec (it has the tag).
+    image: String,
+    digest: String,
+    /// The digest names a manifest, so `repo@digest` can be pulled and
+    /// scanned. A bare `sha256:...` imageID is the image's config id on some
+    /// runtimes: nothing can be pulled by it.
+    pullable: bool,
+}
+
+/// Every container image with a known digest, init containers included.
+fn pod_images(pod: &Pod) -> Vec<PodImage> {
     let Some(spec) = &pod.spec else {
         return Vec::new();
     };
@@ -316,9 +326,23 @@ fn pod_images(pod: &Pod) -> Vec<(String, String)> {
                 .find(|c| c.name == st.name)
                 .and_then(|c| c.image.clone())
                 .unwrap_or_else(|| st.image.clone());
-            let digest = digest_of(&st.image_id).or_else(|| digest_of(&image));
-            if let Some(d) = digest {
-                out.push((image, d));
+            // `repo@sha256:...` (any prefix) is a manifest digest; so is a
+            // digest pinned in the spec's image.
+            let manifest = if st.image_id.contains('@') {
+                digest_of(&st.image_id)
+            } else {
+                None
+            };
+            let found = match manifest.or_else(|| digest_of(&image)) {
+                Some(d) => Some((d, true)),
+                None => digest_of(&st.image_id).map(|d| (d, false)),
+            };
+            if let Some((digest, pullable)) = found {
+                out.push(PodImage {
+                    image,
+                    digest,
+                    pullable,
+                });
             }
         }
     }
@@ -364,8 +388,9 @@ fn parse_image(image: &str) -> (String, String, Option<String>) {
     (registry, repo, tag)
 }
 
-fn image_item(image: &str, digest: &str) -> ClusterItem {
-    let (registry, repo, tag) = parse_image(image);
+fn image_item(img: &PodImage) -> ClusterItem {
+    let digest = &img.digest;
+    let (registry, repo, tag) = parse_image(&img.image);
     let last = repo.rsplit('/').next().unwrap_or(&repo);
     // purl wants the `:` in the version encoded.
     let mut purl = format!(
@@ -375,7 +400,8 @@ fn image_item(image: &str, digest: &str) -> ClusterItem {
     if let Some(tag) = tag {
         purl.push_str(&format!("&tag={tag}"));
     }
-    item(purl, Some(digest.to_string()))
+    // Only a pullable digest is queued for scanning.
+    item(purl, img.pullable.then(|| digest.clone()))
 }
 
 /// `kube-prometheus-stack-65.1.0` -> (`kube-prometheus-stack`, `65.1.0`).
@@ -567,6 +593,27 @@ mod tests {
         // init container too, Docker Hub short name normalised
         assert!(purls(db).iter().any(|p| p.starts_with("pkg:oci/busybox@")
             && p.ends_with("?repository_url=docker.io/library/busybox&tag=1.36")));
+    }
+
+    #[test]
+    fn bare_config_id_is_not_a_scannable_digest() {
+        // Some runtimes report only the image's config id as imageID. It is
+        // no manifest digest: `repo@<it>` cannot be pulled, so it must not
+        // be queued for scanning.
+        let mut v = pod_json("");
+        v["spec"]["containers"] = serde_json::json!([{"name":"c","image":"ghcr.io/o/app:2"}]);
+        v["status"] = serde_json::json!({"containerStatuses":[{"name":"c","image":"ghcr.io/o/app:2",
+            "imageID":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "ready":true,"restartCount":0}]});
+        let mut objs = fixture();
+        objs.pods = vec![serde_json::from_value(v).unwrap()];
+        let inv = build_inventory("prod", &objs);
+        let item = svc(&inv, "p-1")
+            .items
+            .iter()
+            .find(|i| i.purl.starts_with("pkg:oci/app@"))
+            .expect("the image is still in the inventory");
+        assert_eq!(item.via_image_digest, None);
     }
 
     #[test]

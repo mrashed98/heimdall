@@ -48,6 +48,10 @@ pub async fn run(client: &Client, syft: &Path, max: usize) -> anyhow::Result<Sca
             Err(e) => {
                 eprintln!("failed {}: {e:#}", item.image_ref);
                 report.failed += 1;
+                // Reported so the next run tries the other images first.
+                if let Err(r) = report_failure(client, &item, &format!("{e:#}")).await {
+                    eprintln!("could not report the failure of {}: {r:#}", item.image_ref);
+                }
             }
         }
     }
@@ -65,6 +69,16 @@ async fn scan_one(client: &Client, syft: &Path, item: &Pending) -> anyhow::Resul
         .post_bytes(&path, sbom)
         .await
         .context("uploading the SBOM")?;
+    Ok(())
+}
+
+async fn report_failure(client: &Client, item: &Pending, error: &str) -> anyhow::Result<()> {
+    let path = format!(
+        "/api/v1/images/{}/failed",
+        Client::encode_segment(&item.digest)
+    );
+    let body = serde_json::json!({ "error": error });
+    let _: serde_json::Value = client.post_json(&path, &body).await?;
     Ok(())
 }
 
@@ -145,7 +159,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex("^/api/v1/ingest/image/"))
+            .and(path_regex("^/api/v1/(ingest/image/|images/.*/failed$)"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .mount(&server)
             .await;
@@ -169,9 +183,25 @@ mod tests {
             .into_iter()
             .filter(|r| r.method.as_str() == "POST")
             .collect();
-        assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].body, SBOM.as_bytes());
-        let q = posts[0].url.query().unwrap_or_default().to_string();
+        let (uploads, failures): (Vec<_>, Vec<_>) = posts
+            .into_iter()
+            .partition(|r| r.url.path().starts_with("/api/v1/ingest/image/"));
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].body, SBOM.as_bytes());
+        let q = uploads[0].url.query().unwrap_or_default().to_string();
         assert!(q.starts_with("image_ref=ghcr.io"), "query was {q}");
+        // The failure is reported, so the bad image goes to the back of the queue.
+        assert_eq!(failures.len(), 1);
+        let bad = format!("sha256:bad{}", "b".repeat(61));
+        let encoded = Client::encode_segment(&bad);
+        assert_eq!(
+            failures[0].url.path(),
+            format!("/api/v1/images/{encoded}/failed")
+        );
+        let body: serde_json::Value = serde_json::from_slice(&failures[0].body).unwrap();
+        assert!(
+            body["error"].as_str().unwrap().contains("cannot pull"),
+            "{body}"
+        );
     }
 }

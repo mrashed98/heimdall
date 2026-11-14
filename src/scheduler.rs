@@ -9,6 +9,9 @@
 //! An iteration runs as its own task: an error is logged, a panic is logged
 //! as a `JoinError`, and the loop goes on either way. Several loops call the
 //! matcher; it takes a per-realm advisory lock, so that is safe.
+//!
+//! Oath expiries have no loop of their own: the matcher processes them, and
+//! it runs after every OSV refresh, at least every 15 minutes.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -43,20 +46,22 @@ enum Job {
     Osv,
     K8sFeed,
     Watchers,
-    Oaths,
     Outbox,
     Digest,
     Nvd,
     Retention,
 }
 
+/// The longest the OSV loop waits. Its matcher run also expires oaths, so
+/// this bounds how late a lapsed oath is noticed.
+const MAX_OSV_MINUTES: u32 = 15;
+
 impl Job {
-    const ALL: [Job; 9] = [
+    const ALL: [Job; 8] = [
         Job::Sight,
         Job::Osv,
         Job::K8sFeed,
         Job::Watchers,
-        Job::Oaths,
         Job::Outbox,
         Job::Digest,
         Job::Nvd,
@@ -69,7 +74,6 @@ impl Job {
             Job::Osv => "osv",
             Job::K8sFeed => "k8s_feed",
             Job::Watchers => "watchers",
-            Job::Oaths => "oaths",
             Job::Outbox => "outbox",
             Job::Digest => "digest",
             Job::Nvd => "nvd",
@@ -82,10 +86,9 @@ impl Job {
         let minutes = |m: u32| Duration::from_secs(u64::from(m.max(1)) * 60);
         match self {
             Job::Sight => minutes(cfg.schedules.sight_minutes),
-            Job::Osv => minutes(cfg.schedules.osv_minutes),
+            Job::Osv => minutes(cfg.schedules.osv_minutes.min(MAX_OSV_MINUTES)),
             Job::K8sFeed => minutes(cfg.schedules.k8s_cve_minutes),
             Job::Watchers => minutes(cfg.schedules.watchers_minutes),
-            Job::Oaths => minutes(15),
             Job::Outbox => Duration::from_secs(2),
             Job::Digest => minutes(1),
             Job::Nvd => minutes(cfg.nvd.minutes),
@@ -195,7 +198,6 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
             log_failure("osv", osv_refresh(st).await);
             rematch(st).await
         }
-        Job::Oaths => rematch(st).await,
         Job::Nvd => {
             log_failure("nvd", nvd_refresh(st).await);
             rematch(st).await
@@ -367,5 +369,27 @@ async fn announce(st: &AppState, realms: &[String]) -> anyhow::Result<()> {
 fn log_failure(step: &str, r: anyhow::Result<()>) {
     if let Err(e) = r {
         tracing::error!(step, "{e:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(yaml: &str) -> HeimdallConfig {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn oath_expiry_waits_at_most_15_minutes() {
+        // No loop of its own: the matcher after each OSV refresh processes
+        // expiries, so that loop never waits longer than 15 minutes.
+        assert!(!Job::ALL.iter().any(|j| j.name() == "oaths"));
+        let quarter = Duration::from_secs(15 * 60);
+        assert_eq!(Job::Osv.period(&cfg("realms: [prod]\n")), quarter);
+        let slow = cfg("realms: [prod]\nschedules: {osv_minutes: 60}\n");
+        assert_eq!(Job::Osv.period(&slow), quarter);
+        let fast = cfg("realms: [prod]\nschedules: {osv_minutes: 5}\n");
+        assert_eq!(Job::Osv.period(&fast), Duration::from_secs(5 * 60));
     }
 }
