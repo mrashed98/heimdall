@@ -77,10 +77,14 @@ Every component, direct or not, gets vulnerability matching.
 | Loop | Default interval |
 |---|---|
 | Sight (cluster scan) | 15 minutes |
-| OSV match | 15 minutes |
+| OSV match (and oath expiry) | 15 minutes (at most) |
 | Kubernetes CVE feed | 30 minutes |
 | Watchers (releases) | 60 minutes |
 | NVD | 120 minutes |
+
+The matcher runs after every OSV refresh (and after NVD and the watchers). It
+also expires lapsed oaths, so there is no separate oath loop; the OSV loop runs
+at least every 15 minutes, which bounds how late an expiry is noticed.
 
 On start, each realm gets a first run in order (Sight, OSV, matcher, a summary
 card, then alerts), so no alert can arrive before the realm's summary. Old rows

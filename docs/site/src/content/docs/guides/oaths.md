@@ -41,6 +41,13 @@ heimdall oath ignore CVE-2026-0001 --service api --all-realms \
 Both print `oath <id>`. Use `--realm` for one realm or `--all-realms` for every
 realm, current and future (give one or the other).
 
+The advisory can be given under any of its names: the id Heimdall shows
+(`GHSA-…`), its CVE id, or another database's id for it (`GO-…`, `PYSEC-…`).
+The oath is stored under the id findings carry, and the name you typed is kept
+in its history. If no known advisory has that name, the oath is still stored as
+typed, and the CLI prints a warning: it only applies once an advisory with
+exactly that id turns up, so check for a typo.
+
 ## Manage them
 
 ```bash
@@ -57,9 +64,13 @@ revoked oath cannot be extended.
 - No immediate alert, and the gate ignores that advisory for that component.
 - The oath is listed in the weekly digest.
 - If a **fix is released** while the oath is active, you are still alerted, and
-  the oath stays until a human acts.
+  the oath stays until a human acts. (For a medium or low advisory this holds
+  when the fix came out after Heimdall first saw the advisory; see
+  [alert rules](/heimdall/concepts/alerts/).)
 - When the date passes the oath becomes `expired`, an "oath expired" alert fires,
-  and the advisory counts again, in alerts and in the gate.
+  and the advisory counts again, in alerts and in the gate. Expiry is noticed
+  by the matcher run that follows each OSV refresh, so it lands at most 15
+  minutes after the date.
 
 ## Across versions
 

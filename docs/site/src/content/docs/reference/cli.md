@@ -68,6 +68,7 @@ heimdall gate --service api --realm dev-k3s --sbom sbom.json --fail-on high
 | `--repo-root DIR` | `.` | Where `go.mod` and `package.json` files are read for direct dependencies. |
 | `--branch NAME` | `$GITHUB_REF_NAME` | Branch being built. Required if the variable is not set. |
 | `--default-branch NAME` | from `$GITHUB_EVENT_PATH` | The repository's default branch. Required if the event file has no `repository.default_branch`. |
+| `--allow-empty` | off | Accept an SBOM with no components. Without it the server refuses one (exit `2`), so a broken SBOM step cannot empty the service's inventory. |
 
 **Exit codes**
 
@@ -94,14 +95,16 @@ heimdall oath ignore <ADVISORY> --service S (--realm R | --all-realms) --purl PU
 
 | Argument | Meaning |
 |---|---|
-| `ADVISORY` | Advisory id, for example `GHSA-...` or `CVE-...`. |
+| `ADVISORY` | Advisory id, for example `GHSA-...`, or any other name of it (`CVE-...`, `GO-...`). It is stored under the id findings carry. |
 | `--service` | Service name. |
 | `--realm` / `--all-realms` | One realm, or every realm. Give exactly one. |
 | `--purl` | The component's current package URL. |
 | `--reason` | Why this is acceptable. Required, not blank. |
 | `--until YYYY-MM-DD` | Snooze: **required**, the first day the oath no longer holds. Ignore: the review date, default 90 days from today. Must be after today (UTC). |
 
-Prints `oath <id>`.
+Prints `oath <id>`. When no known advisory has the given name, the oath is still
+stored, and a warning is printed on stderr: it applies only once an advisory
+with exactly that id turns up.
 
 ### `heimdall oath list`
 
@@ -128,9 +131,10 @@ heimdall keys revoke ci-runner
 
 Names match `[A-Za-z0-9._-]{1,64}`. An `admin` key can only be created for a name
 listed under `admins:` in the config. `bootstrap` is reserved: it exists only
-through `HEIMDALL_BOOTSTRAP_ADMIN_KEY` (changing that variable rotates it), and
+through `HEIMDALL_BOOTSTRAP_ADMIN_KEY` (changing that variable rotates it;
+removing it, or setting it empty, deletes the key at the next start), and
 `keys create --name bootstrap` is rejected. Create a named admin key for yourself,
-then stop using the bootstrap key. Keys are stored as SHA-256 hashes
+then remove the variable. Keys are stored as SHA-256 hashes
 ([ADR 0004](/heimdall/decisions/0004-sha256-api-keys/)); the plaintext is shown
 only once.
 
@@ -155,7 +159,10 @@ Generate SBOMs for images that have none. This is what the Helm CronJob runs.
 | `--max N` | `20` | Most images to scan in one run. |
 | `--syft PATH` | `syft` | Path to the syft binary. |
 
-Exits with failure only if every attempted image failed.
+Each image that fails is reported to the server
+(`POST /api/v1/images/{digest}/failed`), which then offers the other images
+first; an image that failed five times is offered again only a day after its
+last try. Exits with failure only if every attempted image failed.
 
 ## `heimdall findings`
 

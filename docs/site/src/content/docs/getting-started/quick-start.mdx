@@ -82,7 +82,8 @@ config, upload SBOMs with the [CI gate](/heimdall/guides/ci-gate/), or call the
 <Aside type="caution" title="Create a named admin key, then retire the bootstrap key">
 The bootstrap key is meant for the very first step. Create a key for yourself
 with `heimdall keys create --name <you> --scope admin` (your name must be listed
-under `admins:` in the config), then stop using the bootstrap key. See
+under `admins:` in the config), then remove `HEIMDALL_BOOTSTRAP_ADMIN_KEY`:
+at the next start Heimdall deletes the bootstrap key. See
 [API keys](/heimdall/reference/cli/#heimdall-keys).
 </Aside>
 

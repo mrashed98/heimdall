@@ -10,7 +10,7 @@ for a walkthrough.
 | Value | Default | Meaning |
 |---|---|---|
 | `image.repository` | `ghcr.io/mrashed98/heimdall` | Server image. |
-| `image.tag` | `""` | Image tag. Empty means the chart `appVersion`. |
+| `image.tag` | `""` | Image tag. Empty means the chart `appVersion` (release images are tagged without the `v`, e.g. `0.1.0`). |
 | `image.pullPolicy` | `IfNotPresent` | Pull policy. |
 | `scannerImage.repository` | `ghcr.io/mrashed98/heimdall-scanner` | Image-SBOM scanner image (syft plus `heimdall scan-images`). |
 | `scannerImage.tag` | `""` | Empty means the chart `appVersion`. |
@@ -33,7 +33,8 @@ for a walkthrough.
 | `scanImages.resources.limits.cpu` | `"1"` | Scanner CPU limit. |
 | `scanImages.resources.requests.memory` | `256Mi` | Scanner memory request. |
 | `scanImages.resources.requests.cpu` | `100m` | Scanner CPU request. |
-| `serviceMonitor.enabled` | `true` | Create a ServiceMonitor, only when the `monitoring.coreos.com/v1` API exists. |
+| `serviceMonitor.enabled` | `true` | Create a ServiceMonitor, when the `monitoring.coreos.com/v1` API exists or `serviceMonitor.force` is set. |
+| `serviceMonitor.force` | `false` | Render the ServiceMonitor without checking for the API. For renders that cannot see the cluster (ArgoCD, `helm template`); set it only when the Prometheus Operator CRDs are installed. |
 | `serviceMonitor.interval` | `60s` | Scrape interval. |
 | `serviceMonitor.labels` | `{}` | Extra labels, so kube-prometheus-stack selects it. |
 | `ingress.enabled` | `false` | Create an Ingress. Heimdall is not meant to be internet-exposed. |

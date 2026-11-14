@@ -25,7 +25,10 @@ The Helm chart lives in the repository at `deploy/helm/heimdall`.
 <Aside type="note">
 Releases are cut by pushing a `v*` tag. CI then builds static Linux binaries
 (`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images, and
-pushes the images to GHCR.
+pushes the images to GHCR tagged with the version **without the `v`** (tag
+`v0.1.0` gives `heimdall:0.1.0`) and `latest`. That is the tag the chart pulls
+by default (its `appVersion`). A tag build fails unless the tag, the chart's
+`appVersion` and the crate version agree.
 </Aside>
 
 ## Install
@@ -152,8 +155,11 @@ check), Helm cannot see that API, so tell it:
 helm template heimdall deploy/helm/heimdall --api-versions monitoring.coreos.com/v1
 ```
 
-Without `--api-versions` the ServiceMonitor is left out of the output. If your
-Prometheus only selects ServiceMonitors with certain labels (as
+Without `--api-versions` the ServiceMonitor is left out of the output. Tools
+that always render without the cluster's API list (ArgoCD among them) need
+`serviceMonitor.force: true` instead, which renders it whatever Helm can see.
+Set it only when the Prometheus Operator CRDs are installed, or the apply
+fails. If your Prometheus only selects ServiceMonitors with certain labels (as
 kube-prometheus-stack does), add them with `serviceMonitor.labels`.
 
 ## Deploy with ArgoCD
@@ -176,6 +182,10 @@ spec:
     helm:
       values: |
         existingSecret: heimdall-secrets
+        # ArgoCD renders offline: render the ServiceMonitor anyway
+        # (only with the Prometheus Operator installed).
+        serviceMonitor:
+          force: true
         config:
           realms: [dev-k3s]
           sight:
@@ -197,9 +207,10 @@ spec:
 ```
 
 <Aside type="tip">
-ArgoCD renders charts with the cluster's real API list, so the ServiceMonitor
-appears on its own when the Prometheus Operator is installed. Pin
-`targetRevision` to a release tag for production.
+ArgoCD renders charts without the cluster's API list, so the
+`monitoring.coreos.com/v1` check never passes there: set
+`serviceMonitor.force: true` (as above) when the Prometheus Operator is
+installed. Pin `targetRevision` to a release tag for production.
 </Aside>
 
 Heimdall can also see this Application: Sight reads ArgoCD Applications to learn

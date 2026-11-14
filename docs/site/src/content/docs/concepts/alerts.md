@@ -14,7 +14,10 @@ A card is sent right away for:
    active oath.
 2. A **major release** of something in your inventory or watcher config.
 3. A **release that fixes a CVE you are exposed to**, including CVEs under an
-   oath ("Fix available: upgrade `foo` 2.4.0 to 2.4.1 fixes CVE-…"). This also
+   oath ("Fix available: upgrade `foo` 2.4.0 to 2.4.1 fixes CVE-…"), when the
+   CVE is critical or high, or when the fix came out after Heimdall first saw
+   the CVE (a later matcher run). A medium or low CVE that had a fix from the
+   start goes to the weekly digest instead, with its fix shown. This also
    fires for indirect dependencies, and the card says "indirect dependency".
 4. An **oath expired**: the CVE is back.
 5. **End of support** within 60 days for a version you run.
@@ -30,9 +33,14 @@ number counts as the major version.
 ## Grouping and pacing
 
 - Cards are grouped **per advisory** (or per release). One CVE is one card,
-  listing every affected service, component and realm.
+  listing every affected service, component and realm. When OSV has several
+  records for one CVE (Go's and GitHub's, Debian's DSA and DEBIAN-CVE), they
+  count as one advisory: see [matching](/heimdall/concepts/matching/).
 - A finding is announced **once**. It re-fires only on a state change: a fix is
   released, an oath expires, or the severity rises.
+- A finding that goes away and comes back within 30 days (a new image not
+  scanned yet, a scale to zero, a finished Job) is not announced again. After
+  30 days away, it counts as new.
 - Alerts fire from the very first run, with no silent baseline. Heimdall first
   sends a short "Heimdall has opened his eyes" card per realm with counts by
   severity.
@@ -52,7 +60,8 @@ Everything that did not deserve an immediate alert goes into one card per route
 each week (default Monday 09:00 UTC, see `digest` in the
 [configuration reference](/heimdall/reference/configuration/#digest)):
 
-- medium, low and unknown vulnerabilities opened since the last digest,
+- medium, low and unknown vulnerabilities opened since the last digest, with
+  the fixed version when one existed from the start,
 - minor and patch releases, by what their release notes say,
 - active oaths, flagging those carried to a new version,
 - declared components, each as "declared since {date}" so stale versions show.

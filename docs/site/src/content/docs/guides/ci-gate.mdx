@@ -84,6 +84,10 @@ On the repository's **default branch** the upload also updates the service's
 inventory (source `git`). On **other branches** the SBOM is only evaluated (source
 `ci`), so a feature branch never changes what Heimdall considers deployed.
 
+An SBOM with no components is refused (the gate exits `2` with `empty SBOM`),
+so a broken syft step cannot empty a service and resolve its findings. If a
+service really has no dependencies, pass `--allow-empty`.
+
 ## Without the action
 
 The same thing by hand, anywhere you can run `syft` and `heimdall`:
@@ -130,7 +134,9 @@ verdict: FAIL (checked against osv)
 ```
 
 The `OATH` column shows the id of an oath that covers the finding. Findings under
-an active oath do not fail the build.
+an active oath do not fail the build. When OSV has several records for one
+vulnerability (a `GO-` and a `GHSA-` record for one CVE), the report shows it
+once, and an oath filed under any of its names covers it.
 
 ## Troubleshooting
 
@@ -139,5 +145,7 @@ an active oath do not fail the build.
   `verdict: UNVERIFIED (checked against …)`, and the `unverified:` lines above it
   list the components that could not be checked.
 - **401 or 403**: wrong key (401), or the key's scope is too low (403).
+- **`empty SBOM`**: syft found no components with a package URL. Check the
+  scanned path; pass `--allow-empty` only if the service has no dependencies.
 - **"the 'repository' input is empty"**: set `repository: owner/name` when using
   the action locally.

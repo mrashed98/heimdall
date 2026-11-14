@@ -13,12 +13,14 @@ because it is meant for the cluster network. The full list is in the
 
 With the Prometheus Operator, the Helm chart creates a **ServiceMonitor**
 (`serviceMonitor.enabled`, on by default; it is only rendered when the
-`monitoring.coreos.com/v1` API exists in the cluster). Add labels so
-kube-prometheus-stack selects it:
+`monitoring.coreos.com/v1` API exists in the cluster, or when
+`serviceMonitor.force` is true, which offline renderers such as ArgoCD need).
+Add labels so kube-prometheus-stack selects it:
 
 ```yaml
 serviceMonitor:
   enabled: true
+  force: true        # ArgoCD or another offline render
   interval: 60s
   labels:
     release: kube-prometheus-stack

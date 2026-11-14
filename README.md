@@ -31,6 +31,23 @@ advisory or release so one CVE is one card, and sent once. Heimdall is **not
 exposed to the internet**: CI runs on self-hosted runners that reach the
 in-cluster Service.
 
+### Alert rules in short
+
+- Immediate: critical and high vulnerabilities (not under an oath), major
+  releases, end of support within 60 days, expired oaths, Kubernetes CVEs,
+  release notes naming a CVE that affects you, and a **fix available** when
+  its CVE is critical or high, or when the fix came out after Heimdall first
+  saw the CVE.
+- Weekly digest: medium, low and unknown vulnerabilities (with their fix when
+  one existed from the start), minor and patch releases, active oaths,
+  declared components.
+- One vulnerability is one advisory, even when OSV has several records for it
+  (`GO-`/`GHSA-`, `PYSEC-`/`GHSA-`, `DSA-`/`DEBIAN-CVE-`, ...) or NVD has it too.
+- A finding that disappears and comes back within 30 days (an image not
+  scanned yet, a scale to zero) is not announced again.
+
+Details: [alert rules](https://mrashed98.github.io/heimdall/concepts/alerts/).
+
 ## Why Heimdall
 
 [OWASP Dependency-Track](https://dependencytrack.org) is the inspiration for
@@ -176,7 +193,7 @@ What the chart creates:
 - CronJob `scan-images` (default `0 */6 * * *`, `concurrencyPolicy: Forbid`,
   its own resources). For private registries set
   `scanImages.dockerConfigSecret` to a `kubernetes.io/dockerconfigjson` Secret.
-- ServiceMonitor scraping `/metrics` (`serviceMonitor.enabled`, default true; only rendered when the Prometheus Operator CRD `monitoring.coreos.com/v1` exists in the cluster).
+- ServiceMonitor scraping `/metrics` (`serviceMonitor.enabled`, default true; only rendered when the Prometheus Operator CRD `monitoring.coreos.com/v1` exists in the cluster, or when `serviceMonitor.force=true`, which offline renderers such as ArgoCD need).
 - Ingress, only when `ingress.enabled=true` (default false).
 
 Set `otlpEndpoint` to export traces to an OTel collector. The scanner reaches
@@ -204,7 +221,7 @@ is a complete example.
 | `registries[]` | `[]` | Private registry credentials: `host`, `secret_env` (env var holding `user:password`). Used by the OCI watcher for tag lookups. |
 | `sight.realm` | first of `realms` | The realm of the cluster Heimdall itself runs in. In-process Sight scans it; skipped when no cluster is reachable. |
 | `schedules.sight_minutes` | `15` | Cluster scan interval. |
-| `schedules.osv_minutes` | `15` | OSV match interval. |
+| `schedules.osv_minutes` | `15` | OSV match interval, at most 15 (larger values count as 15): the matcher after each OSV refresh also expires oaths. |
 | `schedules.k8s_cve_minutes` | `30` | Kubernetes CVE feed interval. |
 | `schedules.watchers_minutes` | `60` | Release watcher interval. |
 | `nvd.api_key_env` | `NVD_API_KEY` | Name of the env var holding the NVD API key. |
@@ -318,10 +335,14 @@ heimdall oath revoke 12
 ```
 
 While an oath is active there is no immediate alert and the gate ignores that
-advisory; it appears in the weekly digest. When it expires the CVE alerts and
-counts again. If a fix is released while the oath is active you are still
-alerted. An oath stays in force when the component moves to another version
-that is still affected by the same CVE.
+advisory; it appears in the weekly digest. When it expires (noticed within 15
+minutes) the CVE alerts and counts again. If a fix is released while the oath
+is active you are still alerted. An oath stays in force when the component
+moves to another version that is still affected by the same CVE.
+
+The advisory may be given by any of its names (`GHSA-...`, its CVE, a `GO-...`
+id); the oath is stored under the id findings carry. A name that matches no
+known advisory is stored as typed, with a warning printed.
 
 Other read commands: `heimdall findings [--realm R] [--status open|resolved]
 [--kind vuln|fixavailable|majorrelease|oathexpired|eol|k8scve|releasenotecve]
@@ -344,8 +365,9 @@ heimdall keys revoke ci-runner
 Key creation needs an admin key. An `admin` key can only be created for a name
 listed under `admins:` in the config; `bootstrap` is reserved: it can only
 exist through `HEIMDALL_BOOTSTRAP_ADMIN_KEY` (changing that variable rotates
-it), and `keys create --name bootstrap` is rejected. Create a named admin key
-for yourself, then stop using the bootstrap key. Keys are stored as
+it; removing it or setting it empty deletes the key at the next start), and
+`keys create --name bootstrap` is rejected. Create a named admin key for
+yourself, then remove the variable. Keys are stored as
 SHA-256 hashes ([ADR 0004](docs/adr/0004-sha256-api-keys.md)).
 
 ## GitHub Action (Hofund gate)
@@ -402,6 +424,12 @@ syft dir:. -o cyclonedx-json > sbom.json
 heimdall gate --service api --realm dev-k3s --sbom sbom.json --fail-on high
 ```
 
+An SBOM with no components is refused with `400 empty SBOM` (the gate exits
+`2`), so a broken SBOM step cannot empty a service's inventory. Pass
+`--allow-empty` (API: `allow_empty=true`) for a service with no dependencies.
+Ingest and gate bodies are limited to 20 MB, and at most two uploads are
+handled at once (the rest wait).
+
 ### Exit codes (`heimdall gate`)
 
 | Code | Meaning |
@@ -454,6 +482,12 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 - **GitHub rate limit errors in logs**: set `GITHUB_TOKEN`.
 - **Scanner CronJob fails with a missing key**: add `HEIMDALL_API_KEY`
   (ingest scope) to the Secret.
+- **An image is never scanned**: the scanner reports each failure to
+  `POST /api/v1/images/{digest}/failed`; failing images go to the back of the
+  queue, and after five failures are retried once a day. The last error is in
+  the `image_scan_attempts` table.
+- **Gate or ingest returns `empty SBOM`**: the SBOM has no components with a
+  purl. Fix the SBOM step, or pass `--allow-empty` / `allow_empty=true`.
 - **Sight finds nothing**: it is skipped when no cluster is reachable (running
   locally). In-cluster, confirm the ClusterRoleBinding exists.
 
@@ -466,8 +500,12 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
 Releases are cut by pushing a `v*` tag: CI builds static linux binaries
-(`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images pushed
-to ghcr.
+(`heimdall-linux-amd64`, `heimdall-linux-arm64`), attached to the GitHub
+release by one job, and multi-arch images pushed to ghcr, tagged with the
+version without the `v` (tag `v0.1.0` gives `heimdall:0.1.0`, the tag the
+chart pulls by default) and `latest`. The tag must equal `v` + `appVersion` in
+`deploy/helm/heimdall/Chart.yaml` + `version` in `Cargo.toml`, or the release
+jobs do not run.
 
 ## Contributing, security and license
 

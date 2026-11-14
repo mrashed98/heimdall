@@ -193,7 +193,7 @@ Polling intervals in minutes.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `schedules.sight_minutes` | integer | `15` | Cluster scan. |
-| `schedules.osv_minutes` | integer | `15` | OSV match. |
+| `schedules.osv_minutes` | integer | `15` | OSV match. At most 15: larger values count as 15, because the matcher run after each OSV refresh is also what expires oaths. |
 | `schedules.k8s_cve_minutes` | integer | `30` | Kubernetes CVE feed. |
 | `schedules.watchers_minutes` | integer | `60` | Release watchers. |
 
@@ -217,5 +217,6 @@ history are kept forever.
 
 ## Fixed values
 
-Not configurable: the server listens on `0.0.0.0:8080`, and ingest bodies are
-limited to 50 MB.
+Not configurable: the server listens on `0.0.0.0:8080`, ingest bodies are
+limited to 20 MB, at most two uploads are handled at once, and the database
+pool holds 10 connections.

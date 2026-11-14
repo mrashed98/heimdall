@@ -30,7 +30,7 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `401` | Missing or unknown key. |
 | `403` | The key's scope is too low, or its admin name is not allowed. |
 | `404` | No such oath, key or service. |
-| `413` | Body too large (limit 50 MB on ingest and gate). |
+| `413` | Body too large (limit 20 MB on ingest and gate). |
 | `500` | Internal error. The detail is logged, never returned. |
 
 ## Summary
@@ -48,6 +48,7 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `POST /api/v1/ingest/cluster` | ingest | Upload a cluster inventory. |
 | `POST /api/v1/ingest/image/{digest}` | ingest | Upload an image SBOM. |
 | `GET /api/v1/images/pending` | ingest | Images that need an SBOM. |
+| `POST /api/v1/images/{digest}/failed` | ingest | Report an image that could not be scanned. |
 | `POST /api/v1/gate` | ingest | Run the CI gate. |
 | `GET /api/v1/oaths` | read | List oaths. |
 | `POST /api/v1/oaths` | admin | Create an oath. |
@@ -142,7 +143,10 @@ Rows: `id`, `target`, `version`, `published_at` (nullable), `is_major`,
 
 ## Bifröst: ingest
 
-These routes accept bodies up to 50 MB.
+These routes accept bodies up to 20 MB. At most two uploads (`ingest/sbom`,
+`ingest/image` and the gate together) are handled at once; more wait their
+turn before their body is read, so a burst of CI jobs cannot exhaust the
+1 GB container.
 
 ### `POST /api/v1/ingest/sbom`
 
@@ -154,6 +158,7 @@ Scope `ingest`. Upload a CycloneDX SBOM for one service.
 | `realm` | Realm (must be in `realms`). |
 | `branch` | Branch the SBOM was built from. |
 | `default_branch` | The repository's default branch. |
+| `allow_empty` | Optional, `true` to accept an SBOM with no components. |
 
 Body:
 
@@ -165,6 +170,12 @@ Body:
 dependencies. When `branch` equals `default_branch` the upload replaces the
 service's `git` components; otherwise it replaces its `ci` components.
 
+An SBOM with no components (none with a purl) is refused with `400` and
+`empty SBOM` in the message, and the inventory is left alone: such an SBOM is
+almost always a broken generator, and taking it would empty the service and
+resolve its findings. Pass `allow_empty=true` when the service really has no
+dependencies.
+
 Response:
 
 ```json
@@ -174,7 +185,8 @@ Response:
 ### `POST /api/v1/ingest/cluster`
 
 Scope `ingest`. Upload what Sight saw in a realm. Services in the realm that have
-cluster components but are not listed are emptied.
+cluster components but are not listed are emptied. The whole upload is one
+transaction: if anything fails, nothing of it is applied.
 
 ```json
 {
@@ -200,7 +212,18 @@ The body is a CycloneDX SBOM (not wrapped). Response:
 ### `GET /api/v1/images/pending`
 
 Scope `ingest`. Image digests that have no SBOM yet:
-`[ { "digest": "sha256:…", "image_ref": "ghcr.io/my-org/api:1.2.3" } ]`.
+`[ { "digest": "sha256:…", "image_ref": "ghcr.io/my-org/api@sha256:…" } ]`.
+Never-tried digests come first, then the least recently tried, so one image
+that keeps failing cannot hold up the rest. A digest that failed five times is
+listed again only a day after its last try.
+
+### `POST /api/v1/images/{digest}/failed`
+
+Scope `ingest`. Report that an image could not be scanned. Body
+`{ "error": "syft exited with 1: …" }`; the error is kept (first 1000
+characters) next to an attempt count. `heimdall scan-images` calls this for
+every image that fails. `digest` must be `sha256:` followed by 64 hex
+characters. Returns `{ "digest": "sha256:…" }`.
 
 ## Hofund: the gate
 
@@ -213,7 +236,8 @@ component and returns a verdict. Query parameters are the same four as ingest, p
 |---|---|
 | `fail_on` | `critical`, `high`, `medium`, `low` or `unknown`. |
 
-The body is the same as for `ingest/sbom`. The call answers within 60 seconds and
+The body is the same as for `ingest/sbom`, and so is the `400` for an empty
+SBOM (and `allow_empty=true`). The call answers within 60 seconds and
 always returns `200` when it can give a verdict:
 
 ```json
@@ -232,6 +256,11 @@ always returns `200` when it can give a verdict:
 - `source`: `osv` or `ghsa` (the GitHub Advisory Database fallback).
 - `fixed` and `oath` are `null` when there is no fix or no covering oath.
 - Findings are sorted worst first.
+- OSV often has several records for one vulnerability (a `GO-` and a `GHSA-`
+  record for the same CVE). They give one finding, under the record that
+  carries the CVE (preferring the `GHSA-` id), with the highest severity of
+  them and a fix any of them knows. An oath filed under any of the names
+  covers it.
 
 ## Oaths
 
@@ -272,7 +301,20 @@ Scope `admin`.
 
 `realm` or `all_realms: true`, not both. `until` is required for `snooze` and
 optional for `ignore` (default 90 days). It must be after today (UTC). `by` is
-taken from the key's name. Returns `{ "id": 12 }`. Rule violations are `400`.
+taken from the key's name. Rule violations are `400`.
+
+`advisory_id` may be any name of the advisory: its id, a CVE id, or an alias
+such as a `GO-` id. The oath is stored under the advisory id that findings
+carry, and the name you gave is kept in its history (`filed as CVE-…`). When
+no known advisory has that name, the oath is stored as given and a warning
+comes back:
+
+```json
+{ "id": 12, "warning": null }
+```
+
+`warning` is a message when the name matched nothing (the CLI prints it);
+such an oath applies only once an advisory with exactly that id is linked.
 
 ### `POST /api/v1/oaths/{id}/revoke`
 

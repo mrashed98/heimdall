@@ -66,8 +66,11 @@ teams:
 ```
 
 Releases, end of support and Kubernetes CVEs count as `high` when routing. Kinds
-that always alert (fix available, oath expired, release-note CVE) never route
-below `high`, so a high-only route does not drop them. A finding that no route
+that always alert (oath expired, release-note CVE, and a fix available that is
+worth an alert: for a critical or high CVE, or a fix that came out after the
+CVE was first seen) never route below `high`, so a high-only route does not
+drop them. A medium or low CVE whose fix existed from the start goes to the
+digest, like the CVE itself. A finding that no route
 covers stays pending, with one warning in the logs, and goes out once a route
 covers its realm.
 
