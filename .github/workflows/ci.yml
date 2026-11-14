@@ -1,7 +1,8 @@
 name: ci
 on:
   push:
-    branches: ['**']
+    # main only: PR branches are covered by pull_request (avoids running every check twice).
+    branches: [main]
     tags: ['v*']
   pull_request:
 
