@@ -222,9 +222,18 @@ async fn add_event(
     Ok(())
 }
 
+/// SQL condition: the oath's `advisory_id` names the advisory `$1`, under
+/// its id or as an alias either way (the advisory lists the oath's id, or the
+/// oath's advisory row lists `$1`). So an oath keeps applying when OSV
+/// collapse links the vulnerability under another of its ids.
+pub(crate) const SAME_ADVISORY: &str = "(advisory_id = $1 \
+     OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id = $1) \
+     OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id = oaths.advisory_id))";
+
 /// The oath that suppresses `advisory_id` for this component in this service
 /// and realm, if any. Matching is by component name (not version), so an oath
 /// carries across versions; an all-realms oath (realm NULL) matches any realm.
+/// The advisory may be named by any of its ids (`SAME_ADVISORY`).
 /// Only `active` oaths whose date is still ahead of `now` count, so a lapsed
 /// oath stops suppressing even if the scheduler is late. `process_expiries`
 /// stays the one place that changes status, so each expiry is announced once.
@@ -240,7 +249,7 @@ pub async fn active_for(
 ) -> anyhow::Result<Option<Oath>> {
     let sql = format!(
         "SELECT {COLUMNS} FROM oaths \
-         WHERE status = 'active' AND advisory_id = $1 AND name_key = $2 \
+         WHERE status = 'active' AND {SAME_ADVISORY} AND name_key = $2 \
            AND service_name = $3 AND (realm = $4 OR realm IS NULL) \
            AND COALESCE(expires_at, review_at) > $5 \
          ORDER BY id LIMIT 1"

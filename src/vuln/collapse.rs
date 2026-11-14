@@ -10,7 +10,7 @@
 //! has none of its own, their fixed versions. The gate collapses its hits
 //! the same way.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -65,21 +65,33 @@ pub fn groups(items: &[AliasInfo]) -> Vec<Vec<usize>> {
     out
 }
 
-/// The index in `group` of the record that stands for it: one carrying a
-/// CVE, then a GHSA- id, then the lexicographically smallest id. The choice
-/// depends only on the ids, so it is the same on every run.
+/// The index in `group` of the record that stands for it: a GHSA- id, then
+/// the lexicographically smallest id. Whether a record carries a CVE is
+/// judged for the whole group (it does if any member does), so it does not
+/// pick between members: per record it changes as databases add aliases,
+/// and the choice would flip. The choice depends only on the ids.
 pub fn canonical(items: &[AliasInfo], group: &[usize]) -> usize {
     *group
         .iter()
-        .min_by_key(|&&i| {
-            let it = &items[i];
-            (
-                it.cve_id.is_none(),
-                !it.id.starts_with("GHSA-"),
-                it.id.as_str(),
-            )
-        })
+        .min_by_key(|&&i| (!items[i].id.starts_with("GHSA-"), items[i].id.as_str()))
         .expect("a group is never empty")
+}
+
+/// Like `canonical`, but sticky: when members of the group are already
+/// linked to the component (`linked`), one of those keeps standing for it.
+/// A new record joining the group, or a record gaining an alias, then never
+/// re-keys the finding (a second card, and oaths left behind).
+pub fn sticky_canonical(items: &[AliasInfo], group: &[usize], linked: &HashSet<String>) -> usize {
+    let already: Vec<usize> = group
+        .iter()
+        .copied()
+        .filter(|&i| linked.contains(&items[i].id))
+        .collect();
+    if already.is_empty() {
+        canonical(items, group)
+    } else {
+        canonical(items, &already)
+    }
 }
 
 /// What OSV refresh knows of one advisory, from its fresh record or its
@@ -100,14 +112,19 @@ pub struct Merged {
     pub severity: Severity,
     /// Fixed versions, per component, that only another record knew.
     pub fixed: BTreeMap<String, Vec<String>>,
+    /// The group's CVE, when any member carries one.
+    pub cve_id: Option<String>,
 }
 
 /// One component's OSV hits, collapsed: the advisory ids to link (one per
-/// vulnerability). What each canonical takes over is added to `merged`.
+/// vulnerability). `linked` holds the advisories the component is linked to
+/// now, which keep standing for their group (`sticky_canonical`). What each
+/// canonical takes over is added to `merged`.
 pub fn collapse_hits(
     hit_ids: &[String],
     name_key: &str,
     known: &HashMap<String, Known>,
+    linked: &HashSet<String>,
     merged: &mut BTreeMap<String, Merged>,
 ) -> Vec<String> {
     let items: Vec<AliasInfo> = hit_ids
@@ -131,7 +148,7 @@ pub fn collapse_hits(
 
     let mut link = Vec::new();
     for group in groups(&items) {
-        let canon = &items[canonical(&items, &group)].id;
+        let canon = &items[sticky_canonical(&items, &group, linked)].id;
         link.push(canon.clone());
         if group.len() == 1 {
             continue;
@@ -140,10 +157,14 @@ pub fn collapse_hits(
             aliases: BTreeSet::new(),
             severity: severity_of(canon),
             fixed: BTreeMap::new(),
+            cve_id: None,
         });
         for &i in &group {
             let it = &items[i];
             m.severity = severity::merge(m.severity, severity_of(&it.id));
+            if m.cve_id.is_none() {
+                m.cve_id = it.cve_id.clone();
+            }
             if it.id != *canon {
                 m.aliases.insert(it.id.clone());
                 m.aliases.extend(it.aliases.iter().cloned());
@@ -174,13 +195,15 @@ pub async fn store_merged(
                aliases = array(select distinct a from unnest(aliases || $2::text[]) as a \
                                where a <> $1 order by a), \
                severity = $3, \
-               fixed = fixed || $4 \
+               fixed = fixed || $4, \
+               cve_id = coalesce(cve_id, $5) \
              where id = $1",
         )
         .bind(id)
         .bind(&aliases)
         .bind(m.severity)
         .bind(serde_json::to_value(&m.fixed)?)
+        .bind(&m.cve_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -230,14 +253,26 @@ mod tests {
     }
 
     #[test]
-    fn a_cve_carrier_wins_over_ghsa_then_smallest_id() {
+    fn ghsa_wins_whether_or_not_it_carries_the_cve_then_smallest_id() {
         let items = [
             info("GHSA-aaaa", &["USN-1"], None),
             info("USN-1", &["UBUNTU-CVE-2026-2"], Some("CVE-2026-2")),
             info("UBUNTU-CVE-2026-2", &[], Some("CVE-2026-2")),
         ];
         assert_eq!(groups(&items), vec![vec![0, 1, 2]]);
-        assert_eq!(canonical(&items, &[0, 1, 2]), 2, "UBUNTU-... < USN-...");
+        assert_eq!(canonical(&items, &[0, 1, 2]), 0);
+        assert_eq!(canonical(&items, &[1, 2]), 2, "UBUNTU-... < USN-...");
+    }
+
+    #[test]
+    fn an_already_linked_member_keeps_standing_for_the_group() {
+        let items = [
+            info("PYSEC-1", &["GHSA-bbbb"], Some("CVE-2026-9")),
+            info("GHSA-bbbb", &[], Some("CVE-2026-9")),
+        ];
+        let linked: HashSet<String> = ["PYSEC-1".to_string()].into();
+        assert_eq!(sticky_canonical(&items, &[0, 1], &linked), 0);
+        assert_eq!(sticky_canonical(&items, &[0, 1], &HashSet::new()), 1);
     }
 
     #[test]

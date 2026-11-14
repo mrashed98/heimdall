@@ -257,9 +257,9 @@ always returns `200` when it can give a verdict:
 - `fixed` and `oath` are `null` when there is no fix or no covering oath.
 - Findings are sorted worst first.
 - OSV often has several records for one vulnerability (a `GO-` and a `GHSA-`
-  record for the same CVE). They give one finding, under the record that
-  carries the CVE (preferring the `GHSA-` id), with the highest severity of
-  them and a fix any of them knows. An oath filed under any of the names
+  record for the same CVE). They give one finding, under the `GHSA-` record
+  (else the alphabetically smallest id), with the highest severity of them and
+  a fix any of them knows. An oath filed under any of the names
   covers it.
 
 ## Oaths

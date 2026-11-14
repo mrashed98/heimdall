@@ -47,10 +47,13 @@ GitHub's (`GO-…` and `GHSA-…`), PyPI's and GitHub's, RustSec's and GitHub's,
 Debian's `DSA-`/`DLA-` and `DEBIAN-CVE-…`, Ubuntu's `USN-` and
 `UBUNTU-CVE-…`. Records that share a CVE, or where one lists the other as an
 alias (followed through chains of aliases), are collapsed for each component
-into one link and one finding. The record standing for the group is one that
-carries a CVE, preferring the `GHSA-` id, then the alphabetically smallest, so
-the choice is stable. It takes over the others' aliases, the highest severity
-among them, and a fixed version only another record knew. An NVD match for the
+into one link and one finding. The record standing for the group is the one
+the component is already linked to, if any, so a finding never moves to
+another id when a record joins the group or gains an alias. Otherwise it is
+the `GHSA-` record, then the alphabetically smallest id. It takes over the
+others' aliases, the group's CVE, the highest severity among them, and a fixed
+version only another record knew. An oath applies to the advisory under any
+of its ids, so it survives such a change. An NVD match for the
 same CVE joins the same advisory. The gate collapses its results the same way,
 and an oath filed under any of the names applies.
 

@@ -1,6 +1,6 @@
 //! OSV.dev client and advisory refresh.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{anyhow, Context};
 use chrono::{DateTime, Utc};
@@ -243,15 +243,30 @@ pub async fn refresh(
         fetched.push(adv);
     }
 
-    // Collapse each component's hits to one advisory per vulnerability.
+    // Collapse each component's hits to one advisory per vulnerability. An
+    // advisory the component is already linked to keeps standing for its
+    // group, so findings (keyed by advisory) never move to another id.
     let known = known_advisories(&stored, &fetched)?;
+    let ids_checked: Vec<i64> = checked.iter().map(|c| c.component_id).collect();
+    let mut linked: HashMap<i64, HashSet<String>> = HashMap::new();
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "select component_id, advisory_id from component_advisories where component_id = any($1)",
+    )
+    .bind(&ids_checked)
+    .fetch_all(pool)
+    .await?;
+    for (cid, aid) in rows {
+        linked.entry(cid).or_default().insert(aid);
+    }
+    let none = HashSet::new();
     let mut merged = BTreeMap::new();
     let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
     for (c, hits) in checked.iter().zip(&all_hits) {
         let mut hit_ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         hit_ids.sort();
         hit_ids.dedup();
-        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, &mut merged) {
+        let already = linked.get(&c.component_id).unwrap_or(&none);
+        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, already, &mut merged) {
             desired.insert((c.component_id, id));
         }
     }
@@ -893,6 +908,124 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(sev, "high");
+    }
+
+    /// Mount one querybatch result (all `records` hit widget) and each record.
+    async fn mount_hits(server: &MockServer, records: &[&Value]) {
+        server.reset().await;
+        let hits: Vec<Value> = records
+            .iter()
+            .map(|r| json!({"id": r["id"], "modified": r["modified"]}))
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"results": [{"vulns": hits}]})),
+            )
+            .mount(server)
+            .await;
+        for rec in records {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/vulns/{}", rec["id"].as_str().unwrap())))
+                .respond_with(ResponseTemplate::new(200).set_body_json(*rec))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// widget in prod/api through the inventory store; returns its component id.
+    async fn widget_in_inventory(pool: &PgPool) -> i64 {
+        use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
+        let sid = upsert_service(pool, "prod", "api").await.unwrap();
+        let item = InventoryItem {
+            purl: PURL.to_string(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: None,
+        };
+        replace_components(pool, sid, crate::model::Source::Git, &[item])
+            .await
+            .unwrap();
+        sqlx::query_scalar("select id from components where purl = $1")
+            .bind(PURL)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn vuln_keys(pool: &PgPool) -> Vec<(String, String)> {
+        sqlx::query_as("select key, status from findings where kind = 'vuln' order by id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn canonical_id_is_sticky_when_cve_alias_appears_later(pool: PgPool) {
+        // PyPI's record names the CVE and GitHub's; GitHub's has no CVE yet.
+        let mut pysec = osv_record("PYSEC-2026-1", "2026-05-01T00:00:00Z", "HIGH", None);
+        pysec["aliases"] = json!(["CVE-2026-5000", "GHSA-xxxx-yyyy-zzzz"]);
+        let mut ghsa = osv_record("GHSA-xxxx-yyyy-zzzz", "2026-05-01T00:00:00Z", "HIGH", None);
+        ghsa["aliases"] = json!([]);
+        let server = MockServer::start().await;
+        let cid = widget_in_inventory(&pool).await;
+        let comps = [(cid, PURL.to_string())];
+        mount_hits(&server, &[&pysec, &ghsa]).await;
+        refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        let first = vuln_keys(&pool).await;
+        assert_eq!(first.len(), 1);
+
+        // GitHub adds the CVE alias. The finding keeps its key: no new card.
+        ghsa["aliases"] = json!(["CVE-2026-5000"]);
+        ghsa["modified"] = json!("2026-06-01T00:00:00Z");
+        mount_hits(&server, &[&pysec, &ghsa]).await;
+        refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        let report = crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(vuln_keys(&pool).await, first);
+        assert!(report.opened.is_empty(), "{report:?}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn canonical_id_stays_when_a_ghsa_record_joins_later(pool: PgPool) {
+        // First only PyPI's record is known; it is linked.
+        let pysec = osv_record("PYSEC-2026-2", "2026-05-01T00:00:00Z", "HIGH", None);
+        let mut ghsa = osv_record("GHSA-aaaa-bbbb-cccc", "2026-05-01T00:00:00Z", "HIGH", None);
+        ghsa["aliases"] = json!(["CVE-2026-5000", "PYSEC-2026-2"]);
+        let server = MockServer::start().await;
+        let cid = widget_in_inventory(&pool).await;
+        let comps = [(cid, PURL.to_string())];
+        mount_hits(&server, &[&pysec]).await;
+        refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        // GitHub's record turns up: the rule alone would pick it.
+        mount_hits(&server, &[&pysec, &ghsa]).await;
+        refresh(&pool, &client_for(&server), &comps).await.unwrap();
+        let links: Vec<String> = sqlx::query_scalar(
+            "select advisory_id from component_advisories where component_id = $1",
+        )
+        .bind(cid)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(links, ["PYSEC-2026-2"]);
+        let (aliases, cve): (Vec<String>, Option<String>) =
+            sqlx::query_as("select aliases, cve_id from advisories where id = 'PYSEC-2026-2'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            aliases.contains(&"GHSA-aaaa-bbbb-cccc".to_string()),
+            "{aliases:?}"
+        );
+        assert_eq!(
+            cve.as_deref(),
+            Some("CVE-2026-5000"),
+            "the group's CVE is stored"
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

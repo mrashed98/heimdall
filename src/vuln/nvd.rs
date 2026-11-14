@@ -510,8 +510,9 @@ async fn load_existing(
 /// Which advisory each matched component is linked to for one CVE. With one
 /// advisory carrying the CVE, that one. With several (OSV records from
 /// different databases), a component OSV already links to one of them keeps
-/// that one, and any other gets the canonical one (see `collapse`): one CVE
-/// is one link per component, so one finding.
+/// that one (an OSV link before an NVD-only one), and any other gets the
+/// canonical one (see `collapse`): one CVE is one link per component, so one
+/// finding.
 async fn link_targets(
     tx: &mut Tx<'_>,
     cve_id: &str,
@@ -523,9 +524,13 @@ async fn link_targets(
     }
     let canon = canonical_for_cve(cve_id, ids);
     let components: Vec<i64> = hit.iter().copied().collect();
+    // Per component, the advisory OSV links (osv or both) first; an older
+    // NVD-only link only when OSV links none of them.
     let linked: Vec<(i64, String)> = sqlx::query_as(
-        "select component_id, min(advisory_id) from component_advisories \
-         where component_id = any($1) and advisory_id = any($2) group by component_id",
+        "select distinct on (component_id) component_id, advisory_id \
+         from component_advisories \
+         where component_id = any($1) and advisory_id = any($2) \
+         order by component_id, match_source = 'nvd', advisory_id",
     )
     .bind(&components)
     .bind(ids)
@@ -578,9 +583,10 @@ pub async fn fold_duplicates(tx: &mut Tx<'_>, cve_id: &str) -> anyhow::Result<()
         sqlx::query(
             "insert into component_advisories (component_id, advisory_id, match_source) \
              select n.component_id, \
-                    coalesce((select min(o.advisory_id) from component_advisories o \
+                    coalesce((select o.advisory_id from component_advisories o \
                               where o.component_id = n.component_id \
-                                and o.advisory_id = any($3)), $2), \
+                                and o.advisory_id = any($3) \
+                              order by o.match_source = 'nvd', o.advisory_id limit 1), $2), \
                     n.match_source \
              from component_advisories n where n.advisory_id = $1 \
              on conflict (component_id, advisory_id) do update set match_source = \
@@ -942,6 +948,41 @@ mod tests {
         assert_eq!(
             links(&pool).await,
             [("DEBIAN-CVE-2026-7000".to_string(), "nvd".to_string())]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nvd_joins_the_advisory_osv_links_not_the_smallest(pool: PgPool) {
+        let server = MockServer::start().await;
+        mock_changed(
+            &server,
+            page_with("CVE-2026-7000", 9.8, "postgresql:postgresql"),
+        )
+        .await;
+        mock_backfill(&server, empty_page(), 1).await;
+        let cid = seed_pg(&pool).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source, cve_id) values \
+             ('DSA-5000-1', 'high', 'osv', 'CVE-2026-7000'), \
+             ('DEBIAN-CVE-2026-7000', 'high', 'osv', 'CVE-2026-7000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // OSV links DSA-5000-1; a stale NVD link sits on the smaller id.
+        sqlx::query(
+            "insert into component_advisories values ($1, 'DSA-5000-1', 'osv'), \
+             ($1, 'DEBIAN-CVE-2026-7000', 'nvd')",
+        )
+        .bind(cid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        assert_eq!(
+            links(&pool).await,
+            [("DSA-5000-1".to_string(), "both".to_string())]
         );
     }
 

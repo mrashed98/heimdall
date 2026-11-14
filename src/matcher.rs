@@ -314,9 +314,14 @@ async fn realm_where_oath_applies(
             .filter(|c| c.service == o.service_name && c.name_key == o.name_key)
             .map(|c| c.component_id)
             .collect();
+        // The link may be under another id of the same advisory (see
+        // `oath::SAME_ADVISORY`).
         let linked: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM component_advisories \
-             WHERE advisory_id = $1 AND component_id = ANY($2))",
+             WHERE component_id = ANY($2) \
+               AND (advisory_id = $1 \
+                    OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id = $1) \
+                    OR advisory_id IN (SELECT id FROM advisories WHERE $1 = ANY(aliases))))",
         )
         .bind(&o.advisory_id)
         .bind(&ids)
@@ -886,6 +891,53 @@ mod tests {
         run(&pool, REALM, Utc::now()).await.unwrap();
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!(v.details["oath"], json!(created.id));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn oath_applies_after_canonical_change(pool: PgPool) {
+        // The oath was filed when the vulnerability was linked as OLD-1;
+        // it is now linked as ADV, which lists OLD-1 among its aliases.
+        seed_gin(&pool, "v1.9.0").await;
+        sqlx::query("UPDATE advisories SET aliases = '{OLD-1}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let insert = |advisory: &'static str| {
+            sqlx::query_scalar::<_, i64>(
+                "INSERT INTO oaths (advisory_id, name_key, service_name, realm, kind, reason, \
+                 version_at_creation, review_at, created_by) \
+                 VALUES ($1, $2, $3, $4, 'ignore', 'not reachable', '1.9.0', \
+                         now() + interval '30 days', 'alice') RETURNING id",
+            )
+            .bind(advisory)
+            .bind(GIN_KEY)
+            .bind(SERVICE)
+            .bind(REALM)
+        };
+        let old = insert("OLD-1").fetch_one(&pool).await.unwrap();
+        run(&pool, REALM, Utc::now()).await.unwrap();
+        let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+        assert_eq!(v.details["oath"], json!(old));
+
+        // The reverse: the oath's advisory row names the current id.
+        sqlx::query("UPDATE oaths SET status = 'revoked'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE advisories SET aliases = '{}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        advisory(&pool, "OLD-2", "high", json!({}), json!({})).await;
+        sqlx::query("UPDATE advisories SET aliases = ARRAY[$1] WHERE id = 'OLD-2'")
+            .bind(ADV)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let reverse = insert("OLD-2").fetch_one(&pool).await.unwrap();
+        run(&pool, REALM, Utc::now()).await.unwrap();
+        let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+        assert_eq!(v.details["oath"], json!(reverse));
     }
 
     #[sqlx::test(migrations = "./migrations")]
