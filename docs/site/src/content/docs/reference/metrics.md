@@ -13,7 +13,7 @@ alert ideas.
 | `heimdall_findings_open` | gauge | `realm`, `service`, `kind`, `severity` | Open findings. A finding without a service has `service=""`. |
 | `heimdall_versions_behind` | gauge | `realm`, `target` | How many releases are newer than the running version. |
 | `heimdall_watcher_failures_total` | counter | `watcher` | Failed fetches per watcher type. |
-| `heimdall_watcher_duration_seconds` | histogram | `watcher` | Time spent per watcher type per run. |
+| `heimdall_watcher_duration_seconds` | summary | `watcher` | Time spent per watcher type per run. |
 | `heimdall_teams_failures_total` | counter | none | Cards Teams rejected. |
 | `heimdall_outbox_pending` | gauge | none | Notifications waiting to be sent. |
 | `heimdall_oaths_active` | gauge | `kind` (`snooze`, `ignore`) | Active oaths. |

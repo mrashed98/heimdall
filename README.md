@@ -422,7 +422,7 @@ back to the GitHub Advisory Database (needs `GITHUB_TOKEN` on the server).
 | `heimdall_findings_open` | `realm`, `service`, `kind`, `severity` | Open findings. |
 | `heimdall_versions_behind` | `realm`, `target` | How many releases newer than the running version. |
 | `heimdall_watcher_failures_total` | `watcher` | Failed fetches per watcher type. |
-| `heimdall_watcher_duration_seconds` | `watcher` | Time spent per watcher type per run (histogram). |
+| `heimdall_watcher_duration_seconds` | `watcher` | Time spent per watcher type per run (a Prometheus summary: quantiles plus `_sum` and `_count`). |
 | `heimdall_teams_failures_total` | | Cards Teams rejected. |
 | `heimdall_outbox_pending` | | Notifications waiting to be sent. |
 | `heimdall_oaths_active` | `kind` | Active oaths (`snooze`, `ignore`). |
