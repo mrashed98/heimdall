@@ -8,7 +8,6 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -124,7 +123,8 @@ pub async fn create_key(
         bail!("{name:?} is not listed in `admins`, so it cannot hold an admin key");
     }
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    // Thread-local CSPRNG seeded from the OS (rand >= 0.9 API).
+    rand::fill(&mut bytes);
     let key = format!("hd_{}", URL_SAFE_NO_PAD.encode(bytes));
     sqlx::query("INSERT INTO api_keys (name, sha256, scope) VALUES ($1, $2, $3)")
         .bind(name)
