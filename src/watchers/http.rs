@@ -62,3 +62,14 @@ pub(super) fn is_rate_limited(err: &anyhow::Error) -> bool {
     let text = err.to_string();
     text.contains("HTTP 403") || text.contains("HTTP 429")
 }
+
+/// True when `err` is an outage rather than an answer: a request that could
+/// not be sent (connect, timeout) or a 5xx or 429 once the retries ran out.
+pub(super) fn is_transient(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|c| c.downcast_ref::<reqwest::Error>().is_some())
+        || {
+            let text = err.to_string();
+            text.contains("HTTP 429") || text.contains("HTTP 5")
+        }
+}

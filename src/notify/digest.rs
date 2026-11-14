@@ -308,6 +308,7 @@ async fn releases(
                 }
             }
             Some("plain") => other.push(row(name)),
+            Some("gave_up") => no_notes.push(row(format!("{name} (notes could not be fetched)"))),
             Some(_) => no_notes.push(row(name)),
             // Not looked at yet (the notes run comes later): say so.
             None => no_notes.push(row(format!("{name} (not checked yet)"))),

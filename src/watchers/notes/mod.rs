@@ -8,8 +8,11 @@
 //! It is one-shot and never auto-resolved.
 //!
 //! A fetch failure is logged and leaves `notes_class` NULL, so the next run
-//! retries it, up to `MAX_ATTEMPTS` runs, after which the class is `none`.
-//! "No notes found" stores class `none` with no URL.
+//! retries it. Only consecutive failures that are not outages count (connect
+//! errors, timeouts, 429 and 5xx never do), and a successful fetch for the
+//! target resets the count. After `MAX_ATTEMPTS` of them the class is
+//! `gave_up`. "No notes found" stores class `none` with no URL, so the two
+//! are distinguishable.
 //!
 //! - `classify`: the pure pattern matching.
 //! - `source`: where the notes are and how to fetch them.
@@ -26,7 +29,7 @@ use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 
 use super::findings::open_finding;
-use super::http::is_rate_limited;
+use super::http::{is_rate_limited, is_transient};
 use super::{Endpoints, Planned};
 use crate::config::HeimdallConfig;
 use crate::matcher::key;
@@ -39,7 +42,8 @@ use source::{fetch, locate, NotesSource};
 /// they still have no class.
 const PER_TARGET_LIMIT: i64 = 20;
 
-/// Failed runs after which a release's notes are given up on (class `none`).
+/// Consecutive failed runs after which a release's notes are given up on
+/// (class `gave_up`).
 const MAX_ATTEMPTS: i32 = 5;
 
 /// An id that affects us (an advisory id or alias of an open Vuln finding).
@@ -94,7 +98,9 @@ pub(super) async fn run(
                 // Locating asks npm, a registry or Artifact Hub, never GitHub:
                 // a 403 here is this target's problem, not a rate limit.
                 tracing::warn!("release notes {name}: {e:#}");
-                record_failure(pool, name, &pending).await?;
+                if !is_transient(&e) {
+                    record_failure(pool, name, &pending).await?;
+                }
                 continue 'targets;
             }
         };
@@ -104,9 +110,11 @@ pub(super) async fn run(
                     Ok(n) => n,
                     Err(e) => {
                         tracing::warn!("release notes {name} {version}: {e:#}");
-                        // Not a 404: count it, and leave the rest of this
-                        // target for the next run.
-                        record_failure(pool, name, std::slice::from_ref(version)).await?;
+                        // Not a 404: count it unless it was an outage, and
+                        // leave the rest of this target for the next run.
+                        if !is_transient(&e) {
+                            record_failure(pool, name, std::slice::from_ref(version)).await?;
+                        }
                         // GitHub's rate limit is shared by every GitHub
                         // target, so asking more only makes it worse. Any
                         // other source's 403 is just that target failing.
@@ -118,6 +126,8 @@ pub(super) async fn run(
                 },
                 None => None,
             };
+            // The source answered: earlier failures were not permanent.
+            reset_failures(pool, name).await?;
             let Some(notes) = notes else {
                 let none = classify("", &ids);
                 save(pool, name, version, None, &none, &[], now).await?;
@@ -154,12 +164,25 @@ fn hits<'a>(c: &'a Classified, affecting: &'a HashMap<String, AffectedId>) -> Ve
     by_advisory.into_values().collect()
 }
 
+/// The target's source answered, so its pending releases' failures no longer
+/// count as consecutive.
+async fn reset_failures(pool: &PgPool, target: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE releases SET notes_attempts = 0 \
+         WHERE target = $1 AND notes_class IS NULL AND notes_attempts > 0",
+    )
+    .bind(target)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Count one failed run against these releases; at `MAX_ATTEMPTS` the class
-/// becomes `none` so they are not tried forever.
+/// becomes `gave_up` so they are not tried forever.
 async fn record_failure(pool: &PgPool, target: &str, versions: &[String]) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE releases SET notes_attempts = notes_attempts + 1, \
-             notes_class = CASE WHEN notes_attempts + 1 >= $3 THEN 'none' ELSE NULL END \
+             notes_class = CASE WHEN notes_attempts + 1 >= $3 THEN 'gave_up' ELSE NULL END \
          WHERE target = $1 AND version = ANY($2) AND notes_class IS NULL",
     )
     .bind(target)
@@ -484,7 +507,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn gives_up_after_5_failed_runs(pool: PgPool) {
+    async fn gives_up_after_5_consecutive_failed_runs(pool: PgPool) {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(400))
@@ -502,13 +525,58 @@ mod tests {
             // Still retried until the fifth failure.
             assert_eq!(
                 class.as_deref(),
-                if attempt < 5 { None } else { Some("none") }
+                if attempt < 5 { None } else { Some("gave_up") }
             );
         }
         // Given up: a sixth run makes no request.
         let before = server.received_requests().await.unwrap().len();
         run_gh(&pool, &server, &["widget"]).await;
         assert_eq!(server.received_requests().await.unwrap().len(), before);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn outages_do_not_count_toward_giving_up(pool: PgPool) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        add_release(&pool, "widget", "1.2.3").await;
+        sqlx::query("UPDATE releases SET notes_attempts = 4 WHERE version = '1.2.3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_gh(&pool, &server, &["widget"]).await;
+        assert_eq!(attempts(&pool, "1.2.3").await, 4);
+        let class: Option<String> =
+            sqlx::query_scalar("SELECT notes_class FROM releases WHERE version = '1.2.3'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(class, None);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_success_resets_the_failure_count(pool: PgPool) {
+        let server = MockServer::start().await;
+        add_release(&pool, "widget", "1.2.3").await;
+        sqlx::query("UPDATE releases SET notes_attempts = 4 WHERE version = '1.2.3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The target's source answers (no notes for 1.2.3: 404), so the
+        // count is reset, then the release is stored as `none`.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        add_release(&pool, "widget", "1.2.4").await;
+        sqlx::query("UPDATE releases SET notes_attempts = 4 WHERE version = '1.2.4'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_gh(&pool, &server, &["widget"]).await;
+        assert_eq!(attempts(&pool, "1.2.4").await, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]
