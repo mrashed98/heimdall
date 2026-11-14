@@ -78,7 +78,8 @@ pub fn canonical(items: &[AliasInfo], group: &[usize]) -> usize {
 }
 
 /// Like `canonical`, but sticky: when members of the group are already
-/// linked to the component (`linked`), one of those keeps standing for it.
+/// linked to any component (`linked`), one of those keeps standing for it
+/// (by the same rule among them).
 /// A new record joining the group, or a record gaining an alias, then never
 /// re-keys the finding (a second card, and oaths left behind).
 pub fn sticky_canonical(items: &[AliasInfo], group: &[usize], linked: &HashSet<String>) -> usize {
@@ -117,7 +118,7 @@ pub struct Merged {
 }
 
 /// One component's OSV hits, collapsed: the advisory ids to link (one per
-/// vulnerability). `linked` holds the advisories the component is linked to
+/// vulnerability). `linked` holds the advisories linked to any component
 /// now, which keep standing for their group (`sticky_canonical`). What each
 /// canonical takes over is added to `merged`.
 pub fn collapse_hits(

@@ -244,29 +244,25 @@ pub async fn refresh(
     }
 
     // Collapse each component's hits to one advisory per vulnerability. An
-    // advisory the component is already linked to keeps standing for its
-    // group, so findings (keyed by advisory) never move to another id.
+    // advisory already linked to ANY component keeps standing for its group,
+    // so findings (keyed by advisory, not version) never move to another id:
+    // not when a record joins, not for a new version or another service.
     let known = known_advisories(&stored, &fetched)?;
-    let ids_checked: Vec<i64> = checked.iter().map(|c| c.component_id).collect();
-    let mut linked: HashMap<i64, HashSet<String>> = HashMap::new();
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "select component_id, advisory_id from component_advisories where component_id = any($1)",
+    let linked: HashSet<String> = sqlx::query_scalar(
+        "select distinct advisory_id from component_advisories where advisory_id = any($1)",
     )
-    .bind(&ids_checked)
+    .bind(&ids)
     .fetch_all(pool)
-    .await?;
-    for (cid, aid) in rows {
-        linked.entry(cid).or_default().insert(aid);
-    }
-    let none = HashSet::new();
+    .await?
+    .into_iter()
+    .collect();
     let mut merged = BTreeMap::new();
     let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
     for (c, hits) in checked.iter().zip(&all_hits) {
         let mut hit_ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         hit_ids.sort();
         hit_ids.dedup();
-        let already = linked.get(&c.component_id).unwrap_or(&none);
-        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, already, &mut merged) {
+        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, &linked, &mut merged) {
             desired.insert((c.component_id, id));
         }
     }
@@ -1026,6 +1022,92 @@ mod tests {
             Some("CVE-2026-5000"),
             "the group's CVE is stored"
         );
+    }
+
+    /// Put widget@`version` in `service` (prod), alone; returns its component id.
+    async fn widget_at(pool: &PgPool, service: &str, version: &str) -> (i64, String) {
+        use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
+        let purl = format!("pkg:npm/widget@{version}");
+        let sid = upsert_service(pool, "prod", service).await.unwrap();
+        let item = InventoryItem {
+            purl: purl.clone(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: None,
+        };
+        replace_components(pool, sid, crate::model::Source::Git, &[item])
+            .await
+            .unwrap();
+        let id = sqlx::query_scalar("select id from components where purl = $1")
+            .bind(&purl)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (id, purl)
+    }
+
+    /// PYSEC-2026-3 alone, then joined by a GHSA record that names it.
+    fn pysec_then_ghsa() -> (Value, Value) {
+        let pysec = osv_record("PYSEC-2026-3", "2026-05-01T00:00:00Z", "HIGH", None);
+        let mut ghsa = osv_record("GHSA-dddd-eeee-ffff", "2026-05-01T00:00:00Z", "HIGH", None);
+        ghsa["aliases"] = json!(["CVE-2026-5000", "PYSEC-2026-3"]);
+        (pysec, ghsa)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn version_bump_keeps_canonical_id(pool: PgPool) {
+        let (pysec, ghsa) = pysec_then_ghsa();
+        let server = MockServer::start().await;
+        let old = widget_at(&pool, "api", "1.0.0").await;
+        mount_hits(&server, &[&pysec]).await;
+        refresh(&pool, &client_for(&server), &[old]).await.unwrap();
+        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        sqlx::query("update findings set notified_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first = vuln_keys(&pool).await;
+
+        // GitHub's record joins; the service moves to widget 1.0.1, a new
+        // component no advisory was linked to yet.
+        mount_hits(&server, &[&pysec, &ghsa]).await;
+        let new = widget_at(&pool, "api", "1.0.1").await;
+        refresh(&pool, &client_for(&server), &[new]).await.unwrap();
+        let report = crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(vuln_keys(&pool).await, first, "same finding key");
+        assert!(report.opened.is_empty(), "no second card: {report:?}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn second_component_converges_on_linked_id(pool: PgPool) {
+        let (pysec, ghsa) = pysec_then_ghsa();
+        let server = MockServer::start().await;
+        let api = widget_at(&pool, "api", "1.0.0").await;
+        mount_hits(&server, &[&pysec]).await;
+        refresh(&pool, &client_for(&server), std::slice::from_ref(&api))
+            .await
+            .unwrap();
+
+        // After GitHub's record joined, another service runs widget 1.0.1.
+        mount_hits(&server, &[&pysec, &ghsa]).await;
+        let web = widget_at(&pool, "web", "1.0.1").await;
+        refresh(&pool, &client_for(&server), std::slice::from_ref(&web))
+            .await
+            .unwrap();
+        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        let refs: Vec<String> = sqlx::query_scalar(
+            "select distinct ref_id from findings where kind = 'vuln' order by ref_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(refs, ["PYSEC-2026-3"], "one advisory id for both services");
     }
 
     #[sqlx::test(migrations = "./migrations")]
