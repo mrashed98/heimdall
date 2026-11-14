@@ -256,13 +256,32 @@ pub async fn refresh(
     .await?
     .into_iter()
     .collect();
+    // What each checked component is linked to now: its own link in a group
+    // beats one elsewhere, so records that disagree on affected ranges (one
+    // component hits GHSA only, another PYSEC and GHSA) never re-key it.
+    let checked_ids: Vec<i64> = checked.iter().map(|c| c.component_id).collect();
+    let mut own: HashMap<i64, HashSet<String>> = HashMap::new();
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "select component_id, advisory_id from component_advisories \
+         where component_id = any($1) and advisory_id = any($2)",
+    )
+    .bind(&checked_ids)
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    for (cid, aid) in rows {
+        own.entry(cid).or_default().insert(aid);
+    }
+    let none = HashSet::new();
     let mut merged = BTreeMap::new();
     let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
     for (c, hits) in checked.iter().zip(&all_hits) {
         let mut hit_ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
         hit_ids.sort();
         hit_ids.dedup();
-        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, &linked, &mut merged) {
+        let mine = own.get(&c.component_id).unwrap_or(&none);
+        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, mine, &linked, &mut merged)
+        {
             desired.insert((c.component_id, id));
         }
     }
@@ -272,14 +291,6 @@ pub async fn refresh(
         upsert_advisory(&mut tx, adv).await?;
     }
     collapse::store_merged(&mut tx, &merged).await?;
-    for adv in &fetched {
-        // NVD may have stored this CVE under its own id before OSV knew it.
-        if let Some(cve) = &adv.cve_id {
-            nvd::fold_duplicates(&mut tx, cve).await?;
-        }
-    }
-
-    let checked_ids: Vec<i64> = checked.iter().map(|c| c.component_id).collect();
     let before: BTreeSet<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
         "select component_id, advisory_id from component_advisories \
          where component_id = any($1) and match_source in ('osv', 'both')",
@@ -312,6 +323,15 @@ pub async fn refresh(
     .bind(&aids)
     .execute(&mut *tx)
     .await?;
+    // NVD may have stored this CVE under its own id before OSV knew it. Fold
+    // only now that OSV's links are in: a component linked for the first time
+    // then moves its NVD link onto the advisory OSV just linked it to, not
+    // onto the CVE's canonical row across all ecosystems (a second link).
+    for adv in &fetched {
+        if let Some(cve) = &adv.cve_id {
+            nvd::fold_duplicates(&mut tx, cve).await?;
+        }
+    }
     tx.commit().await?;
 
     Ok(RefreshReport {
@@ -1108,6 +1128,128 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(refs, ["PYSEC-2026-3"], "one advisory id for both services");
+    }
+
+    /// Mount querybatch with one result per component, in order (`hits`
+    /// indexes `records`), and every record.
+    async fn mount_hits_per_component(server: &MockServer, records: &[&Value], hits: &[&[usize]]) {
+        server.reset().await;
+        let results: Vec<Value> = hits
+            .iter()
+            .map(|idx| {
+                let vulns: Vec<Value> = idx
+                    .iter()
+                    .map(|&i| json!({"id": records[i]["id"], "modified": records[i]["modified"]}))
+                    .collect();
+                json!({ "vulns": vulns })
+            })
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": results })))
+            .mount(server)
+            .await;
+        for rec in records {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/vulns/{}", rec["id"].as_str().unwrap())))
+                .respond_with(ResponseTemplate::new(200).set_body_json(*rec))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// Issue #12: PyPI's and GitHub's records disagree on affected ranges, so
+    /// one component hits both and another GitHub's only. Once GitHub's is
+    /// linked to the second, the first must keep its PyPI link, not move to
+    /// GitHub's (a resolve and a new card).
+    #[sqlx::test(migrations = "./migrations")]
+    async fn differing_ranges_do_not_rekey_a_linked_component(pool: PgPool) {
+        let pysec = osv_record("PYSEC-2026-4", "2026-05-01T00:00:00Z", "HIGH", None);
+        let mut ghsa = osv_record("GHSA-gggg-hhhh-iiii", "2026-05-01T00:00:00Z", "HIGH", None);
+        ghsa["aliases"] = json!(["CVE-2026-5000", "PYSEC-2026-4"]);
+        let server = MockServer::start().await;
+        let api = widget_at(&pool, "api", "1.0.0").await;
+        let web = widget_at(&pool, "web", "1.0.1").await;
+        let now = chrono::Utc::now;
+
+        // Only PyPI's record is known: api links it.
+        mount_hits_per_component(&server, &[&pysec], &[&[0]]).await;
+        refresh(&pool, &client_for(&server), std::slice::from_ref(&api))
+            .await
+            .unwrap();
+        crate::matcher::run(&pool, "prod", now()).await.unwrap();
+
+        // GitHub's record joins: api hits both, web (outside PyPI's range) only
+        // GitHub's, so web is linked to it.
+        let both = [api.clone(), web.clone()];
+        mount_hits_per_component(&server, &[&pysec, &ghsa], &[&[0, 1], &[1]]).await;
+        refresh(&pool, &client_for(&server), &both).await.unwrap();
+        crate::matcher::run(&pool, "prod", now()).await.unwrap();
+        sqlx::query("update findings set notified_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let settled = vuln_keys(&pool).await;
+
+        // Both records are now linked somewhere. Later refreshes must not
+        // move api from PYSEC to GHSA.
+        for _ in 0..2 {
+            refresh(&pool, &client_for(&server), &both).await.unwrap();
+            let report = crate::matcher::run(&pool, "prod", now()).await.unwrap();
+            assert!(report.opened.is_empty(), "no new card: {report:?}");
+            assert_eq!(report.resolved, 0, "nothing resolved: {report:?}");
+            assert_eq!(vuln_keys(&pool).await, settled);
+        }
+        let api_links: Vec<String> = sqlx::query_scalar(
+            "select advisory_id from component_advisories where component_id = $1",
+        )
+        .bind(api.0)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(api_links, ["PYSEC-2026-4"]);
+    }
+
+    /// Issue #13: NVD matched the component before OSV knew the CVE, and
+    /// another ecosystem's record (sorting before ours) carries the CVE too.
+    /// The first OSV link must absorb NVD's, not add a second link.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn first_osv_link_absorbs_nvd_link_without_a_second_one(pool: PgPool) {
+        let cid = widget_in_inventory(&pool).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source, scores, cve_id) values \
+             ('CVE-2026-5000', 'critical', 'nvd', '{\"nvd\": 9.8}', 'CVE-2026-5000'), \
+             ('DEBIAN-CVE-2026-5000', 'high', 'osv', '{}', 'CVE-2026-5000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("insert into component_advisories values ($1, 'CVE-2026-5000', 'nvd')")
+            .bind(cid)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let server = MockServer::start().await;
+        let pysec = osv_record("PYSEC-2026-5", "2026-05-01T00:00:00Z", "HIGH", None);
+        mount_hits(&server, &[&pysec]).await;
+        refresh(&pool, &client_for(&server), &[(cid, PURL.to_string())])
+            .await
+            .unwrap();
+
+        let links: Vec<(String, String)> = sqlx::query_as(
+            "select advisory_id, match_source from component_advisories where component_id = $1",
+        )
+        .bind(cid)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(links, [("PYSEC-2026-5".to_string(), "both".to_string())]);
+        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        let vulns = vuln_keys(&pool).await;
+        assert_eq!(vulns.len(), 1, "{vulns:?}");
     }
 
     #[sqlx::test(migrations = "./migrations")]
