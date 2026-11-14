@@ -13,8 +13,12 @@ pub struct HeimdallConfig {
     pub realms: Vec<String>,
     #[serde(default)]
     pub digest: DigestConfig,
+    /// Microsoft Teams routes (the original form; still supported).
     #[serde(default)]
     pub teams: Vec<TeamsRoute>,
+    /// Alert channels of any type, Teams included.
+    #[serde(default)]
+    pub channels: Vec<ChannelConfig>,
     #[serde(default)]
     pub watchers: WatcherTargets,
     #[serde(default)]
@@ -80,6 +84,22 @@ impl HeimdallConfig {
                 }
             }
         }
+        let mut names: Vec<(String, String)> = Vec::new();
+        for (i, t) in self.teams.iter().enumerate() {
+            let key = format!("teams[{i}]");
+            check_name(&key, &t.name, &mut names)?;
+            check_env(&format!("{key}.webhook_env"), &t.webhook_env)?;
+        }
+        for (i, c) in self.channels.iter().enumerate() {
+            let key = format!("channels[{i}]");
+            check_name(&key, c.name(), &mut names)?;
+            for r in c.realms() {
+                if !known(r) {
+                    bail!("{key}.realms: unknown realm `{r}` (not in `realms`)");
+                }
+            }
+            c.validate(&key)?;
+        }
         for (i, d) in self.declared.iter().enumerate() {
             if !known(&d.realm) {
                 bail!(
@@ -94,6 +114,17 @@ impl HeimdallConfig {
             }
         }
         Ok(())
+    }
+
+    /// Every alert channel: the `teams:` routes (as Teams channels) first,
+    /// then `channels:`. Names are unique across both (see `validate`).
+    pub fn channels(&self) -> Vec<ChannelConfig> {
+        self.teams
+            .iter()
+            .cloned()
+            .map(ChannelConfig::Teams)
+            .chain(self.channels.iter().cloned())
+            .collect()
     }
 
     /// The realm in-process Sight scans: `sight.realm`, else the first realm.
@@ -154,6 +185,322 @@ pub struct TeamsRoute {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+}
+
+fn check_name(key: &str, name: &str, seen: &mut Vec<(String, String)>) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("{key}.name must not be empty");
+    }
+    if let Some((_, other)) = seen.iter().find(|(n, _)| n == name) {
+        anyhow::bail!("{key}.name: channel name `{name}` is already used by {other}");
+    }
+    seen.push((name.to_string(), key.to_string()));
+    Ok(())
+}
+
+fn check_env(key: &str, var: &str) -> anyhow::Result<()> {
+    if var.trim().is_empty() {
+        anyhow::bail!("{key} must name an environment variable");
+    }
+    Ok(())
+}
+
+fn check_opt_env(key: &str, var: &Option<String>) -> anyhow::Result<()> {
+    match var {
+        Some(v) => check_env(key, v),
+        None => Ok(()),
+    }
+}
+
+/// An http(s) URL without credentials in it (those go in `*_env` keys).
+fn check_url(key: &str, raw: &str) -> anyhow::Result<()> {
+    let u = url::Url::parse(raw).map_err(|e| anyhow::anyhow!("{key}: invalid URL: {e}"))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        anyhow::bail!("{key}: URL must be http or https");
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        anyhow::bail!("{key}: URL must not contain credentials; use the *_env keys");
+    }
+    Ok(())
+}
+
+/// One alert channel. `type` picks the kind; every kind has `name`,
+/// `realms` (empty: all) and `min_severity`. Secrets are never written
+/// inline: `*_env` keys name the environment variable that holds them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChannelConfig {
+    Teams(TeamsRoute),
+    Slack(WebhookChannel),
+    Discord(WebhookChannel),
+    Telegram(TelegramChannel),
+    PagerDuty(PagerDutyChannel),
+    Alertmanager(AlertmanagerChannel),
+    Webhook(GenericWebhookChannel),
+    Email(EmailChannel),
+}
+
+/// The fields every channel type shares.
+macro_rules! common {
+    ($self:ident, $c:ident => $e:expr) => {
+        match $self {
+            ChannelConfig::Teams($c) => $e,
+            ChannelConfig::Slack($c) | ChannelConfig::Discord($c) => $e,
+            ChannelConfig::Telegram($c) => $e,
+            ChannelConfig::PagerDuty($c) => $e,
+            ChannelConfig::Alertmanager($c) => $e,
+            ChannelConfig::Webhook($c) => $e,
+            ChannelConfig::Email($c) => $e,
+        }
+    };
+}
+
+impl ChannelConfig {
+    pub fn name(&self) -> &str {
+        common!(self, c => &c.name)
+    }
+
+    /// Realms this channel covers; empty means all.
+    pub fn realms(&self) -> &[String] {
+        common!(self, c => &c.realms)
+    }
+
+    pub fn min_severity(&self) -> Severity {
+        common!(self, c => c.min_severity)
+    }
+
+    /// The `type` value, also stored with each outbox row.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ChannelConfig::Teams(_) => "teams",
+            ChannelConfig::Slack(_) => "slack",
+            ChannelConfig::Discord(_) => "discord",
+            ChannelConfig::Telegram(_) => "telegram",
+            ChannelConfig::PagerDuty(_) => "pagerduty",
+            ChannelConfig::Alertmanager(_) => "alertmanager",
+            ChannelConfig::Webhook(_) => "webhook",
+            ChannelConfig::Email(_) => "email",
+        }
+    }
+
+    /// Does this channel cover `realm`? An empty realm list covers all.
+    pub fn covers(&self, realm: &str) -> bool {
+        let realms = self.realms();
+        realms.is_empty() || realms.iter().any(|r| r == realm)
+    }
+
+    /// Type-specific checks; `key` is `channels[i]`.
+    fn validate(&self, key: &str) -> anyhow::Result<()> {
+        use anyhow::bail;
+        match self {
+            ChannelConfig::Teams(c) => check_env(&format!("{key}.webhook_env"), &c.webhook_env),
+            ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => {
+                check_env(&format!("{key}.webhook_env"), &c.webhook_env)
+            }
+            ChannelConfig::Telegram(c) => {
+                check_env(&format!("{key}.bot_token_env"), &c.bot_token_env)?;
+                if c.chat_id.as_string().trim().is_empty() {
+                    bail!("{key}.chat_id must not be empty");
+                }
+                if let Some(u) = &c.api_url {
+                    check_url(&format!("{key}.api_url"), u)?;
+                }
+                Ok(())
+            }
+            ChannelConfig::PagerDuty(c) => {
+                check_env(&format!("{key}.routing_key_env"), &c.routing_key_env)?;
+                if let Some(u) = &c.url {
+                    check_url(&format!("{key}.url"), u)?;
+                }
+                Ok(())
+            }
+            ChannelConfig::Alertmanager(c) => {
+                check_url(&format!("{key}.url"), &c.url)?;
+                check_opt_env(&format!("{key}.username_env"), &c.username_env)?;
+                check_opt_env(&format!("{key}.password_env"), &c.password_env)?;
+                check_opt_env(&format!("{key}.bearer_token_env"), &c.bearer_token_env)?;
+                if c.username_env.is_some() != c.password_env.is_some() {
+                    bail!("{key}.username_env and {key}.password_env must be set together");
+                }
+                if c.username_env.is_some() && c.bearer_token_env.is_some() {
+                    bail!(
+                        "{key}.bearer_token_env cannot be combined with username_env/password_env"
+                    );
+                }
+                if c.expire_after_hours == 0 {
+                    bail!("{key}.expire_after_hours must be greater than 0");
+                }
+                Ok(())
+            }
+            ChannelConfig::Webhook(c) => {
+                check_env(&format!("{key}.url_env"), &c.url_env)?;
+                check_opt_env(&format!("{key}.secret_env"), &c.secret_env)
+            }
+            ChannelConfig::Email(c) => {
+                if c.host.trim().is_empty() {
+                    bail!("{key}.host must not be empty");
+                }
+                check_opt_env(&format!("{key}.username_env"), &c.username_env)?;
+                check_opt_env(&format!("{key}.password_env"), &c.password_env)?;
+                if c.username_env.is_some() != c.password_env.is_some() {
+                    bail!("{key}.username_env and {key}.password_env must be set together");
+                }
+                c.from.parse::<lettre::message::Mailbox>().map_err(|e| {
+                    anyhow::anyhow!("{key}.from: invalid address `{}`: {e}", c.from)
+                })?;
+                if c.to.is_empty() {
+                    bail!("{key}.to must list at least one address");
+                }
+                for (j, to) in c.to.iter().enumerate() {
+                    to.parse::<lettre::message::Mailbox>().map_err(|e| {
+                        anyhow::anyhow!("{key}.to[{j}]: invalid address `{to}`: {e}")
+                    })?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Slack or Discord: an incoming webhook whose URL is the secret.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookChannel {
+    pub name: String,
+    /// Name of the environment variable holding the webhook URL.
+    pub webhook_env: String,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+/// A Telegram chat id: a number (`-1001234567890`) or `@channelname`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ChatId {
+    Number(i64),
+    Name(String),
+}
+
+impl ChatId {
+    pub fn as_string(&self) -> String {
+        match self {
+            ChatId::Number(n) => n.to_string(),
+            ChatId::Name(s) => s.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramChannel {
+    pub name: String,
+    /// Name of the environment variable holding the bot token.
+    pub bot_token_env: String,
+    pub chat_id: ChatId,
+    /// Bot API base URL. Default `https://api.telegram.org`.
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PagerDutyChannel {
+    pub name: String,
+    /// Name of the environment variable holding the Events API v2
+    /// integration (routing) key.
+    pub routing_key_env: String,
+    /// Events API endpoint. Default `https://events.pagerduty.com/v2/enqueue`
+    /// (`https://events.eu.pagerduty.com/v2/enqueue` for EU accounts).
+    pub url: Option<String>,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertmanagerChannel {
+    pub name: String,
+    /// Base URL; alerts are POSTed to `{url}/api/v2/alerts`.
+    pub url: String,
+    /// Basic auth: names of the variables holding user and password.
+    pub username_env: Option<String>,
+    pub password_env: Option<String>,
+    /// Bearer token: name of the variable holding it.
+    pub bearer_token_env: Option<String>,
+    /// `endsAt` is the delivery time plus this many hours: Heimdall sends
+    /// each alert once, and Alertmanager expires it after that.
+    #[serde(default = "default_expire_after_hours")]
+    pub expire_after_hours: u32,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+fn default_expire_after_hours() -> u32 {
+    24
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenericWebhookChannel {
+    pub name: String,
+    /// Name of the environment variable holding the URL to POST to.
+    pub url_env: String,
+    /// Name of the environment variable holding the HMAC-SHA256 secret.
+    /// When set, every request carries `X-Heimdall-Signature: sha256=<hex>`.
+    pub secret_env: Option<String>,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+/// How the SMTP connection is secured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// Plain connection upgraded with STARTTLS (required). Default port 587.
+    Starttls,
+    /// Implicit TLS from the first byte. Default port 465.
+    Tls,
+    /// No encryption. Default port 25. Only for a relay on a trusted network.
+    None,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmailChannel {
+    pub name: String,
+    pub host: String,
+    /// Default by `security`: 587, 465 or 25.
+    pub port: Option<u16>,
+    #[serde(default = "default_smtp_security")]
+    pub security: SmtpSecurity,
+    /// Names of the variables holding the SMTP user and password.
+    pub username_env: Option<String>,
+    pub password_env: Option<String>,
+    pub from: String,
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+}
+
+impl EmailChannel {
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(match self.security {
+            SmtpSecurity::Starttls => 587,
+            SmtpSecurity::Tls => 465,
+            SmtpSecurity::None => 25,
+        })
+    }
+}
+
+fn default_smtp_security() -> SmtpSecurity {
+    SmtpSecurity::Starttls
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -369,6 +716,131 @@ mod tests {
         .contains("declared[0].realm"));
         assert!(err("realms: [a]\nsight: { realm: zz }").contains("sight.realm"));
         assert!(load_str("realms: [a]\ndigest: { hour: 23 }").is_ok());
+    }
+
+    const ALL_CHANNELS: &str = "realms: [prod, dev]\n\
+teams:\n  - {name: legacy, webhook_env: TEAMS_URL, min_severity: high}\n\
+channels:\n\
+  - {type: teams, name: t2, webhook_env: T2, realms: [prod], min_severity: critical}\n\
+  - {type: slack, name: s, webhook_env: SLACK_URL, min_severity: high}\n\
+  - {type: discord, name: d, webhook_env: DISCORD_URL, min_severity: high}\n\
+  - {type: telegram, name: tg, bot_token_env: TG_TOKEN, chat_id: -1001234567890, min_severity: high}\n\
+  - {type: telegram, name: tg2, bot_token_env: TG_TOKEN, chat_id: '@ops', min_severity: high}\n\
+  - {type: pagerduty, name: pd, routing_key_env: PD_KEY, min_severity: critical}\n\
+  - {type: alertmanager, name: am, url: 'http://alertmanager:9093', bearer_token_env: AM_TOKEN, min_severity: high}\n\
+  - {type: webhook, name: w, url_env: HOOK_URL, secret_env: HOOK_SECRET, realms: [dev], min_severity: low}\n\
+  - {type: email, name: m, host: smtp.example.com, security: tls, username_env: U, password_env: P, \
+     from: 'Heimdall <h@example.com>', to: [ops@example.com], min_severity: high}\n";
+
+    #[test]
+    fn every_channel_type_parses() {
+        let cfg = load_str(ALL_CHANNELS).unwrap();
+        let chans = cfg.channels();
+        let types: Vec<&str> = chans.iter().map(|c| c.type_name()).collect();
+        assert_eq!(
+            types,
+            [
+                "teams",
+                "teams",
+                "slack",
+                "discord",
+                "telegram",
+                "telegram",
+                "pagerduty",
+                "alertmanager",
+                "webhook",
+                "email"
+            ]
+        );
+        assert_eq!(chans[0].name(), "legacy");
+        assert!(chans[1].covers("prod") && !chans[1].covers("dev"));
+        assert!(chans[2].covers("dev"));
+        let ChannelConfig::Telegram(t) = &chans[4] else {
+            panic!()
+        };
+        assert_eq!(t.chat_id.as_string(), "-1001234567890");
+        let ChannelConfig::Alertmanager(a) = &chans[7] else {
+            panic!()
+        };
+        assert_eq!(a.expire_after_hours, 24);
+        let ChannelConfig::Email(m) = &chans[9] else {
+            panic!()
+        };
+        assert_eq!(m.port(), 465);
+    }
+
+    #[test]
+    fn channel_keys_are_checked_per_type() {
+        // A key of another type is unknown here.
+        let e = err("realms: [a]\nchannels:\n  - {type: slack, name: s, webhook_env: X, chat_id: 1, min_severity: high}");
+        assert!(e.contains("chat_id"), "{e}");
+        let e = err("realms: [a]\nchannels:\n  - {type: sms, name: s, min_severity: high}");
+        assert!(e.contains("sms"), "{e}");
+        let e = err("realms: [a]\nchannels:\n  - {type: telegram, name: s, bot_token_env: X, min_severity: high}");
+        assert!(e.contains("chat_id"), "{e}");
+        // A secret inline instead of in an `*_env` key.
+        let e = err("realms: [a]\nchannels:\n  - {type: slack, name: s, webhook: 'https://hooks.slack.com/x', min_severity: high}");
+        assert!(e.contains("webhook"), "{e}");
+    }
+
+    #[test]
+    fn channel_validation_names_the_key() {
+        let cases = [
+            (
+                "teams:\n  - {name: ops, webhook_env: A, min_severity: high}\nchannels:\n  - {type: slack, name: ops, webhook_env: B, min_severity: high}",
+                "channels[0].name: channel name `ops` is already used by teams[0]",
+            ),
+            (
+                "channels:\n  - {type: slack, name: s, webhook_env: B, realms: [zz], min_severity: high}",
+                "channels[0].realms",
+            ),
+            (
+                "channels:\n  - {type: slack, name: '', webhook_env: B, min_severity: high}",
+                "channels[0].name",
+            ),
+            (
+                "channels:\n  - {type: slack, name: s, webhook_env: '', min_severity: high}",
+                "channels[0].webhook_env",
+            ),
+            (
+                "channels:\n  - {type: alertmanager, name: am, url: 'http://u:p@am:9093', min_severity: high}",
+                "channels[0].url: URL must not contain credentials",
+            ),
+            (
+                "channels:\n  - {type: alertmanager, name: am, url: 'not a url', min_severity: high}",
+                "channels[0].url",
+            ),
+            (
+                "channels:\n  - {type: alertmanager, name: am, url: 'http://am', username_env: U, min_severity: high}",
+                "channels[0].username_env",
+            ),
+            (
+                "channels:\n  - {type: alertmanager, name: am, url: 'http://am', username_env: U, password_env: P, bearer_token_env: T, min_severity: high}",
+                "channels[0].bearer_token_env",
+            ),
+            (
+                "channels:\n  - {type: email, name: m, host: h, from: 'not an address', to: [a@b.c], min_severity: high}",
+                "channels[0].from",
+            ),
+            (
+                "channels:\n  - {type: email, name: m, host: h, from: a@b.c, to: [], min_severity: high}",
+                "channels[0].to",
+            ),
+            (
+                "channels:\n  - {type: email, name: m, host: h, from: a@b.c, to: [a@b.c, nope], min_severity: high}",
+                "channels[0].to[1]",
+            ),
+            (
+                "channels:\n  - {type: pagerduty, name: p, routing_key_env: K, url: 'ftp://x', min_severity: high}",
+                "channels[0].url",
+            ),
+        ];
+        for (yaml, want) in cases {
+            let e = err(&format!("realms: [a]\n{yaml}"));
+            assert!(e.contains(want), "{want}: {e}");
+        }
+        let e = err("realms: [a]\nchannels:\n  - {type: email, name: m, host: h, from: a@b.c, to: [a@b.c], security: ssl, min_severity: high}");
+        assert!(e.contains("ssl"), "{e}");
     }
 
     #[test]

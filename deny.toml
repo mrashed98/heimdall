@@ -22,6 +22,8 @@ allow = [
   "Unicode-3.0",
   "Zlib",
   "CDLA-Permissive-2.0",
+  # quoted_printable (via lettre, email channel): public-domain-equivalent.
+  "0BSD",
 ]
 confidence-threshold = 0.9
 
