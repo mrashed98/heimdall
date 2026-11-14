@@ -410,6 +410,14 @@ async fn no_routes_leaves_findings_pending(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn medium_fix_and_expired_oath_reach_a_high_route(pool: PgPool) {
+    // The medium vuln was opened a day before its fix appeared (and went to
+    // the digest), so the fix alerts.
+    let v = vuln(&pool, "prod", "api", "medium").await;
+    sqlx::query("UPDATE findings SET opened_at = now() - interval '1 day', notified_at = now() WHERE id = $1")
+        .bind(v)
+        .execute(&pool)
+        .await
+        .unwrap();
     let f = fix(&pool, "prod", "api", "medium").await;
     finding(
         &pool,
@@ -832,4 +840,112 @@ async fn digest_leaves_uncovered_realm_pending(pool: PgPool) {
         notified_status(&pool, uncovered).await,
         (false, "open".into())
     );
+}
+
+// ---- when a fix alerts at once (the matcher writes the findings) ----
+
+/// gin v1.9.0 in prod/api, linked to ADV at `severity`, with `fixed`.
+async fn matched_gin(pool: &PgPool, severity: &str, fixed: &[&str]) {
+    let sid = service(pool, "prod", "api").await;
+    let purl = format!("{GIN}@v1.9.0");
+    let item = InventoryItem {
+        purl: purl.clone(),
+        cpes: vec![],
+        direct: true,
+        via_image_digest: None,
+    };
+    replace_components(pool, sid, Source::Git, &[item])
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO advisories (id, severity, summary, fixed, source) \
+         VALUES ($1, $2, 'test', $3, 'osv')",
+    )
+    .bind(ADV)
+    .bind(severity)
+    .bind(json!({ GIN: fixed }))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO component_advisories (component_id, advisory_id, match_source) \
+         SELECT id, $2, 'osv' FROM components WHERE purl = $1",
+    )
+    .bind(&purl)
+    .bind(ADV)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn finding_id(pool: &PgPool, kind: &str) -> i64 {
+    sqlx::query_scalar("SELECT id FROM findings WHERE kind = $1")
+        .bind(kind)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn medium_vuln_with_fix_at_first_sight_goes_to_the_digest(pool: PgPool) {
+    matched_gin(&pool, "medium", &["v1.9.1"]).await;
+    crate::matcher::run(&pool, "prod", now()).await.unwrap();
+    let low_route =
+        cfg("realms: [prod]\nteams:\n  - {name: all, webhook_env: X, min_severity: low}\n");
+    assert_eq!(enqueue_alerts(&pool, &low_route).await.unwrap(), 0);
+    let f = finding_id(&pool, "fixavailable").await;
+    assert_eq!(notified_status(&pool, f).await, (false, "open".into()));
+
+    // The digest lists the vuln with its fix, and takes the fix along.
+    assert!(maybe_send(&pool, &digest_cfg(), monday_0910())
+        .await
+        .unwrap());
+    let text = digest_text(&pool).await;
+    assert!(text.contains(&format!("{ADV} (medium)")), "{text}");
+    assert!(text.contains("fix: v1.9.1"), "{text}");
+    assert_eq!(notified_status(&pool, f).await, (true, "open".into()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn medium_vuln_whose_fix_appears_later_alerts_at_once(pool: PgPool) {
+    matched_gin(&pool, "medium", &[]).await;
+    crate::matcher::run(&pool, "prod", now()).await.unwrap();
+    // A run later, OSV publishes a fixed version.
+    sqlx::query("UPDATE advisories SET fixed = $1")
+        .bind(json!({ GIN: ["v1.9.1"] }))
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::matcher::run(&pool, "prod", now() + Duration::minutes(15))
+        .await
+        .unwrap();
+    assert_eq!(
+        enqueue_alerts(&pool, &one_route("NOTIFY_I8B"))
+            .await
+            .unwrap(),
+        1
+    );
+    let rows = outbox(&pool).await;
+    assert!(
+        title(&rows[0].card).starts_with("Fix available"),
+        "{}",
+        title(&rows[0].card)
+    );
+    let f = finding_id(&pool, "fixavailable").await;
+    assert_eq!(notified_status(&pool, f).await, (true, "open".into()));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn high_vuln_with_fix_alerts_at_once(pool: PgPool) {
+    matched_gin(&pool, "high", &["v1.9.1"]).await;
+    crate::matcher::run(&pool, "prod", now()).await.unwrap();
+    assert_eq!(
+        enqueue_alerts(&pool, &one_route("NOTIFY_I8C"))
+            .await
+            .unwrap(),
+        1,
+        "one card: the fix folds into the vuln's"
+    );
+    let f = finding_id(&pool, "fixavailable").await;
+    assert_eq!(notified_status(&pool, f).await, (true, "open".into()));
 }

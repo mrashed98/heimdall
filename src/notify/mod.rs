@@ -78,10 +78,10 @@ impl AlertGroup {
     }
 
     /// The severity routes compare against. Releases, end of support and
-    /// Kubernetes CVEs count as High. Kinds that always alert (a fix
-    /// available, an expired oath, a release-note CVE) never route below
-    /// High, so a high-only route does not drop them. A Vuln routes at its
-    /// own severity.
+    /// Kubernetes CVEs count as High. Kinds that always alert (an expired
+    /// oath, a release-note CVE, a fix that is worth an alert, see
+    /// `FIX_ALERTS_AT_ONCE`) never route below High, so a high-only route
+    /// does not drop them. A Vuln routes at its own severity.
     pub fn routing_severity(&self) -> Severity {
         match self.kind {
             FindingKind::MajorRelease | FindingKind::Eol | FindingKind::K8sCve => Severity::High,
@@ -211,21 +211,35 @@ struct Pending {
     item: AlertItem,
 }
 
+/// SQL condition on a FixAvailable `f`: it deserves an immediate alert.
+/// That is when its Vuln is High or worse (the FixAvailable carries the
+/// Vuln's severity), or when the fix came out after the Vuln was first
+/// opened: the Vuln of the same component and advisory was opened by an
+/// earlier matcher run. A medium or low Vuln that had a fix from the start
+/// gets both into the weekly digest instead.
+pub(crate) const FIX_ALERTS_AT_ONCE: &str = "(f.severity IN ('critical', 'high') \
+     OR EXISTS (SELECT 1 FROM findings v \
+                WHERE v.kind = 'vuln' AND v.realm = f.realm \
+                  AND v.service_id IS NOT DISTINCT FROM f.service_id \
+                  AND v.component_id IS NOT DISTINCT FROM f.component_id \
+                  AND v.ref_id = f.ref_id AND v.opened_at < f.opened_at))";
+
 /// Open, not yet announced findings that deserve an immediate alert: a Vuln
-/// of high or worse not under an oath, and every finding of the other kinds.
+/// of high or worse not under an oath, a FixAvailable that passes
+/// `FIX_ALERTS_AT_ONCE`, and every finding of the other kinds.
 async fn pending(tx: &mut PgConnection) -> anyhow::Result<Vec<(String, AlertItem)>> {
-    let rows: Vec<Pending> = sqlx::query_as(
+    let sql = format!(
         "SELECT f.id AS finding_id, f.ref_id, f.kind, f.realm, s.name AS service, f.severity, f.details \
          FROM findings f LEFT JOIN services s ON s.id = f.service_id \
          WHERE f.status = 'open' AND f.notified_at IS NULL \
            AND (f.kind <> 'vuln' \
                 OR (f.severity IN ('critical', 'high') \
                     AND coalesce(f.details->'oath', 'null'::jsonb) = 'null'::jsonb)) \
+           AND (f.kind <> 'fixavailable' OR {FIX_ALERTS_AT_ONCE}) \
          ORDER BY f.id \
-         FOR UPDATE OF f",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+         FOR UPDATE OF f"
+    );
+    let rows: Vec<Pending> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
     Ok(rows
         .into_iter()
         .map(|p| (p.ref_id.unwrap_or_default(), p.item))

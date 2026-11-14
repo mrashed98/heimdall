@@ -29,6 +29,8 @@ const MAX_WINDOW_DAYS: i64 = 120;
 /// 50 requests per 30 s with a key; 0.6 s apart stays under that.
 const REQUEST_DELAY: Duration = Duration::from_millis(650);
 const KV_LAST: &str = "nvd_last";
+/// How far before the previous window's end the next window starts.
+const WINDOW_OVERLAP_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NvdCve {
@@ -102,7 +104,7 @@ impl NvdClient {
                 q.append_pair("startIndex", &start_index.to_string());
                 q.append_pair("resultsPerPage", &PAGE_SIZE.to_string());
             }
-            let body: Value = retry::send("nvd request", || {
+            let mut body: Value = retry::send("nvd request", || {
                 let req = self.http.get(url.clone());
                 if self.api_key.is_empty() {
                     req
@@ -114,15 +116,19 @@ impl NvdClient {
             .json()
             .await
             .context("nvd response body")?;
-            let vulns = body["vulnerabilities"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+            let total = body["totalResults"].as_u64().unwrap_or(0) as usize;
+            // A 200 without the array is not a page of CVEs (a maintenance
+            // notice, a proxy's page): taking it as "nothing changed" would
+            // move the window past CVEs we never saw. The array is taken out
+            // of the page, not copied.
+            let vulns = match body.get_mut("vulnerabilities").map(Value::take) {
+                Some(Value::Array(list)) => list,
+                _ => anyhow::bail!("nvd answered 200 without a vulnerabilities array"),
+            };
             for v in &vulns {
                 out.push(parse_cve(&v["cve"]).context("nvd record without id")?);
             }
             start_index += vulns.len();
-            let total = body["totalResults"].as_u64().unwrap_or(0) as usize;
             // An empty page ends the loop even if `totalResults` is wrong.
             if vulns.is_empty() || start_index >= total {
                 return Ok(out);
@@ -249,10 +255,15 @@ pub async fn refresh(
         .bind(KV_LAST)
         .fetch_optional(pool)
         .await?;
+    // Each window starts a little before the previous one ended: NVD can
+    // index a CVE late with an earlier lastModified. Seeing a CVE twice is
+    // harmless, every write is an upsert.
     let from = match last {
-        Some(v) => v
-            .parse::<DateTime<Utc>>()
-            .with_context(|| format!("kv {KV_LAST} is not RFC 3339: {v}"))?,
+        Some(v) => {
+            v.parse::<DateTime<Utc>>()
+                .with_context(|| format!("kv {KV_LAST} is not RFC 3339: {v}"))?
+                - chrono::Duration::minutes(WINDOW_OVERLAP_MINUTES)
+        }
         None => now - chrono::Duration::days(1),
     };
 
@@ -1012,6 +1023,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(last, "2026-11-10T00:00:00+00:00");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn missing_vulnerabilities_array_is_error(pool: PgPool) {
+        // A 200 that is not a CVE page (a maintenance notice, a proxy page).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": "maintenance"})),
+            )
+            .mount(&server)
+            .await;
+        sqlx::query("insert into kv values ('nvd_last', '2026-11-10T00:00:00+00:00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(refresh(&pool, &client(&server), &[], at(13)).await.is_err());
+        let last: String = sqlx::query_scalar("select value from kv where key = 'nvd_last'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            last, "2026-11-10T00:00:00+00:00",
+            "the window does not move"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn window_overlaps_previous_end(pool: PgPool) {
+        // A CVE NVD indexed late with a lastModified just before our last
+        // end would fall between two windows; 15 minutes of overlap catch it.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(query_param(
+                "lastModStartDate",
+                "2026-11-09T23:45:00.000+00:00",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(empty_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        sqlx::query("insert into kv values ('nvd_last', '2026-11-10T00:00:00+00:00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
     }
 
     #[sqlx::test(migrations = "./migrations")]

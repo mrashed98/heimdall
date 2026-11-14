@@ -158,10 +158,11 @@ async fn send(http: &reqwest::Client, url: &str, card: &Value) -> Outcome {
     let resp = match resp {
         Ok(r) => r,
         Err(e) => {
+            // Never the URL: the webhook's `sig=` is its password.
             return Outcome::Retry {
                 retry_after_secs: None,
-                why: format!("{e}"),
-            }
+                why: format!("{}", e.without_url()),
+            };
         }
     };
     let status = resp.status();
@@ -207,5 +208,18 @@ mod tests {
         assert_eq!(backoff(20, None), Duration::seconds(3600));
         assert_eq!(backoff(0, Some(120)), Duration::seconds(120));
         assert_eq!(backoff(4, Some(120)), Duration::seconds(480));
+    }
+
+    #[tokio::test]
+    async fn send_error_does_not_leak_the_webhook_secret() {
+        // A Teams Workflows URL carries its credential in `sig=`. Port 1 on
+        // localhost refuses the connection, so the send fails at once.
+        let url = "http://127.0.0.1:1/workflows/abc/triggers/manual/paths/invoke?sig=SECRET";
+        let out = send(&reqwest::Client::new(), url, &serde_json::json!({})).await;
+        let Outcome::Retry { why, .. } = out else {
+            panic!("a refused connection is retried");
+        };
+        assert!(!why.contains("SECRET"), "{why}");
+        assert!(!why.contains("sig="), "{why}");
     }
 }

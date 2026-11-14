@@ -51,11 +51,16 @@ struct Item {
     date_published: Option<DateTime<Utc>>,
 }
 
-/// Every CVE in the feed at `base` (`https://kubernetes.io`).
+/// Every CVE in the feed at `base` (`https://kubernetes.io`). A feed with
+/// no items is an error: the real feed is never empty, and taking an empty
+/// one as the truth would record nothing as seen and flood on the next run.
 pub async fn fetch(http: &Client, base: &Url) -> anyhow::Result<Vec<K8sCve>> {
     let url = base.join(FEED_PATH).context("k8s cve feed url")?;
     let resp = retry::send("k8s cve feed", || http.get(url.clone())).await?;
     let feed: Feed = resp.json().await.context("k8s cve feed: body")?;
+    if feed.items.is_empty() {
+        anyhow::bail!("k8s cve feed has no items; ignoring it");
+    }
     Ok(feed
         .items
         .into_iter()
@@ -78,12 +83,20 @@ pub async fn fetch(http: &Client, base: &Url) -> anyhow::Result<Vec<K8sCve>> {
 /// alert (undated items count as old), so years of history do not flood
 /// Teams; every item is recorded as seen. After that, any unseen item alerts,
 /// however old.
+///
+/// An empty `cves` is an error and writes nothing: recorded as the first
+/// sight, it would leave the seen list empty, and the next good feed would
+/// alert on every item it holds.
 pub async fn run(
     pool: &PgPool,
     realm: &str,
     cves: &[K8sCve],
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<i64>> {
+    if cves.is_empty() {
+        tracing::warn!(realm = %realm, "k8s cve feed is empty; seen ids left as they are");
+        anyhow::bail!("k8s cve feed is empty");
+    }
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('matcher:' || $1))")
         .bind(realm)
@@ -264,5 +277,36 @@ mod tests {
         second.push(cve("CVE-OLD-2", days(300)));
         assert_eq!(run(&pool, "dev", &second, now).await.unwrap().len(), 1);
         assert!(run(&pool, "dev", &second, now).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn empty_feed_does_not_seed_seen(pool: PgPool) {
+        component(&pool, "dev", "pkg:generic/kubernetes@1.31.2").await;
+        let now = Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap();
+        // A broken feed (an empty page, a CDN error page parsed as no items).
+        assert!(run(&pool, "dev", &[], now).await.is_err());
+        let seen: Option<String> = sqlx::query_scalar("SELECT value FROM kv WHERE key = $1")
+            .bind("k8sfeed_seen|dev")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        assert_eq!(seen, None, "seen ids are not seeded from an empty feed");
+
+        // So the next good feed is still a first sight: old items stay quiet.
+        let days = |d: i64| Some(now - chrono::Duration::days(d));
+        let cves = vec![cve("CVE-OLD", days(200)), cve("CVE-RECENT", days(10))];
+        assert_eq!(run(&pool, "dev", &cves, now).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_of_an_empty_feed_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(FEED_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"items": []}"#))
+            .mount(&server)
+            .await;
+        let got = fetch(&reqwest::Client::new(), &Url::parse(&server.uri()).unwrap()).await;
+        assert!(got.is_err());
     }
 }

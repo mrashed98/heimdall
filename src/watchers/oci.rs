@@ -52,7 +52,7 @@ pub async fn tags(
     let mut resp = probe
         .send()
         .await
-        .with_context(|| format!("{what}: request failed"))?;
+        .map_err(|e| retry::request_failed(&what, e))?;
     let mut token = None;
     if resp.status() == StatusCode::UNAUTHORIZED {
         token = Some(bearer_token(http, &resp, repository, creds).await?);
@@ -155,7 +155,7 @@ pub async fn image_label(
         .header(ACCEPT, MANIFEST_ACCEPT)
         .send()
         .await
-        .with_context(|| format!("{what}: request failed"))?;
+        .map_err(|e| retry::request_failed(&what, e))?;
     let token = match probe.status() {
         StatusCode::UNAUTHORIZED => Some(bearer_token(http, &probe, repository, creds).await?),
         StatusCode::NOT_FOUND => return Ok(None),

@@ -11,6 +11,7 @@ use url::Url;
 use super::http::{endpoint, etag_of, get};
 use super::UA;
 use super::{Fetched, ReleaseInfo};
+use crate::vuln::retry;
 
 /// The proxy's case encoding: every uppercase letter becomes `!` plus its
 /// lowercase form, so `BurntSushi` is `!burnt!sushi`.
@@ -78,7 +79,7 @@ pub async fn fetch_next_major(
         .header(USER_AGENT, UA)
         .send()
         .await
-        .with_context(|| format!("go proxy {next}: request failed"))?;
+        .map_err(|e| retry::request_failed(&format!("go proxy {next}"), e))?;
     match resp.status() {
         StatusCode::NOT_FOUND | StatusCode::GONE => return Ok(Vec::new()),
         s if !s.is_success() => bail!("go proxy {next}: HTTP {s}"),

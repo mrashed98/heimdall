@@ -202,8 +202,15 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
         }
         Job::K8sFeed => {
             let base = Url::parse(K8S_FEED_BASE).context("k8s feed url")?;
-            // Fetched once, then filed per realm.
-            let cves = k8s_feed::fetch(&st.http, &base).await?;
+            // Fetched once, then filed per realm. An empty feed is an error,
+            // logged as a warning; nothing is recorded until a good one.
+            let cves = match k8s_feed::fetch(&st.http, &base).await {
+                Ok(cves) => cves,
+                Err(e) => {
+                    tracing::warn!("k8s feed skipped: {e:#}");
+                    return Ok(());
+                }
+            };
             for realm in &st.cfg.realms {
                 match k8s_feed::run(&st.pool, realm, &cves, now).await {
                     Ok(ids) => tracing::info!(realm = %realm, opened = ids.len(), "k8s feed ran"),

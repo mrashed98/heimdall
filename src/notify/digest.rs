@@ -1,7 +1,8 @@
 //! The weekly digest: one Teams card per route with everything that did not
 //! deserve an immediate alert.
 //!
-//! Sections: medium/low/unknown vulnerabilities opened since the last digest,
+//! Sections: medium/low/unknown vulnerabilities opened since the last digest
+//! (with their fix, when one existed from the start),
 //! minor/patch releases by release-notes class, active oaths (flagging those
 //! carried to a new version), and declared components with their age.
 //!
@@ -16,7 +17,7 @@ use sqlx::{FromRow, PgConnection, PgPool};
 use super::teams::{
     clip, message, package_name, severity_name, text_block, title_block, MAX_CARD_BYTES, MAX_ROWS,
 };
-use super::{covers, outbox, realm_has_route};
+use super::{covers, outbox, realm_has_route, FIX_ALERTS_AT_ONCE};
 use crate::config::{HeimdallConfig, TeamsRoute};
 use crate::model::Severity;
 use crate::version::is_prerelease;
@@ -64,7 +65,8 @@ pub async fn maybe_send(
         .await?
         .and_then(|s| s.parse().ok());
 
-    let (listed, vulns) = vulnerabilities(&mut tx).await?;
+    let (mut listed, vulns) = vulnerabilities(&mut tx).await?;
+    listed.extend(quiet_fixes(&mut tx).await?);
     // A vuln of a realm no route covers stays pending for a later digest.
     let vuln_ids: Vec<i64> = listed
         .into_iter()
@@ -144,13 +146,16 @@ struct VulnRow {
     ref_id: Option<String>,
     severity: Severity,
     purl: Option<String>,
+    /// The suggested fixed version, if any.
+    fix: Option<String>,
 }
 
 /// Open medium/low/unknown Vuln findings no digest has listed yet, and their
 /// (id, realm) (to mark notified).
 async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, String)>, Section)> {
     let rows: Vec<VulnRow> = sqlx::query_as(
-        "SELECT f.id, f.realm, s.name AS service, f.ref_id, f.severity, f.details->>'purl' AS purl \
+        "SELECT f.id, f.realm, s.name AS service, f.ref_id, f.severity, \
+                f.details->>'purl' AS purl, f.details->'advice'->>'suggest' AS fix \
          FROM findings f LEFT JOIN services s ON s.id = f.service_id \
          WHERE f.kind = 'vuln' AND f.status = 'open' AND f.notified_at IS NULL \
            AND f.severity IN ('medium', 'low', 'unknown') \
@@ -162,16 +167,19 @@ async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, Str
     let ids = rows.iter().map(|r| (r.id, r.realm.clone())).collect();
     let rows = rows
         .into_iter()
-        .map(|r| Row {
-            text: format!(
-                "{} ({}): {}/{} {}",
-                r.ref_id.unwrap_or_default(),
-                severity_name(r.severity),
-                r.realm,
-                r.service.unwrap_or_default(),
-                r.purl.unwrap_or_default()
-            ),
-            realm: Some(r.realm),
+        .map(|r| {
+            let fix = r.fix.map(|f| format!(" (fix: {f})")).unwrap_or_default();
+            Row {
+                text: format!(
+                    "{} ({}): {}/{} {}{fix}",
+                    r.ref_id.unwrap_or_default(),
+                    severity_name(r.severity),
+                    r.realm,
+                    r.service.unwrap_or_default(),
+                    r.purl.unwrap_or_default()
+                ),
+                realm: Some(r.realm),
+            }
         })
         .collect();
     Ok((
@@ -181,6 +189,20 @@ async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, Str
             rows,
         },
     ))
+}
+
+/// Pending FixAvailable findings that did not deserve an immediate alert
+/// (see `FIX_ALERTS_AT_ONCE`), as (id, realm), to mark notified with the
+/// digest. Their Vuln's row already shows the fix.
+async fn quiet_fixes(tx: &mut PgConnection) -> anyhow::Result<Vec<(i64, String)>> {
+    let sql = format!(
+        "SELECT f.id, f.realm FROM findings f \
+         WHERE f.kind = 'fixavailable' AND f.status = 'open' AND f.notified_at IS NULL \
+           AND NOT {FIX_ALERTS_AT_ONCE} \
+         ORDER BY f.id \
+         FOR UPDATE OF f"
+    );
+    Ok(sqlx::query_as(&sql).fetch_all(&mut *tx).await?)
 }
 
 #[derive(FromRow)]
