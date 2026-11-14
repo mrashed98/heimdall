@@ -1,0 +1,8 @@
+{
+  "chat_id": "-100123",
+  "link_preview_options": {
+    "is_disabled": true
+  },
+  "parse_mode": "HTML",
+  "text": "<b>⚠ GHSA-gin-0001 (high) affects 2 service(s)</b>\nSeverity: high\n\ngin mishandles header parsing\nOSV 7.5 · NVD 9.8\n\n<b>prod / api</b>\nComponent: pkg:golang/github.com/gin-gonic/gin@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\n\n<b>prod / worker</b>\nComponent: pkg:golang/github.com/gin-gonic/gin@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\nNote: indirect dependency\n\n<a href=\"https://osv.dev/vulnerability/GHSA-gin-0001\">Open GHSA-gin-0001</a>"
+}

@@ -1,14 +1,20 @@
-//! Gjallarhorn: announces findings in Teams.
+//! Gjallarhorn: announces findings on the configured alert channels (Teams,
+//! Slack, Discord, Telegram, PagerDuty, Alertmanager, a generic webhook,
+//! email).
 //!
-//! - this file: which findings alert, and routing their cards into the outbox.
-//! - `group`: how findings are grouped into one card per advisory or release.
-//! - `teams`: the Adaptive Card payloads.
-//! - `outbox`: sending queued cards, paced, with retries.
+//! - this file: which findings alert, and routing them into the outbox.
+//! - `group`: how findings are grouped into one alert per advisory or release.
+//! - `alert`: the neutral alert model every channel renders.
+//! - `teams`: the Teams formatter (Adaptive Cards).
+//! - `channels`: the other formatters, and the requests that send them.
+//! - `outbox`: sending queued payloads, paced, with retries.
 //! - `digest`: the weekly digest of everything that did not alert.
 //!
 //! A finding is announced once: `notified_at` is set in the same transaction
-//! that queues its card, so a crash either queues and marks or does neither.
+//! that queues its alerts, so a crash either queues and marks or does neither.
 
+pub mod alert;
+pub mod channels;
 pub mod digest;
 mod group;
 pub mod outbox;
@@ -23,8 +29,9 @@ use std::sync::Mutex;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
-use crate::config::{HeimdallConfig, TeamsRoute};
+use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::{FindingKind, Severity};
+use alert::Alert;
 
 /// One finding on a card.
 #[derive(Debug, Clone, PartialEq, FromRow)]
@@ -99,16 +106,17 @@ impl AlertGroup {
     }
 }
 
-/// Queue a card for every alertable finding not announced yet, one per
-/// advisory or release and route, and mark the findings notified, all in one
-/// transaction. Returns the number of outbox rows queued.
+/// Queue an alert for every alertable finding not announced yet, one per
+/// advisory or release and channel, and mark the findings notified, all in
+/// one transaction. Returns the number of outbox rows queued.
 ///
-/// A finding of a realm no route covers stays pending (and is warned about
-/// once), so it goes out once a route covers the realm. A finding every
-/// covering route filters out by `min_severity` is marked: that is an
+/// A finding of a realm no channel covers stays pending (and is warned about
+/// once), so it goes out once a channel covers the realm. A finding every
+/// covering channel filters out by `min_severity` is marked: that is an
 /// explicit opt-out.
 pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Result<usize> {
-    if cfg.teams.is_empty() {
+    let chans = cfg.channels();
+    if chans.is_empty() {
         return Ok(0);
     }
     let mut tx = pool.begin().await?;
@@ -131,12 +139,12 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
 
     let mut queued = 0;
     for g in &groups {
-        for route in &cfg.teams {
-            let Some(sub) = for_route(g, route) else {
+        for ch in &chans {
+            let Some(sub) = for_route(g, ch) else {
                 continue;
             };
-            let card = teams::card(&sub);
-            outbox::push(&mut tx, &format!("alert|{}", g.key()), &card, &route.name).await?;
+            let payload = channels::render(ch, &Alert::from_group(&sub));
+            outbox::push(&mut tx, &format!("alert|{}", g.key()), &payload, ch).await?;
             queued += 1;
         }
     }
@@ -146,15 +154,20 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
 }
 
 /// The "Heimdall has opened his eyes" card for `realm`: open findings counted
-/// by severity, queued once per realm (kv `first_run|<realm>`) to every route
-/// covering the realm. The scheduler calls it before the realm's first
-/// `enqueue_alerts`, so it is the first card sent. Returns whether it queued.
+/// by severity, queued once per realm (kv `first_run|<realm>`) to every
+/// channel covering the realm. The scheduler calls it before the realm's
+/// first `enqueue_alerts`, so it is the first alert sent. Returns whether it
+/// queued.
 pub async fn enqueue_first_run_summary(
     pool: &PgPool,
     cfg: &HeimdallConfig,
     realm: &str,
 ) -> anyhow::Result<bool> {
-    let routes: Vec<&TeamsRoute> = cfg.teams.iter().filter(|r| covers(r, realm)).collect();
+    let routes: Vec<ChannelConfig> = cfg
+        .channels()
+        .into_iter()
+        .filter(|c| c.covers(realm))
+        .collect();
     if routes.is_empty() {
         return Ok(false);
     }
@@ -175,9 +188,10 @@ pub async fn enqueue_first_run_summary(
     .bind(realm)
     .fetch_all(&mut *tx)
     .await?;
-    let card = teams::summary_card(realm, &counts);
-    for route in routes {
-        outbox::push(&mut tx, &format!("first_run|{realm}"), &card, &route.name).await?;
+    let summary = Alert::first_run(realm, &counts);
+    for ch in &routes {
+        let payload = channels::render(ch, &summary);
+        outbox::push(&mut tx, &format!("first_run|{realm}"), &payload, ch).await?;
     }
     tx.commit().await?;
     Ok(true)
@@ -297,18 +311,14 @@ async fn load_extras(tx: &mut PgConnection, g: &mut AlertGroup) -> anyhow::Resul
     Ok(())
 }
 
-/// Does the route cover this realm? An empty realm list covers all.
-fn covers(route: &TeamsRoute, realm: &str) -> bool {
-    route.realms.is_empty() || route.realms.iter().any(|r| r == realm)
-}
-
-/// Does any route cover this realm? Warns once per realm when none does.
+/// Does any channel (a `teams:` route or a `channels:` entry) cover this
+/// realm? Warns once per realm when none does.
 pub(crate) fn realm_has_route(cfg: &HeimdallConfig, realm: &str) -> bool {
-    let covered = cfg.teams.iter().any(|r| covers(r, realm));
+    let covered = cfg.channels().iter().any(|c| c.covers(realm));
     if !covered {
         warn_once(
             &format!("realm|{realm}"),
-            &format!("no teams route covers realm {realm}; its findings stay pending"),
+            &format!("no alert channel covers realm {realm}; its findings stay pending"),
         );
     }
     covered
@@ -327,12 +337,12 @@ pub(crate) fn warn_once(key: &str, message: &str) {
     }
 }
 
-/// The part of `g` this route receives: only the items of realms it covers,
-/// and only when that part is severe enough for it.
-fn for_route(g: &AlertGroup, route: &TeamsRoute) -> Option<AlertGroup> {
+/// The part of `g` this channel receives: only the items of realms it
+/// covers, and only when that part is severe enough for it.
+fn for_route(g: &AlertGroup, ch: &ChannelConfig) -> Option<AlertGroup> {
     let mut sub = g.clone();
-    sub.items.retain(|i| covers(route, &i.realm));
-    if sub.items.is_empty() || sub.routing_severity() < route.min_severity {
+    sub.items.retain(|i| ch.covers(&i.realm));
+    if sub.items.is_empty() || sub.routing_severity() < ch.min_severity() {
         return None;
     }
     Some(sub)

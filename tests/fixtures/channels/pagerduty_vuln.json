@@ -1,0 +1,48 @@
+{
+  "client": "Heimdall",
+  "dedup_key": "alert|vuln|GHSA-gin-0001",
+  "event_action": "trigger",
+  "links": [
+    {
+      "href": "https://osv.dev/vulnerability/GHSA-gin-0001",
+      "text": "Open GHSA-gin-0001"
+    }
+  ],
+  "payload": {
+    "class": "vuln",
+    "component": "api,worker",
+    "custom_details": {
+      "advisory": "GHSA-gin-0001",
+      "findings": [
+        {
+          "facts": {
+            "Component": "pkg:golang/github.com/gin-gonic/gin@v1.9.0",
+            "Fix": "upgrade to v1.9.1 (latest v1.10.0)",
+            "Version": "v1.9.0"
+          },
+          "realm": "prod",
+          "service": "api",
+          "severity": "high"
+        },
+        {
+          "facts": {
+            "Component": "pkg:golang/github.com/gin-gonic/gin@v1.9.0",
+            "Fix": "upgrade to v1.9.1 (latest v1.10.0)",
+            "Note": "indirect dependency",
+            "Version": "v1.9.0"
+          },
+          "realm": "prod",
+          "service": "worker",
+          "severity": "high"
+        }
+      ],
+      "kind": "vuln",
+      "scores": "OSV 7.5 · NVD 9.8",
+      "summary": "gin mishandles header parsing"
+    },
+    "group": "prod",
+    "severity": "error",
+    "source": "heimdall",
+    "summary": "⚠ GHSA-gin-0001 (high) affects 2 service(s)"
+  }
+}

@@ -143,10 +143,19 @@ pub fn record_watch(r: &WatchReport) {
     }
 }
 
-/// Count cards Teams rejected.
+/// Count alerts a channel rejected: `heimdall_notify_failures_total` by
+/// `channel_type`, and (unchanged, Teams only) `heimdall_teams_failures_total`.
 pub fn record_drain(r: &DrainResult) {
+    let teams = if r.channel_type.is_none_or(|t| t == "teams") {
+        r.failed
+    } else {
+        0
+    };
     // Registered even at 0 so the series exists before the first failure.
-    counter!("heimdall_teams_failures_total").increment(r.failed as u64);
+    counter!("heimdall_teams_failures_total").increment(teams as u64);
+    if let Some(t) = r.channel_type {
+        counter!("heimdall_notify_failures_total", "channel_type" => t).increment(r.failed as u64);
+    }
 }
 
 /// Install the global Prometheus recorder (once per process) and return the

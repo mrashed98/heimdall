@@ -1,0 +1,29 @@
+{
+  "allowed_mentions": {
+    "parse": []
+  },
+  "embeds": [
+    {
+      "color": 15094016,
+      "description": "gin mishandles header parsing\nOSV 7.5 · NVD 9.8\n\n**prod / api**\nComponent: pkg:golang/github.com/gin-gonic/gin\\@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\n\n**prod / worker**\nComponent: pkg:golang/github.com/gin-gonic/gin\\@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\nNote: indirect dependency\n\n[Open GHSA-gin-0001](https://osv.dev/vulnerability/GHSA-gin-0001)",
+      "fields": [
+        {
+          "inline": true,
+          "name": "Severity",
+          "value": "high"
+        },
+        {
+          "inline": true,
+          "name": "Realm",
+          "value": "prod"
+        }
+      ],
+      "footer": {
+        "text": "Heimdall"
+      },
+      "title": "⚠ GHSA-gin-0001 (high) affects 2 service(s)",
+      "url": "https://osv.dev/vulnerability/GHSA-gin-0001"
+    }
+  ],
+  "username": "Heimdall"
+}

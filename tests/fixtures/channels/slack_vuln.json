@@ -1,0 +1,42 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "emoji": true,
+        "text": "⚠ GHSA-gin-0001 (high) affects 2 service(s)",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "elements": [
+        {
+          "text": "*Severity:* high  ·  *Realm:* prod",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "text": {
+        "text": "gin mishandles header parsing\nOSV 7.5 · NVD 9.8\n\n*prod / api*\nComponent: pkg:golang/github.com/gin-gonic/gin@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\n\n*prod / worker*\nComponent: pkg:golang/github.com/gin-gonic/gin@v1.9.0\nVersion: v1.9.0\nFix: upgrade to v1.9.1 (latest v1.10.0)\nNote: indirect dependency",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "text": {
+            "text": "Open GHSA-gin-0001",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://osv.dev/vulnerability/GHSA-gin-0001"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "⚠ GHSA-gin-0001 (high) affects 2 service(s)"
+}

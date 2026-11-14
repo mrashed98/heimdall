@@ -14,11 +14,9 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
-use super::teams::{
-    clip, message, package_name, severity_name, text_block, title_block, MAX_CARD_BYTES, MAX_ROWS,
-};
-use super::{covers, outbox, realm_has_route, FIX_ALERTS_AT_ONCE};
-use crate::config::{HeimdallConfig, TeamsRoute};
+use super::alert::{self, clip, package_name, severity_name, Alert};
+use super::{channels, outbox, realm_has_route, FIX_ALERTS_AT_ONCE};
+use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::Severity;
 use crate::version::is_prerelease;
 
@@ -79,7 +77,8 @@ pub async fn maybe_send(
     now: DateTime<Utc>,
 ) -> anyhow::Result<bool> {
     let d = &cfg.digest;
-    if cfg.teams.is_empty() {
+    let chans = cfg.channels();
+    if chans.is_empty() {
         return Ok(false);
     }
     let Some((slot_date, _)) = latest_slot(now, d.weekday, d.hour, d.timezone) else {
@@ -117,9 +116,9 @@ pub async fn maybe_send(
     sections.push(oaths(&mut tx, d.timezone).await?);
     sections.push(declared(&mut tx, d.timezone).await?);
 
-    for route in &cfg.teams {
-        let card = card_for(route, &today, &sections);
-        outbox::push(&mut tx, &format!("digest|{today}"), &card, &route.name).await?;
+    for ch in &chans {
+        let payload = channels::render(ch, &alert_for(ch, &today, &sections));
+        outbox::push(&mut tx, &format!("digest|{today}"), &payload, ch).await?;
     }
     sqlx::query("UPDATE findings SET notified_at = now() WHERE id = ANY($1)")
         .bind(&vuln_ids)
@@ -139,42 +138,22 @@ pub async fn maybe_send(
     Ok(true)
 }
 
-/// The route's card: rows of the realms it covers, each section capped.
-/// Rows are cut further if the card is still too big for Teams.
-fn card_for(route: &TeamsRoute, today: &str, sections: &[Section]) -> Value {
-    let mut card = Value::Null;
-    for cap in [MAX_ROWS, 10, 5] {
-        let mut body = vec![title_block(
-            &format!("Heimdall weekly digest {today}"),
-            Severity::Unknown,
-        )];
-        for s in sections {
-            let rows: Vec<&str> = s
+/// The channel's digest: only rows of the realms it covers (rows of no
+/// realm go to every channel). Each formatter caps the sections.
+fn alert_for(ch: &ChannelConfig, today: &str, sections: &[Section]) -> Alert {
+    let sections = sections
+        .iter()
+        .map(|s| alert::Section {
+            title: s.title.to_string(),
+            lines: s
                 .rows
                 .iter()
-                .filter(|r| r.realm.as_deref().is_none_or(|realm| covers(route, realm)))
-                .map(|r| r.text.as_str())
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            body.push(serde_json::json!({"type": "TextBlock", "text": s.title,
-                                          "weight": "Bolder", "wrap": true, "spacing": "Medium"}));
-            let mut lines: Vec<String> = rows.iter().take(cap).map(|r| format!("- {r}")).collect();
-            if rows.len() > cap {
-                lines.push(format!("- and {} more", rows.len() - cap));
-            }
-            body.push(text_block(&lines.join("\n"), false));
-        }
-        if body.len() == 1 {
-            body.push(text_block("Nothing to report this week.", true));
-        }
-        card = message(body, Vec::new());
-        if card.to_string().len() <= MAX_CARD_BYTES {
-            break;
-        }
-    }
-    card
+                .filter(|r| r.realm.as_deref().is_none_or(|realm| ch.covers(realm)))
+                .map(|r| r.text.clone())
+                .collect(),
+        })
+        .collect();
+    Alert::digest(today, sections)
 }
 
 #[derive(FromRow)]
