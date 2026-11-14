@@ -77,22 +77,35 @@ pub fn canonical(items: &[AliasInfo], group: &[usize]) -> usize {
         .expect("a group is never empty")
 }
 
-/// Like `canonical`, but sticky: when members of the group are already
-/// linked to any component (`linked`), one of those keeps standing for it
-/// (by the same rule among them).
+/// Like `canonical`, but sticky. A member the component itself is already
+/// linked to (`own`) keeps standing for the group; failing that, a member
+/// linked to any component (`linked`); each by the same rule among them.
 /// A new record joining the group, or a record gaining an alias, then never
 /// re-keys the finding (a second card, and oaths left behind).
-pub fn sticky_canonical(items: &[AliasInfo], group: &[usize], linked: &HashSet<String>) -> usize {
-    let already: Vec<usize> = group
-        .iter()
-        .copied()
-        .filter(|&i| linked.contains(&items[i].id))
-        .collect();
-    if already.is_empty() {
-        canonical(items, group)
-    } else {
-        canonical(items, &already)
+///
+/// `own` comes first because databases may disagree on affected ranges: one
+/// component can hit only GHSA-x while another hits PYSEC-y and GHSA-x. Were
+/// the global set alone consulted, the second component would move from
+/// PYSEC-y to GHSA-x once GHSA-x got linked elsewhere (a resolve and a new
+/// card). `linked` still decides for a component with no link in the group
+/// (a new version, another service), so those converge on the id in use.
+pub fn sticky_canonical(
+    items: &[AliasInfo],
+    group: &[usize],
+    own: &HashSet<String>,
+    linked: &HashSet<String>,
+) -> usize {
+    for set in [own, linked] {
+        let already: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|&i| set.contains(&items[i].id))
+            .collect();
+        if !already.is_empty() {
+            return canonical(items, &already);
+        }
     }
+    canonical(items, group)
 }
 
 /// What OSV refresh knows of one advisory, from its fresh record or its
@@ -118,13 +131,15 @@ pub struct Merged {
 }
 
 /// One component's OSV hits, collapsed: the advisory ids to link (one per
-/// vulnerability). `linked` holds the advisories linked to any component
-/// now, which keep standing for their group (`sticky_canonical`). What each
-/// canonical takes over is added to `merged`.
+/// vulnerability). `own` holds the advisories this component is linked to
+/// now and `linked` those linked to any component; they keep standing for
+/// their group, `own` first (`sticky_canonical`). What each canonical takes
+/// over is added to `merged`.
 pub fn collapse_hits(
     hit_ids: &[String],
     name_key: &str,
     known: &HashMap<String, Known>,
+    own: &HashSet<String>,
     linked: &HashSet<String>,
     merged: &mut BTreeMap<String, Merged>,
 ) -> Vec<String> {
@@ -149,7 +164,7 @@ pub fn collapse_hits(
 
     let mut link = Vec::new();
     for group in groups(&items) {
-        let canon = &items[sticky_canonical(&items, &group, linked)].id;
+        let canon = &items[sticky_canonical(&items, &group, own, linked)].id;
         link.push(canon.clone());
         if group.len() == 1 {
             continue;
@@ -272,8 +287,29 @@ mod tests {
             info("GHSA-bbbb", &[], Some("CVE-2026-9")),
         ];
         let linked: HashSet<String> = ["PYSEC-1".to_string()].into();
-        assert_eq!(sticky_canonical(&items, &[0, 1], &linked), 0);
-        assert_eq!(sticky_canonical(&items, &[0, 1], &HashSet::new()), 1);
+        let none = HashSet::new();
+        assert_eq!(sticky_canonical(&items, &[0, 1], &none, &linked), 0);
+        assert_eq!(sticky_canonical(&items, &[0, 1], &none, &none), 1);
+    }
+
+    #[test]
+    fn the_components_own_link_beats_one_elsewhere() {
+        // Both are linked somewhere; this component is linked to PYSEC-1.
+        let items = [
+            info("PYSEC-1", &["GHSA-bbbb"], Some("CVE-2026-9")),
+            info("GHSA-bbbb", &[], Some("CVE-2026-9")),
+        ];
+        let linked: HashSet<String> = ["PYSEC-1".to_string(), "GHSA-bbbb".to_string()].into();
+        let own: HashSet<String> = ["PYSEC-1".to_string()].into();
+        assert_eq!(sticky_canonical(&items, &[0, 1], &own, &linked), 0);
+        // A component with no link in the group falls back to the global set.
+        assert_eq!(
+            sticky_canonical(&items, &[0, 1], &HashSet::new(), &linked),
+            1
+        );
+        // An own link outside the group does not count.
+        let elsewhere: HashSet<String> = ["GHSA-zzzz".to_string()].into();
+        assert_eq!(sticky_canonical(&items, &[0, 1], &elsewhere, &linked), 1);
     }
 
     #[test]
