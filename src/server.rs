@@ -419,7 +419,7 @@ mod tests {
 
     fn state(pool: PgPool) -> AppState {
         let cfg: crate::config::HeimdallConfig =
-            serde_yaml::from_str("realms: [prod, dev]").unwrap();
+            serde_saphyr::from_str("realms: [prod, dev]").unwrap();
         AppState::new(pool, Arc::new(cfg), reqwest::Client::new())
     }
 

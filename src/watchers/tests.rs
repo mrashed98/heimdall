@@ -36,7 +36,7 @@ fn endpoints(server: &MockServer) -> Endpoints {
 }
 
 fn cfg(yaml: &str) -> HeimdallConfig {
-    serde_yaml::from_str(yaml).unwrap()
+    serde_saphyr::from_str(yaml).unwrap()
 }
 
 fn now() -> DateTime<Utc> {

@@ -935,7 +935,7 @@ mod tests {
         #[sqlx::test(migrations = "./migrations")]
         async fn writes_need_admin_and_record_key_name(pool: PgPool) {
             let mut cfg: crate::config::HeimdallConfig =
-                serde_yaml::from_str("realms: [prod]").unwrap();
+                serde_saphyr::from_str("realms: [prod]").unwrap();
             cfg.admins = vec!["alice".to_string()];
             let admins = cfg.admins.clone();
             let state = AppState::new(pool.clone(), Arc::new(cfg), reqwest::Client::new());

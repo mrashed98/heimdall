@@ -305,7 +305,7 @@ mod tests {
 
     fn state(pool: PgPool, admins: &[&str]) -> AppState {
         let mut cfg: crate::config::HeimdallConfig =
-            serde_yaml::from_str("realms: [prod]").unwrap();
+            serde_saphyr::from_str("realms: [prod]").unwrap();
         cfg.admins = admins.iter().map(|s| s.to_string()).collect();
         AppState::new(pool, Arc::new(cfg), reqwest::Client::new())
     }

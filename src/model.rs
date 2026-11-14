@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn severity_yaml_is_lowercase() {
-        let s: Severity = serde_yaml::from_str("high").unwrap();
+        let s: Severity = serde_saphyr::from_str("high").unwrap();
         assert_eq!(s, Severity::High);
     }
 }

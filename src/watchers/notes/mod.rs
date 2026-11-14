@@ -363,7 +363,7 @@ mod testutil {
     }
 
     pub(super) fn cfg() -> HeimdallConfig {
-        serde_yaml::from_str("realms: [prod]").unwrap()
+        serde_saphyr::from_str("realms: [prod]").unwrap()
     }
 
     pub(super) fn planned(name: &str, kind: WatchKind, origin: Origin) -> Planned {

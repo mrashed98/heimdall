@@ -115,7 +115,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn retention_keeps_oaths(pool: PgPool) {
-        let cfg: HeimdallConfig = serde_yaml::from_str("realms: [prod]").unwrap();
+        let cfg: HeimdallConfig = serde_saphyr::from_str("realms: [prod]").unwrap();
         let now: DateTime<Utc> = "2026-11-13T00:00:00Z".parse().unwrap();
         let old = now - Duration::days(400);
         let recent = now - Duration::days(10);
@@ -225,7 +225,7 @@ mod tests {
         replace_components(pool, svc, crate::model::Source::Cluster, &[item])
             .await
             .unwrap();
-        serde_yaml::from_str(
+        serde_saphyr::from_str(
             "realms: [prod]\nwatchers:\n  github:\n    - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }\n",
         )
         .unwrap()
@@ -313,7 +313,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn retention_drops_scan_attempts_of_images_no_longer_pending(pool: PgPool) {
         use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
-        let cfg: HeimdallConfig = serde_yaml::from_str("realms: [prod]").unwrap();
+        let cfg: HeimdallConfig = serde_saphyr::from_str("realms: [prod]").unwrap();
         let svc = upsert_service(&pool, "prod", "api").await.unwrap();
         let item = InventoryItem {
             purl: "pkg:oci/api?repository_url=ghcr.io/x/api".into(),
