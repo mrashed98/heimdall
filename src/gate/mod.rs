@@ -1,8 +1,12 @@
 //! Hofund: the CI gate. CI uploads an SBOM; the server ingests it, checks the
 //! components live against OSV (the GitHub Advisory Database when OSV is
 //! down), applies oaths and answers pass, fail or unverified.
+//!
+//! - this file: the route, the decision and the CLI helpers.
+//! - `lookup`: asking OSV and the GitHub Advisory Database.
 
-use std::collections::{HashMap, HashSet};
+mod lookup;
+
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -20,18 +24,16 @@ use crate::auth::{require, Authed, Scope};
 use crate::error::ApiError;
 use crate::ingest::api::{ingest_sbom_inner, SbomQuery, UploadSlot, BODY_LIMIT};
 use crate::model::Severity;
-use crate::purl::{name_key, osv_package, OsvPackage};
-use crate::vuln::ghsa::{self, GhsaClient};
-use crate::vuln::osv::{self, OsvClient, OsvHit};
-use crate::vuln::severity;
-use crate::{oath, version, AppState};
+use crate::purl::{name_key, OsvPackage};
+use crate::vuln::ghsa::GhsaClient;
+use crate::vuln::osv::OsvClient;
+use crate::{oath, AppState};
+use lookup::{checkable, ghsa_hits, osv_hits};
 
 /// The whole gate answers within this, so a CI job never hangs on us.
 const TOTAL_BUDGET: Duration = Duration::from_secs(60);
 /// OSV gets most of it; the rest is left for the GHSA fallback.
 const OSV_BUDGET: Duration = Duration::from_secs(40);
-/// OSV record downloads in flight at once.
-const FETCH_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -195,270 +197,6 @@ pub async fn run(
         findings,
         unverified,
     })
-}
-
-/// A component the advisory databases can be asked about.
-struct Checked {
-    purl: String,
-    name_key: String,
-    pkg: OsvPackage,
-}
-
-/// One advisory hitting one component, before oaths are applied.
-struct Hit {
-    advisory: String,
-    severity: Severity,
-    purl: String,
-    name_key: String,
-    fixed: Option<String>,
-    /// Ids an oath for this hit may be filed under (the advisory and aliases).
-    oath_ids: Vec<String>,
-}
-
-/// Unique purls that map to an OSV package. Others (oci, generic) have no
-/// OSV ecosystem; the scheduled NVD matching covers them, not the gate.
-fn checkable(purls: &[String]) -> Vec<Checked> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for purl in purls {
-        if !seen.insert(purl.as_str()) {
-            continue;
-        }
-        let (Some(pkg), Ok(key)) = (osv_package(purl), name_key(purl)) else {
-            continue;
-        };
-        out.push(Checked {
-            purl: purl.clone(),
-            name_key: key,
-            pkg,
-        });
-    }
-    out
-}
-
-/// The parts of a stored advisory row the gate can reuse.
-#[derive(sqlx::FromRow)]
-struct Stored {
-    id: String,
-    modified: DateTime<Utc>,
-    severity: Severity,
-    fixed: Value,
-    has_nvd: bool,
-}
-
-/// Turn OSV's answer into hits. Records are fetched only when the stored row
-/// is missing, older than OSV's `modified`, or lacks this component's fixed
-/// versions. A hit is never dropped: when its record cannot be fetched in
-/// time, the stored row's severity is used, and without a stored row the hit
-/// is kept as unknown and its purl is reported unverified. Returns the hits
-/// and the unverified purls; a database error is an `Err`.
-async fn osv_hits(
-    pool: &PgPool,
-    client: &OsvClient,
-    checked: &[Checked],
-    all: &[Vec<OsvHit>],
-    budget: Duration,
-) -> anyhow::Result<(Vec<Hit>, Vec<String>)> {
-    let ids: Vec<String> = all
-        .iter()
-        .flatten()
-        .map(|h| h.id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let stored: HashMap<String, Stored> = sqlx::query_as::<_, Stored>(
-        "select id, modified, severity, fixed, scores ? 'nvd' as has_nvd \
-         from advisories where id = any($1)",
-    )
-    .bind(&ids)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|s| (s.id.clone(), s))
-    .collect();
-
-    // (advisory, component) pairs, deduplicated, with what the stored row
-    // can tell us without a fetch.
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut pairs: Vec<Pair> = Vec::new();
-    for (c, hits) in checked.iter().zip(all) {
-        for hit in hits {
-            if !seen.insert((hit.id.clone(), c.purl.clone())) {
-                continue;
-            }
-            let reusable = stored
-                .get(&hit.id)
-                .filter(|s| s.modified >= hit.modified)
-                .and_then(|s| Some((s.severity, stored_fixed(s, &c.name_key)?)));
-            pairs.push(Pair { c, hit, reusable });
-        }
-    }
-    let to_fetch: Vec<String> = pairs
-        .iter()
-        .filter(|p| p.reusable.is_none())
-        .map(|p| p.hit.id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let records = fetch_records(client, to_fetch, budget).await;
-
-    let mut out = Vec::new();
-    let mut unverified: Vec<String> = Vec::new();
-    for Pair { c, hit, reusable } in pairs {
-        let st = stored.get(&hit.id);
-        let (sev, fixed_versions) = match (reusable, records.get(&hit.id)) {
-            (Some(x), _) => x,
-            (None, Some(rec)) => {
-                let mut sev = severity::normalize(rec);
-                // NVD may have raised it; a fresh OSV record must not lower it.
-                if let Some(s) = st.filter(|s| s.has_nvd) {
-                    sev = severity::merge(sev, s.severity);
-                }
-                (sev, osv::fixed_versions(rec, &c.pkg))
-            }
-            // The record could not be read: fall back on what is stored.
-            (None, None) => match st {
-                Some(s) => (s.severity, stored_fixed(s, &c.name_key).unwrap_or_default()),
-                None => {
-                    if !unverified.contains(&c.purl) {
-                        unverified.push(c.purl.clone());
-                    }
-                    (Severity::Unknown, Vec::new())
-                }
-            },
-        };
-        let fixed_refs: Vec<&str> = fixed_versions.iter().map(String::as_str).collect();
-        out.push(Hit {
-            advisory: hit.id.clone(),
-            severity: sev,
-            purl: c.purl.clone(),
-            name_key: c.name_key.clone(),
-            fixed: version::recommend_fix(&c.pkg.ecosystem, &c.pkg.version, &fixed_refs)
-                .map(|a| a.suggest),
-            oath_ids: vec![hit.id.clone()],
-        });
-    }
-    Ok((out, unverified))
-}
-
-/// One advisory on one component, with what the stored row can tell us
-/// without a fetch (severity, fixed versions).
-struct Pair<'a> {
-    c: &'a Checked,
-    hit: &'a OsvHit,
-    reusable: Option<(Severity, Vec<String>)>,
-}
-
-/// The stored fixed versions for one component, if the row has its key.
-fn stored_fixed(s: &Stored, name_key: &str) -> Option<Vec<String>> {
-    serde_json::from_value(s.fixed.get(name_key)?.clone()).ok()
-}
-
-/// Fetch OSV records, `FETCH_CONCURRENCY` at a time, until `budget` runs
-/// out. Records that fail or are still pending at the deadline are left out
-/// of the map; the caller decides what a missing record means.
-async fn fetch_records(
-    client: &OsvClient,
-    ids: Vec<String>,
-    budget: Duration,
-) -> HashMap<String, Value> {
-    let deadline = tokio::time::Instant::now() + budget;
-    let mut out = HashMap::new();
-    let mut queue = ids.into_iter();
-    // Spawned tasks must own what they use, hence the client clone per task
-    // (cheap: reqwest clients share one connection pool).
-    let mut running = tokio::task::JoinSet::new();
-    loop {
-        while running.len() < FETCH_CONCURRENCY {
-            let Some(id) = queue.next() else { break };
-            let client = client.clone();
-            running.spawn(async move {
-                let rec = client.get(&id).await;
-                (id, rec)
-            });
-        }
-        match tokio::time::timeout_at(deadline, running.join_next()).await {
-            Ok(None) => break,
-            Ok(Some(Ok((id, Ok(rec))))) => {
-                out.insert(id, rec);
-            }
-            Ok(Some(Ok((id, Err(e))))) => tracing::warn!("gate: osv record {id}: {e:#}"),
-            Ok(Some(Err(e))) => tracing::warn!("gate: osv record fetch task failed: {e}"),
-            Err(_) => {
-                // Dropping the JoinSet aborts the fetches still running.
-                tracing::warn!("gate: osv record fetches ran out of time");
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// The fallback. Returns the hits and the purls nothing vouched for:
-/// everything when GHSA is unavailable or fails, otherwise the components
-/// in ecosystems GitHub does not track.
-async fn ghsa_hits(
-    pool: &PgPool,
-    client: Option<&GhsaClient>,
-    checked: &[Checked],
-    budget: Duration,
-) -> anyhow::Result<(Vec<Hit>, Vec<String>)> {
-    let everything = || checked.iter().map(|c| c.purl.clone()).collect();
-    let Some(client) = client else {
-        tracing::warn!("gate: GITHUB_TOKEN is not set; no fallback, everything is unverified");
-        return Ok((Vec::new(), everything()));
-    };
-    let pkgs: Vec<OsvPackage> = checked.iter().map(|c| c.pkg.clone()).collect();
-    let all = match tokio::time::timeout(budget, client.check(&pkgs)).await {
-        Ok(Ok(all)) => all,
-        Ok(Err(e)) => {
-            tracing::warn!("gate: github advisory db failed ({e:#}); everything is unverified");
-            return Ok((Vec::new(), everything()));
-        }
-        Err(_) => {
-            tracing::warn!("gate: github advisory db timed out; everything is unverified");
-            return Ok((Vec::new(), everything()));
-        }
-    };
-
-    let mut hits = Vec::new();
-    let mut unverified = Vec::new();
-    for (c, found) in checked.iter().zip(all) {
-        if !ghsa::covers(&c.pkg) {
-            unverified.push(c.purl.clone());
-            continue;
-        }
-        for h in found {
-            // Stored advisories that are this GHSA advisory under another id
-            // (a CVE, a GO- id): oaths may be filed under those, and NVD may
-            // have rated it higher.
-            let known: Vec<(String, Option<String>, Severity)> = sqlx::query_as(
-                "select id, cve_id, severity from advisories where id = $1 or $1 = any(aliases)",
-            )
-            .bind(&h.id)
-            .fetch_all(pool)
-            .await?;
-            let mut oath_ids = vec![h.id.clone()];
-            let mut sev = h.severity;
-            for (id, cve, stored_sev) in known {
-                sev = severity::merge(sev, stored_sev);
-                for alias in std::iter::once(id).chain(cve) {
-                    if !oath_ids.contains(&alias) {
-                        oath_ids.push(alias);
-                    }
-                }
-            }
-            hits.push(Hit {
-                advisory: h.id,
-                severity: sev,
-                purl: c.purl.clone(),
-                name_key: c.name_key.clone(),
-                fixed: h.fixed,
-                oath_ids,
-            });
-        }
-    }
-    Ok((hits, unverified))
 }
 
 /// The first active oath filed under any of `ids` for this component.
@@ -699,6 +437,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.verdict, Verdict::Pass);
+    }
+
+    /// OSV knows widget's CVE-2026-5000 twice: a GO- record (low, fixed in
+    /// 1.9.1) and a GHSA- record (high, no fix) that names the GO- one.
+    async fn osv_with_twin_records() -> MockServer {
+        let server = MockServer::start().await;
+        let modified = "2026-05-01T00:00:00Z";
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [
+                    {"id": "GO-2026-0001", "modified": modified},
+                    {"id": ADV, "modified": modified},
+                ]}]
+            })))
+            .mount(&server)
+            .await;
+        let record = |id: &str, aliases: Value, word: &str, events: Value| {
+            json!({
+                "id": id, "modified": modified, "aliases": aliases,
+                "database_specific": {"severity": word},
+                "affected": [{
+                    "package": {"ecosystem": "npm", "name": "widget"},
+                    "ranges": [{"type": "SEMVER", "events": events}]
+                }]
+            })
+        };
+        let go = record(
+            "GO-2026-0001",
+            json!(["CVE-2026-5000"]),
+            "LOW",
+            json!([{"introduced": "0"}, {"fixed": "1.9.1"}]),
+        );
+        let ghsa = record(
+            ADV,
+            json!(["CVE-2026-5000", "GO-2026-0001"]),
+            "HIGH",
+            json!([{"introduced": "0"}]),
+        );
+        for rec in [go, ghsa] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/vulns/{}", rec["id"].as_str().unwrap())))
+                .respond_with(ResponseTemplate::new(200).set_body_json(rec))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn gate_collapses_osv_aliases_to_one_finding(pool: PgPool) {
+        let osv = osv_with_twin_records().await;
+        let r = run(
+            &state(pool),
+            &clients(&osv, None),
+            &query(Severity::High),
+            &body(&[NPM]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r.findings,
+            vec![GateFinding {
+                advisory: ADV.into(),
+                severity: Severity::High,
+                purl: NPM.into(),
+                fixed: Some("1.9.1".into()),
+                oath: None,
+            }]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn gate_oath_filed_under_an_alias_applies(pool: PgPool) {
+        let osv = osv_with_high().await;
+        // The record names a CVE; the oath was filed under it.
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/vulns/{ADV}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": ADV, "modified": "2026-05-01T00:00:00Z",
+                "aliases": ["CVE-2026-6000"],
+                "database_specific": {"severity": "HIGH"},
+                "affected": [{"package": {"ecosystem": "npm", "name": "widget"},
+                              "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}]}]
+            })))
+            .with_priority(1)
+            .mount(&osv)
+            .await;
+        let id = oath_on(&pool, "CVE-2026-6000").await;
+        let r = run(
+            &state(pool),
+            &clients(&osv, None),
+            &query(Severity::High),
+            &body(&[NPM]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.verdict, Verdict::Pass);
+        assert_eq!(r.findings[0].oath, Some(id));
     }
 
     #[sqlx::test(migrations = "./migrations")]

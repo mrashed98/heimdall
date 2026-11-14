@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::model::Severity;
 use crate::purl::{name_key, osv_package, OsvPackage};
+use crate::vuln::collapse::{self, AliasInfo, Known};
 use crate::vuln::{nvd, retry, severity};
 
 const BATCH_SIZE: usize = 1000;
@@ -148,12 +149,17 @@ struct Checked {
     pkg: OsvPackage,
 }
 
-/// The parts of an existing advisory row that decide whether to refetch.
+/// The parts of an existing advisory row that decide whether to refetch,
+/// and what it is also known as.
+#[derive(sqlx::FromRow)]
 struct Stored {
+    id: String,
     modified: DateTime<Utc>,
     fixed: Value,
     severity: Severity,
     has_nvd: bool,
+    aliases: Vec<String>,
+    cve_id: Option<String>,
 }
 
 /// What we keep per advisory before it is written.
@@ -170,6 +176,8 @@ struct Advisory {
 
 /// Ask OSV about every component, upsert the advisories it reports and replace
 /// the OSV links of the checked components. NVD-only links are left alone.
+/// Records that describe one vulnerability (see `collapse`) give one link,
+/// to the group's canonical advisory.
 pub async fn refresh(
     pool: &PgPool,
     client: &OsvClient,
@@ -191,37 +199,25 @@ pub async fn refresh(
     // advisory id -> newest `modified` reported, and which checked components hit it.
     let mut newest: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut hit_by: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
     for (idx, hits) in all_hits.iter().enumerate() {
         for hit in hits {
             let e = newest.entry(hit.id.clone()).or_insert(hit.modified);
             *e = (*e).max(hit.modified);
             hit_by.entry(hit.id.clone()).or_default().push(idx);
-            desired.insert((checked[idx].component_id, hit.id.clone()));
         }
     }
 
     let ids: Vec<String> = newest.keys().cloned().collect();
-    let stored: Vec<(String, DateTime<Utc>, Value, Severity, bool)> = sqlx::query_as(
-        "select id, modified, fixed, severity, scores ? 'nvd' from advisories where id = any($1)",
+    let stored: HashMap<String, Stored> = sqlx::query_as::<_, Stored>(
+        "select id, modified, fixed, severity, scores ? 'nvd' as has_nvd, aliases, cve_id \
+         from advisories where id = any($1)",
     )
     .bind(&ids)
     .fetch_all(pool)
-    .await?;
-    let stored: HashMap<String, Stored> = stored
-        .into_iter()
-        .map(|(id, modified, fixed, severity, has_nvd)| {
-            (
-                id,
-                Stored {
-                    modified,
-                    fixed,
-                    severity,
-                    has_nvd,
-                },
-            )
-        })
-        .collect();
+    .await?
+    .into_iter()
+    .map(|s| (s.id.clone(), s))
+    .collect();
 
     let mut fetched = Vec::new();
     for (id, modified) in &newest {
@@ -247,9 +243,25 @@ pub async fn refresh(
         fetched.push(adv);
     }
 
+    // Collapse each component's hits to one advisory per vulnerability.
+    let known = known_advisories(&stored, &fetched)?;
+    let mut merged = BTreeMap::new();
+    let mut desired: BTreeSet<(i64, String)> = BTreeSet::new();
+    for (c, hits) in checked.iter().zip(&all_hits) {
+        let mut hit_ids: Vec<String> = hits.iter().map(|h| h.id.clone()).collect();
+        hit_ids.sort();
+        hit_ids.dedup();
+        for id in collapse::collapse_hits(&hit_ids, &c.name_key, &known, &mut merged) {
+            desired.insert((c.component_id, id));
+        }
+    }
+
     let mut tx = pool.begin().await?;
     for adv in &fetched {
         upsert_advisory(&mut tx, adv).await?;
+    }
+    collapse::store_merged(&mut tx, &merged).await?;
+    for adv in &fetched {
         // NVD may have stored this CVE under its own id before OSV knew it.
         if let Some(cve) = &adv.cve_id {
             nvd::fold_duplicates(&mut tx, cve).await?;
@@ -298,6 +310,43 @@ pub async fn refresh(
     })
 }
 
+/// What each hit advisory is also known as, with its severity and fixed
+/// versions: from the fresh record when it was fetched, else the stored row.
+fn known_advisories(
+    stored: &HashMap<String, Stored>,
+    fetched: &[Advisory],
+) -> anyhow::Result<HashMap<String, Known>> {
+    let mut known = HashMap::new();
+    for adv in fetched {
+        let info = AliasInfo {
+            id: adv.id.clone(),
+            aliases: adv.aliases.clone(),
+            cve_id: adv.cve_id.clone(),
+        };
+        let fixed = serde_json::to_value(&adv.fixed)?;
+        known.insert(
+            adv.id.clone(),
+            Known {
+                info,
+                severity: adv.severity,
+                fixed,
+            },
+        );
+    }
+    for (id, st) in stored {
+        known.entry(id.clone()).or_insert_with(|| Known {
+            info: AliasInfo {
+                id: id.clone(),
+                aliases: st.aliases.clone(),
+                cve_id: st.cve_id.clone(),
+            },
+            severity: st.severity,
+            fixed: st.fixed.clone(),
+        });
+    }
+    Ok(known)
+}
+
 async fn upsert_advisory(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     adv: &Advisory,
@@ -334,7 +383,9 @@ async fn upsert_advisory(
     Ok(())
 }
 
-fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory> {
+/// A record's id, aliases and the CVE it is about (the id itself when it is
+/// a CVE, else the first CVE alias).
+pub(crate) fn record_names(vuln: &Value) -> anyhow::Result<AliasInfo> {
     let id = vuln["id"]
         .as_str()
         .context("osv record without id")?
@@ -347,6 +398,23 @@ fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory
                 .collect()
         })
         .unwrap_or_default();
+    let cve_id = std::iter::once(&id)
+        .chain(aliases.iter())
+        .find(|a| is_cve_id(a))
+        .cloned();
+    Ok(AliasInfo {
+        id,
+        aliases,
+        cve_id,
+    })
+}
+
+fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory> {
+    let AliasInfo {
+        id,
+        aliases,
+        cve_id,
+    } = record_names(vuln)?;
     let modified = vuln["modified"]
         .as_str()
         .context("osv record without modified")?
@@ -362,11 +430,6 @@ fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory
             .unwrap_or("")
             .to_string(),
     };
-    let cve_id = std::iter::once(&id)
-        .chain(aliases.iter())
-        .find(|a| is_cve_id(a))
-        .cloned();
-
     let mut fixed = BTreeMap::new();
     for c in hitting {
         fixed.insert(c.name_key.clone(), fixed_versions(vuln, &c.pkg));
@@ -384,7 +447,7 @@ fn build_advisory(vuln: &Value, hitting: &[&Checked]) -> anyhow::Result<Advisory
 }
 
 /// `^CVE-\d{4}-\d+$` without pulling in the regex crate.
-fn is_cve_id(s: &str) -> bool {
+pub(crate) fn is_cve_id(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("CVE-") else {
         return false;
     };
@@ -830,6 +893,94 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(sev, "high");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn osv_aliases_collapse_to_one_advisory(pool: PgPool) {
+        use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
+        use crate::model::{FindingKind, Source};
+
+        // Go's database and GitHub's both publish CVE-2026-5000 for widget.
+        // GitHub's is HIGH without a fix; Go's is LOW with one.
+        let go = osv_record("GO-2026-0001", "2026-05-01T00:00:00Z", "LOW", Some("1.9.1"));
+        let mut ghsa = osv_record("GHSA-cccc-dddd-eeee", "2026-05-01T00:00:00Z", "HIGH", None);
+        ghsa["aliases"] = json!(["CVE-2026-5000", "GO-2026-0001"]);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/querybatch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{"vulns": [
+                    {"id": go["id"], "modified": go["modified"]},
+                    {"id": ghsa["id"], "modified": ghsa["modified"]},
+                ]}]
+            })))
+            .mount(&server)
+            .await;
+        for rec in [&go, &ghsa] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/vulns/{}", rec["id"].as_str().unwrap())))
+                .respond_with(ResponseTemplate::new(200).set_body_json(rec))
+                .mount(&server)
+                .await;
+        }
+        let sid = upsert_service(&pool, "prod", "api").await.unwrap();
+        let item = InventoryItem {
+            purl: PURL.to_string(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: None,
+        };
+        replace_components(&pool, sid, Source::Git, &[item])
+            .await
+            .unwrap();
+        let cid: i64 = sqlx::query_scalar("select id from components where purl = $1")
+            .bind(PURL)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // Twice: the second run reads the aliases from the stored rows.
+        for _ in 0..2 {
+            refresh(&pool, &client_for(&server), &[(cid, PURL.to_string())])
+                .await
+                .unwrap();
+            let links: Vec<String> = sqlx::query_scalar(
+                "select advisory_id from component_advisories where component_id = $1",
+            )
+            .bind(cid)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(links, vec!["GHSA-cccc-dddd-eeee".to_string()]);
+        }
+        let (aliases, sev, fixed): (Vec<String>, String, Value) = sqlx::query_as(
+            "select aliases, severity, fixed from advisories where id = 'GHSA-cccc-dddd-eeee'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(aliases.contains(&"GO-2026-0001".to_string()), "{aliases:?}");
+        assert!(
+            aliases.contains(&"CVE-2026-5000".to_string()),
+            "{aliases:?}"
+        );
+        assert_eq!(sev, "high", "the higher severity wins");
+        assert_eq!(fixed[NAME_KEY], json!(["1.9.1"]), "Go's fix is kept");
+
+        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+            .await
+            .unwrap();
+        let findings: Vec<(FindingKind, String)> =
+            sqlx::query_as("select kind, ref_id from findings order by kind")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let vulns: Vec<&(FindingKind, String)> = findings
+            .iter()
+            .filter(|(k, _)| *k == FindingKind::Vuln)
+            .collect();
+        assert_eq!(vulns.len(), 1, "{findings:?}");
+        assert_eq!(vulns[0].1, "GHSA-cccc-dddd-eeee");
     }
 
     #[sqlx::test(migrations = "./migrations")]

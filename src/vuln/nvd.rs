@@ -17,6 +17,7 @@ use url::Url;
 use crate::config::HeimdallConfig;
 use crate::model::Severity;
 use crate::purl::osv_package;
+use crate::vuln::collapse::{self, AliasInfo};
 use crate::vuln::cpe::{self, concrete_version, vendor_product};
 use crate::vuln::{retry, severity};
 
@@ -420,13 +421,12 @@ async fn write_matches(
                 }
             }
         }
-        for (id, _, _) in rows {
-            for c in hit {
-                pair_c.push(*c);
-                pair_a.push(id.clone());
-            }
-            touched.push(id);
+        let ids: Vec<String> = rows.into_iter().map(|(id, _, _)| id).collect();
+        for (c, id) in link_targets(tx, cve_id, &ids, hit).await? {
+            pair_c.push(c);
+            pair_a.push(id);
         }
+        touched.extend(ids);
     }
 
     // Matching components get an nvd link; an existing osv link becomes both.
@@ -496,12 +496,58 @@ async fn load_existing(
     Ok(by_cve)
 }
 
+/// Which advisory each matched component is linked to for one CVE. With one
+/// advisory carrying the CVE, that one. With several (OSV records from
+/// different databases), a component OSV already links to one of them keeps
+/// that one, and any other gets the canonical one (see `collapse`): one CVE
+/// is one link per component, so one finding.
+async fn link_targets(
+    tx: &mut Tx<'_>,
+    cve_id: &str,
+    ids: &[String],
+    hit: &BTreeSet<i64>,
+) -> anyhow::Result<Vec<(i64, String)>> {
+    if ids.len() == 1 {
+        return Ok(hit.iter().map(|c| (*c, ids[0].clone())).collect());
+    }
+    let canon = canonical_for_cve(cve_id, ids);
+    let components: Vec<i64> = hit.iter().copied().collect();
+    let linked: Vec<(i64, String)> = sqlx::query_as(
+        "select component_id, min(advisory_id) from component_advisories \
+         where component_id = any($1) and advisory_id = any($2) group by component_id",
+    )
+    .bind(&components)
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let linked: HashMap<i64, String> = linked.into_iter().collect();
+    Ok(hit
+        .iter()
+        .map(|c| (*c, linked.get(c).cloned().unwrap_or_else(|| canon.clone())))
+        .collect())
+}
+
+/// The advisory that stands for a CVE several advisories carry.
+fn canonical_for_cve(cve_id: &str, ids: &[String]) -> String {
+    let items: Vec<AliasInfo> = ids
+        .iter()
+        .map(|id| AliasInfo {
+            id: id.clone(),
+            aliases: Vec::new(),
+            cve_id: Some(cve_id.to_string()),
+        })
+        .collect();
+    let all: Vec<usize> = (0..items.len()).collect();
+    items[collapse::canonical(&items, &all)].id.clone()
+}
+
 /// One CVE must be one advisory. When an nvd-sourced advisory and an
 /// OSV-sourced one share `cve_id` (NVD ran before OSV knew the CVE), move the
-/// nvd row's links onto the OSV row(s), copy `scores.nvd`, keep the higher
-/// severity and delete the nvd row. A link NVD found stays `nvd`; where OSV
-/// already links the component it becomes `both`. Called by both the NVD and
-/// the OSV write paths.
+/// nvd row's links onto the OSV row the component already links (or the
+/// canonical OSV row, see `link_targets`), copy `scores.nvd` to every OSV
+/// row, keep the higher severity and delete the nvd row. A link NVD found
+/// stays `nvd`; where OSV already links the component it becomes `both`.
+/// Called by both the NVD and the OSV write paths.
 pub async fn fold_duplicates(tx: &mut Tx<'_>, cve_id: &str) -> anyhow::Result<()> {
     let rows: Vec<(String, Severity, String, Value)> = sqlx::query_as(
         "select id, severity, source, scores from advisories where cve_id = $1 order by id",
@@ -512,17 +558,30 @@ pub async fn fold_duplicates(tx: &mut Tx<'_>, cve_id: &str) -> anyhow::Result<()
     let Some(nvd) = rows.iter().find(|r| r.2 == "nvd") else {
         return Ok(());
     };
-    for (id, sev, _, _) in rows.iter().filter(|r| r.2 != "nvd") {
+    let osv_ids: Vec<String> = rows
+        .iter()
+        .filter(|r| r.2 != "nvd")
+        .map(|r| r.0.clone())
+        .collect();
+    if !osv_ids.is_empty() {
         sqlx::query(
             "insert into component_advisories (component_id, advisory_id, match_source) \
-             select component_id, $2, match_source from component_advisories where advisory_id = $1 \
+             select n.component_id, \
+                    coalesce((select min(o.advisory_id) from component_advisories o \
+                              where o.component_id = n.component_id \
+                                and o.advisory_id = any($3)), $2), \
+                    n.match_source \
+             from component_advisories n where n.advisory_id = $1 \
              on conflict (component_id, advisory_id) do update set match_source = \
                case when component_advisories.match_source = 'nvd' then 'nvd' else 'both' end",
         )
         .bind(&nvd.0)
-        .bind(id)
+        .bind(canonical_for_cve(cve_id, &osv_ids))
+        .bind(&osv_ids)
         .execute(&mut **tx)
         .await?;
+    }
+    for (id, sev, _, _) in rows.iter().filter(|r| r.2 != "nvd") {
         let score = nvd.3.get("nvd").cloned().unwrap_or(Value::Null);
         sqlx::query(
             "update advisories set severity = $2, \
@@ -844,6 +903,34 @@ mod tests {
         assert_eq!(
             links(&pool).await,
             [("GHSA-pg".to_string(), "both".to_string())]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn nvd_links_one_advisory_when_several_carry_the_cve(pool: PgPool) {
+        // Debian's DSA and DEBIAN-CVE records both carry CVE-2026-7000.
+        let server = MockServer::start().await;
+        mock_changed(
+            &server,
+            page_with("CVE-2026-7000", 9.8, "postgresql:postgresql"),
+        )
+        .await;
+        mock_backfill(&server, empty_page(), 1).await;
+        seed_pg(&pool).await;
+        sqlx::query(
+            "insert into advisories (id, severity, source, cve_id) values \
+             ('DSA-5000-1', 'high', 'osv', 'CVE-2026-7000'), \
+             ('DEBIAN-CVE-2026-7000', 'high', 'osv', 'CVE-2026-7000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        // One link, to the canonical record (smallest id: neither is GHSA).
+        assert_eq!(
+            links(&pool).await,
+            [("DEBIAN-CVE-2026-7000".to_string(), "nvd".to_string())]
         );
     }
 

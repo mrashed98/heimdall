@@ -233,12 +233,12 @@ async fn oaths(action: OathAction, style: &Style) -> anyhow::Result<()> {
         OathAction::Snooze { target, until } => {
             let body = oath_body(OathKind::Snooze, target, Some(until));
             let r: serde_json::Value = client.post_json("/api/v1/oaths", &body).await?;
-            println!("oath {}", r["id"]);
+            print_created(&r, style);
         }
         OathAction::Ignore { target, until } => {
             let body = oath_body(OathKind::Ignore, target, until);
             let r: serde_json::Value = client.post_json("/api/v1/oaths", &body).await?;
-            println!("oath {}", r["id"]);
+            print_created(&r, style);
         }
         OathAction::List { status } => {
             let path = match status {
@@ -269,6 +269,15 @@ async fn oaths(action: OathAction, style: &Style) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The new oath's id, and the server's warning when it could not tell
+/// which advisory the id names.
+fn print_created(r: &serde_json::Value, style: &Style) {
+    println!("oath {}", r["id"]);
+    if let Some(w) = r["warning"].as_str() {
+        eprint!("{}", render::warn_line(style, w));
+    }
 }
 
 async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {

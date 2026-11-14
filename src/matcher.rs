@@ -793,6 +793,35 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn oath_filed_under_cve_suppresses_vuln(pool: PgPool) {
+        seed_gin(&pool, "v1.9.0").await;
+        sqlx::query("UPDATE advisories SET cve_id = 'CVE-2026-0042', aliases = '{CVE-2026-0042}'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Someone files the oath under the CVE they read about.
+        let created = oath::create(
+            &pool,
+            oath::NewOath {
+                advisory_id: "CVE-2026-0042".to_string(),
+                purl: gin("v1.9.0"),
+                service: SERVICE.to_string(),
+                realm: REALM.to_string(),
+                all_realms: false,
+                kind: crate::model::OathKind::Ignore,
+                reason: "not reachable".to_string(),
+                until: None,
+                by: "alice".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        run(&pool, REALM, Utc::now()).await.unwrap();
+        let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+        assert_eq!(v.details["oath"], json!(created.id));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn oath_expired_finding_from_expiry(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
         let now = Utc::now();

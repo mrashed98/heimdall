@@ -14,6 +14,7 @@ use sqlx::PgPool;
 use crate::auth::{require, Authed, Scope};
 use crate::error::ApiError;
 use crate::model::OathKind;
+use crate::vuln::collapse::{canonical, AliasInfo};
 use crate::AppState;
 
 /// A request that breaks a rule (blank reason, date in the past, ...).
@@ -97,7 +98,21 @@ fn purl_version(purl: &str) -> String {
         .unwrap_or_default()
 }
 
-pub async fn create(pool: &PgPool, req: NewOath) -> anyhow::Result<i64> {
+/// What `create` made, and anything the caller should be told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Created {
+    pub id: i64,
+    /// Set when the advisory id matches no known advisory: the oath is
+    /// stored as given, but it suppresses nothing until an advisory with
+    /// that id appears.
+    pub warning: Option<String>,
+}
+
+/// Record an oath. The advisory may be given under any of its names (its
+/// id, a CVE, an alias such as a GO- id); the oath is stored under the
+/// advisory's own id, the one findings carry, and the name given is kept in
+/// the `created` event's note.
+pub async fn create(pool: &PgPool, req: NewOath) -> anyhow::Result<Created> {
     if req.reason.trim().is_empty() {
         return Err(invalid("reason must not be blank"));
     }
@@ -126,13 +141,24 @@ pub async fn create(pool: &PgPool, req: NewOath) -> anyhow::Result<i64> {
         Some(req.realm)
     };
 
+    let given = req.advisory_id.trim();
     let mut tx = pool.begin().await?;
+    let (advisory_id, warning) = match resolve_advisory(&mut tx, given).await? {
+        Some(id) => (id, None),
+        None => (
+            given.to_string(),
+            Some(format!(
+                "no known advisory is called {given}; the oath is stored as given \
+                 and applies once an advisory with that id is linked"
+            )),
+        ),
+    };
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO oaths (advisory_id, name_key, service_name, realm, kind, reason, \
          version_at_creation, expires_at, review_at, created_by) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
-    .bind(&req.advisory_id)
+    .bind(&advisory_id)
     .bind(&name_key)
     .bind(&req.service)
     .bind(&realm)
@@ -144,9 +170,39 @@ pub async fn create(pool: &PgPool, req: NewOath) -> anyhow::Result<i64> {
     .bind(&req.by)
     .fetch_one(&mut *tx)
     .await?;
-    add_event(&mut tx, id, "created", &req.by, None).await?;
+    let note = (advisory_id != given).then(|| format!("filed as {given}"));
+    add_event(&mut tx, id, "created", &req.by, note.as_deref()).await?;
     tx.commit().await?;
-    Ok(id)
+    Ok(Created { id, warning })
+}
+
+/// The id of the advisory known as `name` (its id, an alias or its CVE).
+/// When several match (records from different databases not yet collapsed),
+/// the canonical one; None when none does.
+async fn resolve_advisory(
+    tx: &mut sqlx::PgConnection,
+    name: &str,
+) -> anyhow::Result<Option<String>> {
+    let rows: Vec<(String, Vec<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, aliases, cve_id FROM advisories \
+         WHERE id = $1 OR $1 = ANY(aliases) OR cve_id = $1",
+    )
+    .bind(name)
+    .fetch_all(&mut *tx)
+    .await?;
+    let items: Vec<AliasInfo> = rows
+        .into_iter()
+        .map(|(id, aliases, cve_id)| AliasInfo {
+            id,
+            aliases,
+            cve_id,
+        })
+        .collect();
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let all: Vec<usize> = (0..items.len()).collect();
+    Ok(Some(items[canonical(&items, &all)].id.clone()))
 }
 
 async fn add_event(
@@ -389,8 +445,10 @@ async fn create_handler(
         until: body.until,
         by: authed.name,
     };
-    let id = create(&state.pool, req).await.map_err(api_error)?;
-    Ok(Json(serde_json::json!({ "id": id })))
+    let created = create(&state.pool, req).await.map_err(api_error)?;
+    Ok(Json(
+        serde_json::json!({ "id": created.id, "warning": created.warning }),
+    ))
 }
 
 async fn list_handler(
@@ -484,6 +542,46 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn oath_under_an_alias_is_stored_under_the_advisory(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO advisories (id, aliases, severity, source, cve_id) \
+             VALUES ('GHSA-aaaa-bbbb-cccc', '{CVE-2026-0042,GO-2026-0042}', 'high', 'osv', \
+                     'CVE-2026-0042')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for given in ["CVE-2026-0042", "GO-2026-0042", "GHSA-aaaa-bbbb-cccc"] {
+            let r = NewOath {
+                advisory_id: given.to_string(),
+                ..snooze(7)
+            };
+            let created = create(&pool, r).await.unwrap();
+            assert_eq!(created.warning, None);
+            let o = get(&pool, created.id).await;
+            assert_eq!(o.advisory_id, "GHSA-aaaa-bbbb-cccc", "filed as {given}");
+        }
+        let note: Option<String> = sqlx::query_scalar(
+            "SELECT note FROM oath_events WHERE event = 'created' ORDER BY id LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(note.unwrap().contains("CVE-2026-0042"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn oath_for_an_unknown_advisory_warns(pool: PgPool) {
+        let r = NewOath {
+            advisory_id: "CVE-2099-0001".to_string(),
+            ..snooze(7)
+        };
+        let created = create(&pool, r).await.unwrap();
+        assert!(created.warning.unwrap().contains("CVE-2099-0001"));
+        assert_eq!(get(&pool, created.id).await.advisory_id, "CVE-2099-0001");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn blank_reason_rejected(pool: PgPool) {
         let r = NewOath {
             reason: "   ".to_string(),
@@ -503,7 +601,7 @@ mod tests {
             let e = create(&pool, r).await.unwrap_err();
             assert!(is_invalid(&e), "until {until:?}: {e:#}");
         }
-        let id = create(&pool, snooze(1)).await.unwrap();
+        let id = create(&pool, snooze(1)).await.unwrap().id;
         let o = get(&pool, id).await;
         assert_eq!(o.status, "active");
         assert_eq!(
@@ -518,7 +616,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn ignore_defaults_review_90_days(pool: PgPool) {
         let before = Utc::now();
-        let id = create(&pool, req(OathKind::Ignore)).await.unwrap();
+        let id = create(&pool, req(OathKind::Ignore)).await.unwrap().id;
         let o = get(&pool, id).await;
         let review = o.review_at.unwrap();
         assert!(review >= before + Duration::days(90));
@@ -529,7 +627,7 @@ mod tests {
             until: Some(today() + Duration::days(30)),
             ..req(OathKind::Ignore)
         };
-        let id = create(&pool, r).await.unwrap();
+        let id = create(&pool, r).await.unwrap().id;
         let o = get(&pool, id).await;
         assert_eq!(
             o.review_at.unwrap(),
@@ -542,7 +640,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn active_matches_any_version_of_same_name(pool: PgPool) {
-        let id = create(&pool, snooze(7)).await.unwrap();
+        let id = create(&pool, snooze(7)).await.unwrap().id;
         let o = get(&pool, id).await;
         assert_eq!(o.name_key, GIN_KEY);
         assert_eq!(o.version_at_creation, "v1.9.0");
@@ -577,8 +675,8 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn expiry_processed_once_after_downtime(pool: PgPool) {
-        let snooze_id = create(&pool, snooze(1)).await.unwrap();
-        let ignore_id = create(&pool, req(OathKind::Ignore)).await.unwrap();
+        let snooze_id = create(&pool, snooze(1)).await.unwrap().id;
+        let ignore_id = create(&pool, req(OathKind::Ignore)).await.unwrap().id;
         // Not yet due.
         assert!(
             process_expiries(&mut pool.acquire().await.unwrap(), Utc::now())
@@ -634,7 +732,7 @@ mod tests {
             realm: String::new(),
             ..snooze(7)
         };
-        let id = create(&pool, all).await.unwrap();
+        let id = create(&pool, all).await.unwrap().id;
         assert!(get(&pool, id).await.realm.is_none());
         for realm in ["prod", "dev-k3s"] {
             let hit = active_for(
@@ -698,7 +796,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn revoke_stops_matching_and_records_event(pool: PgPool) {
-        let id = create(&pool, snooze(7)).await.unwrap();
+        let id = create(&pool, snooze(7)).await.unwrap().id;
         let o = revoke(&pool, id, "bob").await.unwrap().unwrap();
         assert_eq!(o.status, "revoked");
         assert!(active_for(
@@ -724,7 +822,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn extend_reactivates_expired_and_rejects_bad_input(pool: PgPool) {
-        let id = create(&pool, snooze(1)).await.unwrap();
+        let id = create(&pool, snooze(1)).await.unwrap().id;
         process_expiries(
             &mut pool.acquire().await.unwrap(),
             Utc::now() + Duration::days(5),
@@ -759,8 +857,8 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn list_filters_by_status(pool: PgPool) {
-        let a = create(&pool, snooze(7)).await.unwrap();
-        let b = create(&pool, req(OathKind::Ignore)).await.unwrap();
+        let a = create(&pool, snooze(7)).await.unwrap().id;
+        let b = create(&pool, req(OathKind::Ignore)).await.unwrap().id;
         revoke(&pool, b, "bob").await.unwrap();
         let active = list(&pool, Some("active")).await.unwrap();
         assert_eq!(active.iter().map(|o| o.id).collect::<Vec<_>>(), vec![a]);

@@ -1,5 +1,6 @@
 //! Vulnerability sources: OSV and NVD, merged by CVE id.
 
+pub mod collapse;
 pub mod cpe;
 pub mod ghsa;
 pub mod k8s_feed;
