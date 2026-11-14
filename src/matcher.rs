@@ -334,7 +334,8 @@ async fn realm_where_oath_applies(
 /// when an oath lapses) is re-opened with `notified_at` cleared; an open one
 /// only gets its severity and details refreshed, so it is not announced again.
 /// A Vuln or FixAvailable resolved within `FLAP_WINDOW_DAYS` re-opens but
-/// keeps its `notified_at`: it was announced, and only flapped.
+/// keeps its `opened_at` and `notified_at`: it was announced, and only
+/// flapped (a Vuln that comes back at High after a lower rating re-arms).
 async fn upsert(
     tx: &mut PgConnection,
     wanted: &BTreeMap<String, Wanted>,
@@ -381,10 +382,20 @@ async fn upsert(
             Some(e) if e.status == "resolved" || w.kind == FindingKind::OathExpired => {
                 let flapped = matches!(w.kind, FindingKind::Vuln | FindingKind::FixAvailable)
                     && e.resolved_at.is_some_and(|at| at > flap_since);
-                // On the right of SET, `notified_at` is still the old value.
+                // On the right of SET, every column still holds its old
+                // value. A flap keeps `opened_at` (it is no new occurrence,
+                // and the fix-came-later rule compares opened_at) and
+                // `notified_at`, except that a Vuln crossing into High
+                // re-arms, as it does while open (below).
                 sqlx::query(
-                    "UPDATE findings SET status = 'open', opened_at = $2, resolved_at = NULL, \
-                         notified_at = CASE WHEN $5 THEN notified_at ELSE NULL END, \
+                    "UPDATE findings SET status = 'open', resolved_at = NULL, \
+                         opened_at = CASE WHEN $5 THEN opened_at ELSE $2 END, \
+                         notified_at = CASE \
+                             WHEN NOT $5 THEN NULL \
+                             WHEN kind = 'vuln' \
+                                  AND severity NOT IN ('critical', 'high') \
+                                  AND $3 IN ('critical', 'high') THEN NULL \
+                             ELSE notified_at END, \
                          severity = $3, details = $4 \
                      WHERE id = $1",
                 )
@@ -710,6 +721,62 @@ mod tests {
             .iter()
             .all(|f| f.status == "open" && f.notified_at.is_some()));
         assert!(report.opened.is_empty(), "{report:?}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reopen_within_30_days_rearms_on_crossing_high(pool: PgPool) {
+        // Announced as medium (in the digest), flapped away, back as High:
+        // the High must alert, as it would without the flap.
+        seed_gin(&pool, "v1.9.0").await;
+        sqlx::query("UPDATE advisories SET severity = 'medium'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let resolved_at = Utc::now() - Duration::days(5);
+        run(&pool, REALM, resolved_at - Duration::hours(1))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE findings SET notified_at = $1")
+            .bind(resolved_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let sid = upsert_service(&pool, REALM, SERVICE).await.unwrap();
+        replace_components(&pool, sid, Source::Git, &[])
+            .await
+            .unwrap();
+        run(&pool, REALM, resolved_at).await.unwrap();
+        inventory(&pool, Source::Git, &[item(&gin("v1.9.0"), true)]).await;
+        sqlx::query("UPDATE advisories SET severity = 'high'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run(&pool, REALM, Utc::now()).await.unwrap();
+        let v = &of_kind(&pool, FindingKind::Vuln).await[0];
+        assert_eq!((v.status.as_str(), v.severity.as_str()), ("open", "high"));
+        assert!(v.notified_at.is_none(), "the High re-arms");
+        // The fix was already announced and stays so.
+        let f = &of_kind(&pool, FindingKind::FixAvailable).await[0];
+        assert!(f.notified_at.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reopen_within_30_days_keeps_opened_at(pool: PgPool) {
+        let resolved_at = Utc::now() - Duration::days(29);
+        announce_resolve_and_return(&pool, resolved_at).await;
+        let before: Vec<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT opened_at FROM findings ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        run(&pool, REALM, Utc::now()).await.unwrap();
+        let after: Vec<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT opened_at FROM findings ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after, "a flap is not a new occurrence");
     }
 
     #[sqlx::test(migrations = "./migrations")]

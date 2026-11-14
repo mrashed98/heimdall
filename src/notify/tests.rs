@@ -949,3 +949,47 @@ async fn high_vuln_with_fix_alerts_at_once(pool: PgPool) {
     let f = finding_id(&pool, "fixavailable").await;
     assert_eq!(notified_status(&pool, f).await, (true, "open".into()));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn late_fix_still_alerts_after_a_flap(pool: PgPool) {
+    // Medium vuln first, its fix a run later (so the fix alerts at once).
+    matched_gin(&pool, "medium", &[]).await;
+    crate::matcher::run(&pool, "prod", now()).await.unwrap();
+    sqlx::query("UPDATE advisories SET fixed = $1")
+        .bind(json!({ GIN: ["v1.9.1"] }))
+        .execute(&pool)
+        .await
+        .unwrap();
+    crate::matcher::run(&pool, "prod", now() + Duration::minutes(15))
+        .await
+        .unwrap();
+    // Before any alert went out, the service flaps away and back.
+    let sid = service(&pool, "prod", "api").await;
+    let item = InventoryItem {
+        purl: format!("{GIN}@v1.9.0"),
+        cpes: vec![],
+        direct: true,
+        via_image_digest: None,
+    };
+    replace_components(&pool, sid, Source::Git, &[])
+        .await
+        .unwrap();
+    crate::matcher::run(&pool, "prod", now() + Duration::minutes(30))
+        .await
+        .unwrap();
+    replace_components(&pool, sid, Source::Git, &[item])
+        .await
+        .unwrap();
+    crate::matcher::run(&pool, "prod", now() + Duration::minutes(45))
+        .await
+        .unwrap();
+
+    // The fix is still a late fix: it alerts, it is not swallowed.
+    assert_eq!(
+        enqueue_alerts(&pool, &one_route("NOTIFY_R3"))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(title(&outbox(&pool).await[0].card).starts_with("Fix available"));
+}
