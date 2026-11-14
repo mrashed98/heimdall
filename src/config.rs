@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::model::Severity;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HeimdallConfig {
     pub realms: Vec<String>,
     #[serde(default)]
@@ -41,7 +42,58 @@ impl HeimdallConfig {
     pub fn load(path: &Path) -> anyhow::Result<HeimdallConfig> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        serde_yaml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+        Self::from_yaml(&text).with_context(|| format!("config {}", path.display()))
+    }
+
+    /// Parse and validate YAML text.
+    pub fn from_yaml(text: &str) -> anyhow::Result<HeimdallConfig> {
+        let cfg: HeimdallConfig = serde_yaml::from_str(text).context("parsing")?;
+        cfg.validate().context("invalid")?;
+        Ok(cfg)
+    }
+
+    /// Semantic checks serde cannot express. Errors name the offending key.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::bail;
+        if self.digest.hour > 23 {
+            bail!("digest.hour must be 0-23, got {}", self.digest.hour);
+        }
+        for (key, v) in [
+            ("schedules.sight_minutes", self.schedules.sight_minutes),
+            ("schedules.osv_minutes", self.schedules.osv_minutes),
+            ("schedules.k8s_cve_minutes", self.schedules.k8s_cve_minutes),
+            (
+                "schedules.watchers_minutes",
+                self.schedules.watchers_minutes,
+            ),
+            ("nvd.minutes", self.nvd.minutes),
+        ] {
+            if v == 0 {
+                bail!("{key} must be greater than 0");
+            }
+        }
+        let known = |r: &str| self.realms.iter().any(|k| k == r);
+        for (i, t) in self.teams.iter().enumerate() {
+            for r in &t.realms {
+                if !known(r) {
+                    bail!("teams[{i}].realms: unknown realm `{r}` (not in `realms`)");
+                }
+            }
+        }
+        for (i, d) in self.declared.iter().enumerate() {
+            if !known(&d.realm) {
+                bail!(
+                    "declared[{i}].realm: unknown realm `{}` (not in `realms`)",
+                    d.realm
+                );
+            }
+        }
+        if let Some(r) = self.sight.realm.as_deref() {
+            if !known(r) {
+                bail!("sight.realm: unknown realm `{r}` (not in `realms`)");
+            }
+        }
+        Ok(())
     }
 
     /// The realm in-process Sight scans: `sight.realm`, else the first realm.
@@ -55,12 +107,14 @@ impl HeimdallConfig {
 
 /// In-process Sight (`heimdall serve` scanning the cluster it runs in).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SightConfig {
     /// The realm of the cluster Heimdall runs in. Default: the first realm.
     pub realm: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DigestConfig {
     #[serde(default = "default_weekday")]
     pub weekday: Weekday,
@@ -91,6 +145,7 @@ fn default_timezone() -> Tz {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TeamsRoute {
     pub name: String,
     /// Name of the environment variable holding the webhook URL.
@@ -102,6 +157,7 @@ pub struct TeamsRoute {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatcherTargets {
     #[serde(default)]
     pub github: Vec<GithubTarget>,
@@ -112,6 +168,7 @@ pub struct WatcherTargets {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GithubTarget {
     pub repo: String,
     pub inventory_name: String,
@@ -121,6 +178,7 @@ pub struct GithubTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EolTarget {
     pub product: String,
     pub inventory_name: String,
@@ -139,6 +197,7 @@ pub enum TfKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TfTarget {
     /// `registry.terraform.io` or `registry.opentofu.org`
     pub registry: String,
@@ -148,6 +207,7 @@ pub struct TfTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredComponent {
     pub realm: String,
     pub service: String,
@@ -155,6 +215,7 @@ pub struct DeclaredComponent {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryCred {
     pub host: String,
     /// Name of the environment variable holding the credential.
@@ -163,6 +224,7 @@ pub struct RegistryCred {
 
 /// Polling intervals in minutes.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Schedules {
     #[serde(default = "default_sight")]
     pub sight_minutes: u32,
@@ -199,6 +261,7 @@ fn default_watchers() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NvdConfig {
     #[serde(default = "default_nvd_key_env")]
     pub api_key_env: String,
@@ -223,6 +286,7 @@ fn default_nvd_minutes() -> u32 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Retention {
     #[serde(default = "default_findings_days")]
     pub findings_days: u32,
@@ -272,6 +336,47 @@ mod tests {
             .unwrap();
         assert_eq!(k8s.major_component, 1);
         assert_eq!(cfg.sight_realm(), Some("dev-k3s"));
+    }
+
+    fn load_str(yaml: &str) -> anyhow::Result<HeimdallConfig> {
+        HeimdallConfig::from_yaml(yaml)
+    }
+
+    fn err(yaml: &str) -> String {
+        format!("{:#}", load_str(yaml).unwrap_err())
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_and_named() {
+        let e = err("realms: [a]\nwatchers:\n  github:\n    - { repo: x/y, inventory_name: y, major_componant: 1 }");
+        assert!(e.contains("major_componant"), "{e}");
+        let e = err("realms: [a]\nbogus: 1");
+        assert!(e.contains("bogus"), "{e}");
+        let e = err("realms: [a]\nteams:\n  - { name: t, webhook_env: E, min_severity: high, min_severity2: x }");
+        assert!(e.contains("min_severity2"), "{e}");
+    }
+
+    #[test]
+    fn semantic_validation_names_the_key() {
+        assert!(err("realms: [a]\ndigest: { hour: 99 }").contains("digest.hour"));
+        assert!(err("realms: [a]\nschedules: { osv_minutes: 0 }").contains("schedules.osv_minutes"));
+        assert!(err("realms: [a]\nnvd: { minutes: 0 }").contains("nvd.minutes"));
+        assert!(err("realms: [a]\nteams:\n  - { name: t, webhook_env: E, realms: [zz], min_severity: high }")
+            .contains("teams[0].realms"));
+        assert!(err(
+            "realms: [a]\ndeclared:\n  - { realm: zz, service: s, purl: 'pkg:generic/x@1' }"
+        )
+        .contains("declared[0].realm"));
+        assert!(err("realms: [a]\nsight: { realm: zz }").contains("sight.realm"));
+        assert!(load_str("realms: [a]\ndigest: { hour: 23 }").is_ok());
+    }
+
+    #[test]
+    fn helm_default_config_passes() {
+        let values = std::fs::read_to_string("deploy/helm/heimdall/values.yaml").unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&values).unwrap();
+        let cfg = serde_yaml::to_string(&v["config"]).unwrap();
+        load_str(&cfg).unwrap();
     }
 
     #[test]

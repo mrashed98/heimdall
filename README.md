@@ -466,7 +466,9 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 - **"bootstrap key must be `hd_` followed by 43 base64url characters"**:
   regenerate with the command in the quick start.
 - **`config error` from `--check-config`**: the message names the file and the
-  field; `realms` is required and `min_severity` must be a known severity.
+  field. Unknown keys, `digest.hour` over 23, zero `*_minutes`, and realms not
+  listed in `realms` are all errors; `realms` is required and `min_severity`
+  must be a known severity.
 - **Pod not ready**: `/healthz` returns 503 when Postgres does not answer
   within 5 s. Check network access to the database VM.
 - **`heimdall: HEIMDALL_URL is not set`**: the CLI needs `HEIMDALL_URL` and
