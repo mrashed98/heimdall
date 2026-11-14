@@ -1,0 +1,218 @@
+---
+title: Install on Kubernetes (Helm)
+description: Install Heimdall with the Helm chart, create the Secret, and deploy it with ArgoCD.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The Helm chart lives in the repository at `deploy/helm/heimdall`.
+
+## Prerequisites
+
+- A Kubernetes cluster and Helm 3.
+- A Postgres database Heimdall can reach (see
+  [ADR 0001](/heimdall/decisions/0001-external-postgres/)). Heimdall creates its
+  own tables when it starts.
+- Container images. Build them from `deploy/Dockerfile` (the server: distroless,
+  static musl binary) and `deploy/Dockerfile.scanner` (syft plus
+  `heimdall scan-images`), or use the images pushed to GHCR by a release.
+
+  ```bash
+  docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.1.0 .
+  docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.1.0 .
+  ```
+
+<Aside type="note">
+Releases are cut by pushing a `v*` tag. CI then builds static Linux binaries
+(`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images, and
+pushes the images to GHCR.
+</Aside>
+
+## Install
+
+<Steps>
+
+1. **Create the Secret.** The chart reads every key of one existing Secret as an
+   environment variable. In a real setup this Secret is managed outside the chart
+   (for example with SOPS). The keys are:
+
+   | Secret key | Used for |
+   |---|---|
+   | `DATABASE_URL` | Postgres connection string (required). |
+   | `HEIMDALL_BOOTSTRAP_ADMIN_KEY` | The admin key named `bootstrap`. Optional, but you need some admin key to manage Heimdall. |
+   | `GITHUB_TOKEN` | GitHub releases, release notes, and the gate's GitHub Advisory Database fallback. |
+   | `NVD_API_KEY` | NVD (the variable name is set by `nvd.api_key_env`). |
+   | `TEAMS_WEBHOOK_*` | One per `teams[].webhook_env`. |
+   | `HEIMDALL_API_KEY` | An **ingest-scope** key, used by the image scanner CronJob. |
+
+   ```bash
+   kubectl create namespace heimdall
+   kubectl -n heimdall create secret generic heimdall-secrets \
+     --from-literal=DATABASE_URL='postgres://user:pass@db.internal:5432/heimdall' \
+     --from-literal=HEIMDALL_BOOTSTRAP_ADMIN_KEY="hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')" \
+     --from-literal=TEAMS_WEBHOOK_DEFAULT='https://example.invalid/your-workflows-webhook'
+   ```
+
+   The scanner key (`HEIMDALL_API_KEY`) does not exist until Heimdall is running:
+   see the next steps.
+
+2. **Write your values.** Put your realm, own registries and Teams routes in
+   `my-values.yaml`. The essentials are in [the next section](#values-essentials).
+
+3. **Install the chart.**
+
+   ```bash
+   helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace \
+     --set image.repository=ghcr.io/mrashed98/heimdall \
+     --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \
+     --set existingSecret=heimdall-secrets \
+     -f my-values.yaml
+   ```
+
+4. **Create the scanner key and add it to the Secret.** Use the bootstrap key to
+   create an ingest key, then add it as `HEIMDALL_API_KEY`:
+
+   ```bash
+   kubectl -n heimdall port-forward svc/heimdall 8080:8080 &
+   export HEIMDALL_URL=http://localhost:8080
+   export HEIMDALL_API_KEY=<the bootstrap key>
+   heimdall keys create --name image-scanner --scope ingest   # prints the key once
+   ```
+
+   Add the printed key to your Secret under `HEIMDALL_API_KEY`. Until you do, the
+   scanner CronJob fails with a missing-key error.
+
+5. **Check that it is healthy.**
+
+   ```bash
+   kubectl -n heimdall get pods
+   curl localhost:8080/healthz    # ok
+   heimdall realms
+   ```
+
+</Steps>
+
+## What the chart creates
+
+- A **Deployment** with one replica, running as non-root with a read-only root
+  filesystem and a `/tmp` emptyDir. Limits are 1Gi memory and 1 CPU, requests
+  256Mi and 100m. Readiness uses `/healthz`; liveness is a plain TCP check, so a
+  database outage does not restart the pod.
+- A **Service** on port 8080 (port name `http`).
+- A **ConfigMap** holding `config:` from your values as `heimdall.yaml`.
+- A read-only **ClusterRole**: `get` and `list` on pods, nodes, deployments,
+  statefulsets, daemonsets, replicasets and ArgoCD Applications, and `get` on
+  `/version`. It never grants access to Secrets
+  ([ADR 0003](/heimdall/decisions/0003-no-secret-access/)).
+- A **CronJob** `scan-images` (default `0 */6 * * *`, `concurrencyPolicy: Forbid`,
+  its own resources) that generates SBOMs for images that have none.
+- A **ServiceMonitor** for Prometheus, when the Prometheus Operator is installed.
+- An **Ingress**, only when you set `ingress.enabled=true`. It is off by default
+  because Heimdall is not meant to be internet-exposed.
+
+The scanner reaches Heimdall at `http://<release>.<namespace>.svc:8080`.
+
+## Values essentials
+
+Every value is listed in the [Helm values reference](/heimdall/reference/helm-values/).
+A small `my-values.yaml` usually looks like this:
+
+```yaml
+existingSecret: heimdall-secrets
+
+config:
+  realms:
+    - dev-k3s
+  sight:
+    realm: dev-k3s
+  admins: [alice]
+  own_registries:
+    - ghcr.io/my-org
+  teams:
+    - name: default
+      webhook_env: TEAMS_WEBHOOK_DEFAULT
+      realms: []
+      min_severity: high
+
+# Optional: export traces to an OpenTelemetry collector.
+otlpEndpoint: ""
+```
+
+Everything under `config:` becomes `heimdall.yaml`, so any key from the
+[configuration reference](/heimdall/reference/configuration/) works there.
+
+## The ServiceMonitor and `--api-versions`
+
+The chart only renders the ServiceMonitor when the cluster has the
+`monitoring.coreos.com/v1` API, and `serviceMonitor.enabled` is true (the
+default). When you render the chart without a cluster (`helm template`, or a CI
+check), Helm cannot see that API, so tell it:
+
+```bash
+helm template heimdall deploy/helm/heimdall --api-versions monitoring.coreos.com/v1
+```
+
+Without `--api-versions` the ServiceMonitor is left out of the output. If your
+Prometheus only selects ServiceMonitors with certain labels (as
+kube-prometheus-stack does), add them with `serviceMonitor.labels`.
+
+## Deploy with ArgoCD
+
+An ArgoCD Application that deploys the chart from the repository. The Secret is
+created outside the chart (SOPS, External Secrets, or similar).
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: heimdall
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/mrashed98/heimdall.git
+    targetRevision: main
+    path: deploy/helm/heimdall
+    helm:
+      values: |
+        existingSecret: heimdall-secrets
+        config:
+          realms: [dev-k3s]
+          sight:
+            realm: dev-k3s
+          teams:
+            - name: default
+              webhook_env: TEAMS_WEBHOOK_DEFAULT
+              realms: []
+              min_severity: high
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: heimdall
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+```
+
+<Aside type="tip">
+ArgoCD renders charts with the cluster's real API list, so the ServiceMonitor
+appears on its own when the Prometheus Operator is installed. Pin
+`targetRevision` to a release tag for production.
+</Aside>
+
+Heimdall can also see this Application: Sight reads ArgoCD Applications to learn
+chart names and versions.
+
+## Troubleshooting
+
+- **Pod exits at startup with "DATABASE_URL is not set"**: add `DATABASE_URL` to
+  the Secret named by `existingSecret`.
+- **"bootstrap key must be `hd_` followed by 43 base64url characters"**:
+  regenerate the key with the command in step 1.
+- **Pod not ready**: `/healthz` returns 503 when Postgres does not answer within
+  5 seconds. Check network access to the database.
+- **Sight finds nothing**: in the cluster, confirm the ClusterRoleBinding exists.
+- **Scanner CronJob fails with a missing key**: add `HEIMDALL_API_KEY` (ingest
+  scope) to the Secret.

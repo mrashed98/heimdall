@@ -4,3 +4,10 @@
 /target
 heimdall.yaml
 .DS_Store
+
+# Documentation site (docs/site)
+docs/site/node_modules
+docs/site/dist
+docs/site/.astro
+# Generated from docs/adr/ by docs/site/scripts/sync-adrs.mjs
+docs/site/src/content/docs/decisions/[0-9][0-9][0-9][0-9]-*.md

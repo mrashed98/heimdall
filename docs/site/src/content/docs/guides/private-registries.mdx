@@ -1,0 +1,61 @@
+---
+title: Private registries
+description: Let Heimdall look up tags and scan images in private container registries.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Two parts of Heimdall talk to registries, and each is configured separately.
+
+## Tag lookups (the OCI watcher)
+
+To find new tags for images in a private registry, add a credential under
+`registries:` in the config. It names the registry host and an environment
+variable that holds `user:password`:
+
+```yaml
+registries:
+  - host: registry.example.com
+    secret_env: REGISTRY_EXAMPLE_CREDENTIALS
+```
+
+Then set the variable (in Kubernetes, add it to the Secret named by
+`existingSecret`):
+
+```bash
+export REGISTRY_EXAMPLE_CREDENTIALS='ci-bot:s3cret-token'
+```
+
+Heimdall uses it as basic auth when the registry sends a token challenge. Only
+the first `:` splits the user from the password. This applies to the OCI tag
+watcher.
+
+<Aside type="caution">
+Use a pull-only token. Never put the credential itself in `heimdall.yaml`: only
+the variable name goes there.
+</Aside>
+
+## Scanning images (the CronJob)
+
+The image-SBOM CronJob needs to pull private images so syft can read them. Create a
+`kubernetes.io/dockerconfigjson` Secret and give its name to the chart:
+
+```bash
+kubectl -n heimdall create secret docker-registry regcred \
+  --docker-server=registry.example.com \
+  --docker-username=ci-bot --docker-password='s3cret-token'
+```
+
+```yaml
+scanImages:
+  dockerConfigSecret: regcred
+```
+
+The chart mounts it so syft finds it as its Docker config. Leave the value empty
+for public images only. See the [Helm values](/heimdall/reference/helm-values/).
+
+## Your own images
+
+Images from registries you list under `own_registries` are scanned for
+vulnerabilities but never release-watched. See
+[Watching infrastructure](/heimdall/guides/watching-infrastructure/#own_registries).

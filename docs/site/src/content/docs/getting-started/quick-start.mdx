@@ -1,0 +1,93 @@
+---
+title: Quick start (local)
+description: Run Heimdall on your own machine with Docker for Postgres, in five steps.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This gets Heimdall running on your laptop. You need Rust (stable), Docker and,
+if you want alerts, a Microsoft Teams Workflows webhook URL (optional). If you
+are new to Rust, the only thing you need from it is `cargo`, which comes with
+[rustup](https://rustup.rs).
+
+<Steps>
+
+1. **Start Postgres.** The repository ships a development database on port
+   5433.
+
+   ```bash
+   git clone https://github.com/mrashed98/heimdall.git
+   cd heimdall
+   docker compose -f docker-compose.dev.yml up -d
+   export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
+   ```
+
+   Database migrations run automatically when the server starts.
+
+2. **Create a bootstrap key.** An API key is `hd_` plus 43 URL-safe base64
+   characters (32 random bytes). This command prints exactly that:
+
+   ```bash
+   export HEIMDALL_BOOTSTRAP_ADMIN_KEY="hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+   echo -n "$HEIMDALL_BOOTSTRAP_ADMIN_KEY" | wc -c   # prints 46 (3 for "hd_" + 43)
+   ```
+
+   32 bytes encode to 44 base64 characters; `tr -d '='` strips the one `=` of
+   padding, leaving 43. Heimdall refuses to start with a bootstrap key that
+   does not match this format. Only the key's SHA-256 is stored in the
+   database, so keep the key itself in your secret store.
+
+3. **Write a config.** Copy `heimdall.example.yaml` to `heimdall.yaml` and edit
+   at least `realms`, `own_registries` and `teams`. Then check it:
+
+   ```bash
+   cp heimdall.example.yaml heimdall.yaml
+   cargo run -- serve --check-config heimdall.yaml     # prints "config ok"
+   ```
+
+   Every key is explained in the [configuration reference](/heimdall/reference/configuration/).
+
+4. **Run the server.** These environment variables are optional:
+   `GITHUB_TOKEN` (5000 requests an hour instead of 60 for GitHub),
+   `NVD_API_KEY`, and one variable per Teams webhook named in
+   `teams[].webhook_env`.
+
+   ```bash
+   cargo run -- serve heimdall.yaml     # listens on 0.0.0.0:8080
+   curl localhost:8080/healthz          # ok
+   ```
+
+5. **Talk to it with the CLI.**
+
+   ```bash
+   export HEIMDALL_URL=http://localhost:8080
+   export HEIMDALL_API_KEY=$HEIMDALL_BOOTSTRAP_ADMIN_KEY
+   cargo run -- realms
+   cargo run -- findings --min-severity high
+   ```
+
+   If you install the binary, the same commands are `heimdall realms` and
+   `heimdall findings --min-severity high`.
+
+</Steps>
+
+<Aside type="note" title="No cluster on your laptop?">
+Sight, the in-process cluster scanner, is skipped when no Kubernetes cluster is
+reachable. You can still add components with
+[declared components](/heimdall/reference/configuration/#declared) in the
+config, upload SBOMs with the [CI gate](/heimdall/guides/ci-gate/), or call the
+[HTTP API](/heimdall/reference/http-api/).
+</Aside>
+
+<Aside type="caution" title="Create a named admin key, then retire the bootstrap key">
+The bootstrap key is meant for the very first step. Create a key for yourself
+with `heimdall keys create --name <you> --scope admin` (your name must be listed
+under `admins:` in the config), then stop using the bootstrap key. See
+[API keys](/heimdall/reference/cli/#heimdall-keys).
+</Aside>
+
+## Where next
+
+- Send alerts to your team: [Microsoft Teams alerts](/heimdall/guides/teams/).
+- Block vulnerable builds: [CI gate](/heimdall/guides/ci-gate/).
+- Run it for real: [Install on Kubernetes](/heimdall/getting-started/kubernetes/).

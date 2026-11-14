@@ -22,7 +22,7 @@ pub struct HeimdallConfig {
     pub registries: Vec<RegistryCred>,
     #[serde(default)]
     pub schedules: Schedules,
-    /// Registry hosts or host/org prefixes (e.g. `ghcr.io/yourorg`) whose
+    /// Registry hosts or host/org prefixes (e.g. `ghcr.io/mrashed98`) whose
     /// images are ours and never release-watched.
     #[serde(default)]
     pub own_registries: Vec<String>,

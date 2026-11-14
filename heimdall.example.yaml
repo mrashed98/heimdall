@@ -12,7 +12,7 @@ admins: []
 
 # Images under these prefixes are ours and are never release-watched.
 own_registries:
-  - ghcr.io/yourorg
+  - ghcr.io/mrashed98
 
 teams:
   - name: default

@@ -1,0 +1,24 @@
+{
+  "name": "heimdall-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "sync-adrs": "node scripts/sync-adrs.mjs",
+    "predev": "node scripts/sync-adrs.mjs",
+    "dev": "astro dev",
+    "prebuild": "node scripts/sync-adrs.mjs",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.43.1",
+    "astro": "7.4.12",
+    "sharp": "0.35.5",
+    "starlight-links-validator": "0.27.0"
+  }
+}

@@ -1,0 +1,35 @@
+/* Bifröst-inspired accents. Contrast checked against both backgrounds:
+   dark: #a5b4fc on #17181c (about 9:1); light: #3b4fc4 on #ffffff (about 7:1). */
+:root {
+  --sl-color-accent-low: #1e2452;
+  --sl-color-accent: #5b6ee1;
+  --sl-color-accent-high: #b8c3fd;
+  --sl-color-white: #ffffff;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #dde3ff;
+  --sl-color-accent: #3b4fc4;
+  --sl-color-accent-high: #2a398f;
+}
+
+/* A thin rainbow line under the site header: the Bifröst. */
+header.header {
+  border-bottom: 0;
+  position: relative;
+}
+header.header::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  background: linear-gradient(
+    90deg,
+    #e5484d,
+    #f5a524,
+    #30a46c,
+    #3e63dd,
+    #8e4ec6
+  );
+  opacity: 0.85;
+}

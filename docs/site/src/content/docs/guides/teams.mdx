@@ -1,0 +1,85 @@
+---
+title: Microsoft Teams alerts
+description: Create a Workflows webhook, wire it to Heimdall, route by realm and severity, and keep the URL secret.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+Teams is Heimdall's only notifier. It uses a **Workflows** incoming webhook (the
+old Office 365 connectors are retired) and sends **Adaptive Cards**.
+
+<Steps>
+
+1. **Create the webhook in Teams.** In the channel you want, create a workflow
+   that posts to a channel when a webhook request is received (Teams Workflows
+   app). Copy the webhook URL it gives you.
+
+2. **Store the URL as a secret.** Put it in an environment variable. In
+   Kubernetes, add it to the Secret named by `existingSecret`, for example as
+   `TEAMS_WEBHOOK_DEFAULT`. Locally, `export TEAMS_WEBHOOK_DEFAULT='...'`.
+
+3. **Add a route to the config.** The config holds the *name* of the variable,
+   never the URL itself:
+
+   ```yaml
+   teams:
+     - name: default
+       webhook_env: TEAMS_WEBHOOK_DEFAULT
+       realms: []          # empty = all realms
+       min_severity: high
+   ```
+
+4. **Restart Heimdall** (or roll the ConfigMap). The next alert goes to Teams.
+
+</Steps>
+
+<Aside type="danger" title="Never commit webhook URLs">
+Anyone with the URL can post to your channel. Keep it in a secret store, never in
+`heimdall.yaml`, a Helm values file or git. Heimdall only ever reads the variable
+name from the config.
+</Aside>
+
+## Routes
+
+Each route has:
+
+| Key | Meaning |
+|---|---|
+| `name` | A label for the route. |
+| `webhook_env` | Name of the environment variable holding the webhook URL. |
+| `realms` | Realms this route covers. Empty means all. |
+| `min_severity` | `critical`, `high`, `medium`, `low` (or `unknown`): the lowest severity the route receives. |
+
+You can have several routes, for example `critical` only for the on-call channel
+and `high` for the team channel, or one channel per realm:
+
+```yaml
+teams:
+  - name: oncall
+    webhook_env: TEAMS_WEBHOOK_ONCALL
+    realms: [prod]
+    min_severity: critical
+  - name: team
+    webhook_env: TEAMS_WEBHOOK_TEAM
+    realms: []
+    min_severity: high
+```
+
+Releases, end of support and Kubernetes CVEs count as `high` when routing. Kinds
+that always alert (fix available, oath expired, release-note CVE) never route
+below `high`, so a high-only route does not drop them. A finding that no route
+covers stays pending, with one warning in the logs, and goes out once a route
+covers its realm.
+
+## Delivery
+
+Cards are queued in the database, so nothing is lost on a restart. They are
+sent about one every 2 seconds, and failed sends retry with growing delays. If
+the variable for a route is not set, that route's cards stay queued until it is.
+The weekly digest uses the same routes. See [Alert rules](/heimdall/concepts/alerts/).
+
+## Troubleshooting
+
+**No Teams cards?** Check that the variable named in `webhook_env` exists in the
+Secret, and watch the metrics `heimdall_outbox_pending` and
+`heimdall_teams_failures_total`. See [Metrics](/heimdall/reference/metrics/).

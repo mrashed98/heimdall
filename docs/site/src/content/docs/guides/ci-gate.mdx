@@ -1,0 +1,143 @@
+---
+title: CI gate with GitHub Actions
+description: Block builds that carry vulnerabilities, using the Hofund composite action, with monorepo and self-hosted runner notes.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Hofund is the CI gate. It uploads an SBOM to Heimdall, which ingests it, checks
+every component against OSV live, applies your oaths and answers **pass**,
+**fail** or **unverified**. The answer is synchronous: there is no polling.
+
+## Requirements
+
+- A **self-hosted runner** that can reach Heimdall. Heimdall is not exposed to
+  the internet, so GitHub-hosted runners cannot call it.
+- A Linux runner (amd64 or arm64). The action supports Linux only.
+- An **ingest-scope** API key stored as a GitHub secret:
+  `heimdall keys create --name ci-runner --scope ingest`.
+
+## Using the action
+
+`.github/actions/gate` is a composite action. It downloads the `heimdall` release
+binary for the runner, installs a pinned syft (checksum verified), runs
+`syft dir:<path> -o cyclonedx-json`, then `heimdall gate`. The branch and the
+repository's default branch are detected from `GITHUB_REF_NAME` and
+`GITHUB_EVENT_PATH`.
+
+```yaml
+jobs:
+  gate:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
+        with:
+          service: api
+          realm: dev-k3s
+          heimdall-url: http://heimdall.heimdall.svc:8080
+          api-key: ${{ secrets.HEIMDALL_API_KEY }}
+```
+
+### Inputs
+
+| Input | Default | Meaning |
+|---|---|---|
+| `service` | required | Service name, the same one Sight shows in the cluster. |
+| `realm` | required | Realm. |
+| `path` | `.` | Directory to scan. Also where `go.mod` and `package.json` are read to mark direct dependencies. |
+| `fail-on` | `high` | Lowest severity that fails the build (`critical`, `high`, `medium`, `low`). |
+| `heimdall-url` | required | For example `http://heimdall.heimdall.svc:8080`. |
+| `api-key` | required | An ingest-scope key. Store it as a GitHub secret. |
+| `repository` | the action's own repository | `owner/name` that publishes the release binaries. Set it when the action is used locally (`uses: ./...`), where the default is empty. |
+| `version` | `latest` | Release tag of the binary to download, such as `v0.1.0`. |
+
+<Aside type="tip">
+Pin the action to a release tag (`@v0.1.0`) and keep the URL in a repository
+variable (`vars.HEIMDALL_URL`) rather than a secret.
+</Aside>
+
+## Monorepos
+
+Call the action once per service, each with its own `path`:
+
+```yaml
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
+        with:
+          service: api
+          realm: dev-k3s
+          path: services/api
+          heimdall-url: ${{ vars.HEIMDALL_URL }}
+          api-key: ${{ secrets.HEIMDALL_API_KEY }}
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.1.0
+        with:
+          service: web
+          realm: dev-k3s
+          path: services/web
+          heimdall-url: ${{ vars.HEIMDALL_URL }}
+          api-key: ${{ secrets.HEIMDALL_API_KEY }}
+```
+
+## Default branch and other branches
+
+On the repository's **default branch** the upload also updates the service's
+inventory (source `git`). On **other branches** the SBOM is only evaluated (source
+`ci`), so a feature branch never changes what Heimdall considers deployed.
+
+## Without the action
+
+The same thing by hand, anywhere you can run `syft` and `heimdall`:
+
+```bash
+syft dir:. -o cyclonedx-json > sbom.json
+heimdall gate --service api --realm dev-k3s --sbom sbom.json --fail-on high
+```
+
+Set `HEIMDALL_URL` and `HEIMDALL_API_KEY` first. Outside GitHub Actions also pass
+`--branch` and `--default-branch`. See the [CLI reference](/heimdall/reference/cli/#heimdall-gate).
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Pass: nothing at or above `--fail-on` outside an active oath. |
+| `1` | Vulnerabilities found. A table of advisories is printed, ending in `verdict: FAIL`. |
+| `2` | Could not verify: Heimdall is unreachable, a bad response or input, or neither OSV nor the GitHub Advisory Database could answer for some components. There is no silent pass. |
+
+An unoathed finding at or above `--fail-on` always wins, so the gate exits `1`
+even if some components are also unverified.
+
+## How the verdict is reached
+
+The server answers within a **60 second** bound. OSV gets most of that time. If OSV
+is unreachable or times out, the gate falls back to the **GitHub Advisory
+Database**, which needs `GITHUB_TOKEN` on the server. If neither can answer for
+some components, those are listed as `unverified` and the exit code is `2`.
+
+An example report (the terminal version has rounded borders and colour):
+
+```text
+>> Hofund - CI gate
++----------+---------------------+--------------------------------+--------------------+------+
+| SEVERITY | ADVISORY            | PACKAGE                        | VERSION -> FIXED   | OATH |
++===============================================================================================+
+| CRITICAL | GHSA-jf85-cpcp-j695 | pkg:npm/lodash                 | 4.17.11 -> 4.17.21 | -    |
+| HIGH     | CVE-2024-45337      | pkg:golang/golang.org/x/crypto | 0.21.0 -> 0.31.0   | #7   |
+| MEDIUM   | GHSA-3xgq-45jj-v275 | pkg:npm/cross-spawn            | 7.0.3 -> 7.0.5     | -    |
++----------+---------------------+--------------------------------+--------------------+------+
+findings: 1 critical, 1 high, 1 medium
+verdict: FAIL (checked against osv)
+```
+
+The `OATH` column shows the id of an oath that covers the finding. Findings under
+an active oath do not fail the build.
+
+## Troubleshooting
+
+- **Gate exits 2 in CI**: the runner cannot reach Heimdall, or the server could
+  not verify some components. The final line reads
+  `verdict: UNVERIFIED (checked against …)`, and the `unverified:` lines above it
+  list the components that could not be checked.
+- **401 or 403**: wrong key (401), or the key's scope is too low (403).
+- **"the 'repository' input is empty"**: set `repository: owner/name` when using
+  the action locally.

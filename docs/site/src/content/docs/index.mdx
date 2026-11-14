@@ -1,0 +1,64 @@
+---
+title: Heimdall
+description: The watcher at the Bifröst. A small Rust tracker for the dependencies, vulnerabilities and releases of your Kubernetes cluster.
+template: splash
+hero:
+  tagline: The watcher at the Bifröst. Know what you run, hear about vulnerabilities and new releases early, and stop bad builds at the bridge.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: /heimdall/getting-started/quick-start/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/mrashed98/heimdall
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## One small watcher, five jobs
+
+Heimdall is a lightweight replacement for OWASP Dependency-Track, written in
+Rust. It is one binary, one Deployment and an external Postgres, and it fits in
+about 256 MB of memory (hard limit 1 GB and 1 CPU).
+
+<CardGrid stagger>
+  <Card title="Sight" icon="magnifier">
+    Knows what you run. It reads your cluster (pods, nodes, Helm chart labels,
+    ArgoCD Applications), image SBOMs, SBOMs uploaded from CI, and components
+    you declare by hand.
+  </Card>
+  <Card title="Watchers" icon="rocket">
+    Hear the grass grow. They poll GitHub, endoflife.date, OCI registries, Helm
+    repos, Terraform registries, the Go proxy and npm for new releases and
+    end-of-support dates.
+  </Card>
+  <Card title="Gjallarhorn" icon="bell">
+    Sounds the alarm in Microsoft Teams. One card per advisory or release, sent
+    once, plus a weekly digest of everything that did not need an immediate
+    alert.
+  </Card>
+  <Card title="Hofund" icon="approve-check">
+    The CI gate. `heimdall gate` fails a build when it finds vulnerabilities,
+    using the same data as the server, with exit codes your pipeline can
+    trust.
+  </Card>
+  <Card title="Oaths" icon="pencil">
+    Accept a risk on purpose. Snooze or ignore one advisory for one component
+    in one service, with a reason, an owner and a date that brings it back.
+  </Card>
+  <Card title="Made to stay small" icon="seti:rust">
+    Alerts when it matters, not noise. Matches against OSV and NVD without
+    mirroring either, and keeps all state in the Postgres you already run.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+- New here? Read [What is Heimdall?](/heimdall/getting-started/what-is-heimdall/).
+- Want to try it on your laptop? Follow the [Quick start](/heimdall/getting-started/quick-start/).
+- Running Kubernetes? See [Install on Kubernetes](/heimdall/getting-started/kubernetes/).
+- Blocking builds in CI? Set up the [CI gate](/heimdall/guides/ci-gate/).
+- Looking for a flag or a key? Use the search box, or open the [Reference](/heimdall/reference/configuration/).

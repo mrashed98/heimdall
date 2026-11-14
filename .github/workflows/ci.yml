@@ -60,7 +60,7 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     env:
-      KUBECONFORM_VERSION: v0.6.7
+      KUBECONFORM_VERSION: v0.8.0
       CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
     steps:
       - uses: actions/checkout@v4
