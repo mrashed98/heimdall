@@ -31,8 +31,8 @@ serviceMonitor:
 Some starting points (adjust names and thresholds to your setup):
 
 ```yaml
-- alert: HeimdallTeamsFailing
-  expr: increase(heimdall_teams_failures_total[1h]) > 0
+- alert: HeimdallAlertsRejected
+  expr: sum by (channel_type) (increase(heimdall_notify_failures_total[1h])) > 0
 - alert: HeimdallOutboxBacklog
   expr: heimdall_outbox_pending > 20
   for: 30m

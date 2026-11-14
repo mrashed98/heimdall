@@ -1,0 +1,240 @@
+---
+title: Alert channels
+description: Send Gjallarhorn's alerts to Teams, Slack, Discord, Telegram, PagerDuty, Alertmanager, a webhook or email, routed by realm and severity.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Gjallarhorn can announce findings on several channels at once. Each entry under
+`channels:` has a `type`, a unique `name`, the `realms` it covers (empty = all)
+and a `min_severity`. Routing and the immediate-versus-digest rules are the
+same for every type (see [Alert rules](/heimdall/concepts/alerts/)); only the
+message format and the delivery differ.
+
+```yaml
+realms: [prod, dev]
+channels:
+  - type: slack
+    name: dev-chat
+    webhook_env: SLACK_WEBHOOK_DEV
+    realms: [dev]
+    min_severity: high
+  - type: pagerduty
+    name: oncall
+    routing_key_env: PAGERDUTY_ROUTING_KEY
+    realms: [prod]
+    min_severity: critical
+  - type: email
+    name: security-team
+    host: smtp.example.com
+    from: Heimdall <heimdall@example.com>
+    to: [security@example.com]
+    username_env: SMTP_USERNAME
+    password_env: SMTP_PASSWORD
+    min_severity: high
+```
+
+<Aside type="danger" title="Secrets only through *_env keys">
+Webhook URLs, tokens, routing keys and passwords never go in `heimdall.yaml`.
+Each `*_env` key holds the **name** of an environment variable; in Kubernetes,
+put the values in the Secret named by `existingSecret`. Heimdall reads them when
+it sends, never stores them in the database, and keeps them out of its logs.
+</Aside>
+
+## Shared behaviour
+
+- **One alert per advisory or release per channel.** A channel only sees the
+  findings of the realms it covers, and only when the alert reaches its
+  `min_severity` (releases, end of support and Kubernetes CVEs count as `high`).
+- **The existing `teams:` list keeps working.** Its routes are Teams channels;
+  `teams:` and `channels:` can be used together, and names must be unique across
+  both. `type: teams` under `channels:` is the same thing.
+- **A realm is covered** when any Teams route or channel covers it. Findings of
+  an uncovered realm stay pending (one warning in the logs) and go out once a
+  channel covers the realm.
+- **The weekly digest and the first-run summary** go to every channel covering
+  the realm, whatever its `min_severity`.
+- **Delivery** goes through the database outbox: about one message every 2
+  seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
+  honoured (clamped to 1 h), exactly once even across restarts. A message the
+  channel rejects (a 4xx other than 429, a permanent SMTP error) is not retried
+  and counts in `heimdall_notify_failures_total{channel_type}`.
+- **A missing variable** keeps that channel's messages queued until it is set.
+  Renaming a channel to another `type` leaves messages queued for the old type
+  where they are, rather than sending them in the wrong format.
+
+Every type accepts `name`, `type`, `realms` and `min_severity`. Unknown keys are
+an error, so a key of another type (say `chat_id` on Slack) is caught at
+startup.
+
+## Microsoft Teams
+
+`type: teams`, `webhook_env`. Adaptive Cards through a Workflows webhook; see
+[Microsoft Teams alerts](/heimdall/guides/teams/) for setting up the webhook.
+
+## Slack
+
+`type: slack`, `webhook_env` (an [incoming
+webhook](https://api.slack.com/messaging/webhooks) URL). Messages use Block Kit:
+a header, the severity and realm, the findings, and buttons for the advisory and
+release notes.
+
+```yaml
+- type: slack
+  name: team
+  webhook_env: SLACK_WEBHOOK_TEAM
+  min_severity: high
+```
+
+## Discord
+
+`type: discord`, `webhook_env` (a channel webhook URL: *Channel settings →
+Integrations → Webhooks*). One embed per message, coloured by severity. Text is
+Markdown-escaped and mentions are disabled, so an advisory saying `@everyone`
+pings nobody.
+
+## Telegram
+
+`type: telegram`, `bot_token_env` (a [bot](https://core.telegram.org/bots#how-do-i-create-a-bot)
+token from BotFather), `chat_id` (a number such as `-1001234567890`, or
+`@channelname`), and optionally `api_url` (default `https://api.telegram.org`,
+for a Bot API proxy). Messages use HTML parse mode with every piece of text
+escaped. The token sits in the request path, so Heimdall redacts it from every
+error it logs.
+
+```yaml
+- type: telegram
+  name: ops-chat
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id: -1001234567890
+  min_severity: high
+```
+
+## PagerDuty
+
+`type: pagerduty`, `routing_key_env` (the integration key of an Events API v2
+integration), optionally `url` (default
+`https://events.pagerduty.com/v2/enqueue`; use
+`https://events.eu.pagerduty.com/v2/enqueue` for EU accounts). Each alert is a
+`trigger` event whose `dedup_key` is the alert's key (`alert|vuln|GHSA-…`), so a
+later alert for the same advisory joins the open incident. Severity maps
+critical → `critical`, high → `error`, medium → `warning`, the rest → `info`.
+Heimdall does not send `resolve` events.
+
+## Prometheus Alertmanager
+
+`type: alertmanager`, `url` (the base URL; alerts are POSTed to
+`{url}/api/v2/alerts`), optional basic auth (`username_env` and `password_env`)
+or bearer token (`bearer_token_env`), and `expire_after_hours` (default 24).
+
+Each **finding** becomes one Alertmanager alert, so you can route, group and
+silence on its labels:
+
+| Label | Value |
+|---|---|
+| `alertname` | `Heimdall` + kind: `HeimdallVuln`, `HeimdallFixAvailable`, `HeimdallMajorRelease`, `HeimdallOathExpired`, `HeimdallEol`, `HeimdallK8sCve`, `HeimdallReleaseNoteCve` (and `HeimdallFirstRun`, `HeimdallDigest`) |
+| `realm` | The finding's realm |
+| `service` | The service, when the finding has one |
+| `kind` | `vuln`, `fixavailable`, `majorrelease`, ... |
+| `severity` | `critical`, `high`, `medium`, `low`, `unknown`; `info` for the digest and summary |
+| `advisory` | The advisory id, for advisory kinds |
+
+Annotations: `summary` (the title), `description` (the finding's facts) and
+`links` (one URL per line); `generatorURL` is the advisory or release notes.
+
+<Aside title="Resolve policy: fire once, expire">
+Heimdall announces a finding once and does not follow it afterwards, so it
+never sends a resolution. Each alert is sent once with `startsAt` = the delivery
+time and `endsAt` = the delivery time + `expire_after_hours`; Alertmanager shows
+it as firing for that long and then expires it. The times are set when the
+alert is sent, not when it is queued, so a delayed delivery does not arrive
+already expired. If your receivers have `send_resolved: true`, the expiry
+produces a "resolved" notification that only means the window ended; consider
+`send_resolved: false` on Heimdall's route.
+</Aside>
+
+```yaml
+- type: alertmanager
+  name: am
+  url: http://alertmanager.monitoring:9093
+  expire_after_hours: 24
+  min_severity: high
+```
+
+## Generic webhook
+
+`type: webhook`, `url_env` (the URL to POST to) and optionally `secret_env`.
+The body is the neutral alert model as JSON:
+
+```json
+{
+  "version": 1,
+  "alert": {
+    "key": "alert|vuln|GHSA-gin-0001",
+    "kind": "vuln",
+    "title": "⚠ GHSA-gin-0001 (high) affects 2 service(s)",
+    "severity": "high",
+    "realm": null,
+    "advisory": "GHSA-gin-0001",
+    "summary": "gin mishandles header parsing",
+    "scores": "OSV 7.5 · NVD 9.8",
+    "notes": [],
+    "facts": [],
+    "entries": [
+      {"finding_id": 1, "realm": "prod", "service": "api", "severity": "high",
+       "facts": [{"title": "Component", "value": "pkg:golang/github.com/gin-gonic/gin@v1.9.0"}]}
+    ],
+    "sections": [],
+    "links": [{"title": "Open GHSA-gin-0001", "url": "https://osv.dev/vulnerability/GHSA-gin-0001"}]
+  }
+}
+```
+
+`kind` is a finding kind, `firstrun` or `digest`. With `secret_env`, every
+request carries `X-Heimdall-Signature: sha256=<hex>`: the HMAC-SHA256 of the
+raw request body keyed with the secret. Verify it over the bytes you received,
+before parsing, with a constant-time comparison:
+
+```python
+import hashlib, hmac
+expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, request.headers["X-Heimdall-Signature"])
+```
+
+A message may be delivered again only if your endpoint answered with an error;
+use `alert.key` to drop duplicates.
+
+## Email
+
+`type: email` sends through an SMTP server, in plain text and simple HTML.
+
+| Key | Meaning |
+|---|---|
+| `host` | SMTP server. |
+| `port` | Default by `security`: 587, 465 or 25. |
+| `security` | `starttls` (default; STARTTLS is required, never opportunistic), `tls` (implicit TLS) or `none` (only for a relay on a trusted network). |
+| `username_env`, `password_env` | Variables holding the SMTP login (set both or neither). |
+| `from` | Sender, `Name <address>` or `address`. |
+| `to` | Recipients (at least one). |
+
+```yaml
+- type: email
+  name: security-team
+  host: smtp.example.com
+  security: starttls
+  username_env: SMTP_USERNAME
+  password_env: SMTP_PASSWORD
+  from: Heimdall <heimdall@example.com>
+  to: [security@example.com, oncall@example.com]
+  min_severity: high
+```
+
+A temporary failure (a 4xx reply, a network or TLS error) is retried; a
+permanent one (a 5xx reply such as an unknown recipient) is not.
+
+## Troubleshooting
+
+Watch `heimdall_outbox_pending` (messages waiting) and
+`heimdall_notify_failures_total{channel_type}` (messages a channel rejected).
+The logs name the channel and its type for every failed send, and warn once
+when a channel's variable is not set. See [Metrics](/heimdall/reference/metrics/).

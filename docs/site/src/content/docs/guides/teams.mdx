@@ -5,8 +5,11 @@ description: Create a Workflows webhook, wire it to Heimdall, route by realm and
 
 import { Steps, Aside } from '@astrojs/starlight/components';
 
-Teams is Heimdall's only notifier. It uses a **Workflows** incoming webhook (the
-old Office 365 connectors are retired) and sends **Adaptive Cards**.
+Teams uses a **Workflows** incoming webhook (the old Office 365 connectors are
+retired) and receives **Adaptive Cards**. It is one of several alert channels;
+see [Alert channels](/heimdall/guides/alert-channels/) for Slack, Discord,
+Telegram, PagerDuty, Alertmanager, webhooks and email. The `teams:` list below
+keeps working, and can be combined with `channels:`.
 
 <Steps>
 
