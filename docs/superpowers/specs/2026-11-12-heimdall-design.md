@@ -319,7 +319,7 @@ per-registry credentials:
 | Database | Postgres via `sqlx` (compile-checked queries, migrations) |
 | Kubernetes | `kube` + `k8s-openapi` |
 | CLI | `clap` (derive) |
-| Serialization | `serde`, `serde_json`, `serde_yaml` |
+| Serialization | `serde`, `serde_json`, `serde-saphyr` (pure-Rust YAML) |
 | SBOM | Parse CycloneDX JSON with plain serde structs for the fields we need (avoid a heavy dependency) |
 | Versions | `semver`; small dpkg-version comparator (well-specified algorithm, tested) |
 | Observability | `tracing`, `opentelemetry-otlp`, `metrics` + Prometheus exporter |

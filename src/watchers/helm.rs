@@ -25,6 +25,20 @@ struct Entry {
     created: Option<String>,
 }
 
+/// Public chart indexes are large (bitnami ~27 MB, ~1M YAML nodes), past
+/// serde-saphyr's default 250k-node budget, so allow more here. The YAML
+/// is untrusted; the budget stays finite to bound CPU and memory.
+// ponytail: fixed caps; make them configurable if a real index outgrows them.
+fn parse_index(text: &str) -> Result<Index, serde_saphyr::Error> {
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_nodes: 5_000_000,
+            max_events: 20_000_000,
+        },
+    };
+    serde_saphyr::from_str_with_options(text, options)
+}
+
 /// Every version of `chart` listed in the repository index at `repo_url`.
 pub async fn fetch_index(
     http: &Client,
@@ -39,8 +53,7 @@ pub async fn fetch_index(
     };
     let new_etag = etag_of(&resp);
     let text = resp.text().await.with_context(|| format!("{what}: body"))?;
-    let mut index: Index =
-        serde_yaml::from_str(&text).with_context(|| format!("{what}: index.yaml"))?;
+    let mut index: Index = parse_index(&text).with_context(|| format!("{what}: index.yaml"))?;
     let releases = index
         .entries
         .remove(chart)
@@ -59,4 +72,31 @@ pub async fn fetch_index(
         etag: new_etag,
         not_modified: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic index with more nodes than serde-saphyr's default budget,
+    /// shaped like a big public repository.
+    #[test]
+    fn parses_an_index_past_the_default_node_budget() {
+        let mut y = String::from("apiVersion: v1\nentries:\n");
+        for c in 0..300 {
+            y.push_str(&format!("  chart{c}:\n"));
+            for v in 0..120 {
+                y.push_str(&format!(
+                    "  - version: 1.{v}.0\n    created: \"2026-01-01T00:00:00Z\"\n    urls: [a, b]\n    keywords: [x, y, z]\n    maintainers:\n    - name: m\n      email: e\n"
+                ));
+            }
+        }
+        assert!(
+            serde_saphyr::from_str::<Index>(&y).is_err(),
+            "default budget should be too small"
+        );
+        let index = parse_index(&y).unwrap();
+        assert_eq!(index.entries.len(), 300);
+        assert_eq!(index.entries["chart7"].len(), 120);
+    }
 }

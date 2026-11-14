@@ -9,11 +9,6 @@ targets = [
 
 [advisories]
 version = 2
-# 2026-11-14: unsafe-libyaml is unmaintained (no CVE, no safe upgrade). It is
-# only reached through serde_yaml, which parses the operator-written
-# heimdall.yaml and test fixtures, never untrusted input. Revisit when moving
-# to a maintained YAML crate (e.g. serde-saphyr).
-ignore = ["RUSTSEC-2024-0449"]
 
 [licenses]
 version = 2

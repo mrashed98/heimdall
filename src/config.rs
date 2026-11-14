@@ -47,7 +47,7 @@ impl HeimdallConfig {
 
     /// Parse and validate YAML text.
     pub fn from_yaml(text: &str) -> anyhow::Result<HeimdallConfig> {
-        let cfg: HeimdallConfig = serde_yaml::from_str(text).context("parsing")?;
+        let cfg: HeimdallConfig = serde_saphyr::from_str(text).context("parsing")?;
         cfg.validate().context("invalid")?;
         Ok(cfg)
     }
@@ -374,15 +374,19 @@ mod tests {
     #[test]
     fn helm_default_config_passes() {
         let values = std::fs::read_to_string("deploy/helm/heimdall/values.yaml").unwrap();
-        let v: serde_yaml::Value = serde_yaml::from_str(&values).unwrap();
-        let cfg = serde_yaml::to_string(&v["config"]).unwrap();
-        load_str(&cfg).unwrap();
+        // Only the `config` block; the rest of values.yaml is Helm's.
+        #[derive(serde::Deserialize)]
+        struct Values {
+            config: HeimdallConfig,
+        }
+        let v: Values = serde_saphyr::from_str(&values).unwrap();
+        v.config.validate().unwrap();
     }
 
     #[test]
     fn sight_realm_can_be_set() {
         let cfg: HeimdallConfig =
-            serde_yaml::from_str("realms: [a, b]\nsight: { realm: b }").unwrap();
+            serde_saphyr::from_str("realms: [a, b]\nsight: { realm: b }").unwrap();
         assert_eq!(cfg.sight_realm(), Some("b"));
     }
 }

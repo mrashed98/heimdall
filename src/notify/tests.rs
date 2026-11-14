@@ -18,7 +18,7 @@ const ADV: &str = "GHSA-gin-0001";
 const GIN: &str = "pkg:golang/github.com/gin-gonic/gin";
 
 fn cfg(yaml: &str) -> HeimdallConfig {
-    serde_yaml::from_str(yaml).unwrap()
+    serde_saphyr::from_str(yaml).unwrap()
 }
 
 /// Realms prod and dev, one route for everything high or worse.
