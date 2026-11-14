@@ -831,11 +831,7 @@ mod tests {
                 serde_yaml::from_str("realms: [prod]").unwrap();
             cfg.admins = vec!["alice".to_string()];
             let admins = cfg.admins.clone();
-            let state = AppState {
-                pool: pool.clone(),
-                cfg: Arc::new(cfg),
-                http: reqwest::Client::new(),
-            };
+            let state = AppState::new(pool.clone(), Arc::new(cfg), reqwest::Client::new());
             let admin = create_key(&pool, &admins, "alice", Scope::Admin)
                 .await
                 .unwrap();

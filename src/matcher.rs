@@ -14,6 +14,11 @@ use crate::oath::{self, Oath};
 use crate::purl::osv_package;
 use crate::version::recommend_fix;
 
+/// A Vuln or FixAvailable resolved less recently than this, and wanted again,
+/// is an inventory flap (a new image not scanned yet, a scale to zero, a Job
+/// pod gone): it re-opens without a second announcement.
+const FLAP_WINDOW_DAYS: i64 = 30;
+
 /// What one matcher run changed.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MatchReport {
@@ -328,6 +333,8 @@ async fn realm_where_oath_applies(
 /// inserted; a resolved finding (or any OathExpired, which is produced only
 /// when an oath lapses) is re-opened with `notified_at` cleared; an open one
 /// only gets its severity and details refreshed, so it is not announced again.
+/// A Vuln or FixAvailable resolved within `FLAP_WINDOW_DAYS` re-opens but
+/// keeps its `notified_at`: it was announced, and only flapped.
 async fn upsert(
     tx: &mut PgConnection,
     wanted: &BTreeMap<String, Wanted>,
@@ -338,15 +345,16 @@ async fn upsert(
     // FOR UPDATE also holds these rows against other writers (Gjallarhorn
     // setting notified_at, a run of another realm) between this read and
     // our write, so the open/resolved decision below stays true.
-    let existing: HashMap<String, (i64, String)> = sqlx::query_as::<_, (String, i64, String)>(
-        "SELECT key, id, status FROM findings WHERE key = ANY($1) FOR UPDATE",
+    let existing: HashMap<String, Existing> = sqlx::query_as::<_, Existing>(
+        "SELECT key, id, status, resolved_at FROM findings WHERE key = ANY($1) FOR UPDATE",
     )
     .bind(&keys)
     .fetch_all(&mut *tx)
     .await?
     .into_iter()
-    .map(|(k, id, status)| (k, (id, status)))
+    .map(|e| (e.key.clone(), e))
     .collect();
+    let flap_since = now - chrono::Duration::days(FLAP_WINDOW_DAYS);
 
     let mut opened = Vec::new();
     for w in wanted.values() {
@@ -370,21 +378,28 @@ async fn upsert(
                 .await?;
                 opened.push(id);
             }
-            Some((id, status)) if status == "resolved" || w.kind == FindingKind::OathExpired => {
+            Some(e) if e.status == "resolved" || w.kind == FindingKind::OathExpired => {
+                let flapped = matches!(w.kind, FindingKind::Vuln | FindingKind::FixAvailable)
+                    && e.resolved_at.is_some_and(|at| at > flap_since);
+                // On the right of SET, `notified_at` is still the old value.
                 sqlx::query(
                     "UPDATE findings SET status = 'open', opened_at = $2, resolved_at = NULL, \
-                         notified_at = NULL, severity = $3, details = $4 \
+                         notified_at = CASE WHEN $5 THEN notified_at ELSE NULL END, \
+                         severity = $3, details = $4 \
                      WHERE id = $1",
                 )
-                .bind(id)
+                .bind(e.id)
                 .bind(now)
                 .bind(w.severity)
                 .bind(&w.details)
+                .bind(flapped)
                 .execute(&mut *tx)
                 .await?;
-                opened.push(*id);
+                if !flapped {
+                    opened.push(e.id);
+                }
             }
-            Some((id, _)) => {
+            Some(Existing { id, .. }) => {
                 // A Vuln re-scored from below High to High or worse alerts
                 // again: it may have been announced only in the digest. On
                 // the right of SET, `severity` is still the old value.
@@ -406,6 +421,15 @@ async fn upsert(
         }
     }
     Ok(opened)
+}
+
+/// A finding row `upsert` may update.
+#[derive(FromRow)]
+struct Existing {
+    key: String,
+    id: i64,
+    status: String,
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -651,15 +675,49 @@ mod tests {
         let all = findings(&pool).await;
         assert_eq!(all.len(), 2);
         assert!(all.iter().all(|f| f.status == "resolved"), "{all:?}");
+    }
 
-        // Coming back is a new occurrence: open again, not yet notified.
-        sqlx::query("UPDATE findings SET notified_at = $1")
-            .bind(now)
-            .execute(&pool)
+    /// Open the gin findings, mark them announced, take gin away at
+    /// `resolved_at` and run the matcher there, then put gin back.
+    async fn announce_resolve_and_return(pool: &PgPool, resolved_at: DateTime<Utc>) {
+        seed_gin(pool, "v1.9.0").await;
+        run(pool, REALM, resolved_at - Duration::hours(1))
             .await
             .unwrap();
-        inventory(&pool, Source::Git, &[item(&gin("v1.9.0"), true)]).await;
-        let report = run(&pool, REALM, now).await.unwrap();
+        sqlx::query("UPDATE findings SET notified_at = $1")
+            .bind(resolved_at)
+            .execute(pool)
+            .await
+            .unwrap();
+        let sid = upsert_service(pool, REALM, SERVICE).await.unwrap();
+        replace_components(pool, sid, Source::Git, &[])
+            .await
+            .unwrap();
+        run(pool, REALM, resolved_at).await.unwrap();
+        inventory(pool, Source::Git, &[item(&gin("v1.9.0"), true)]).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reopen_within_30_days_keeps_notified_at(pool: PgPool) {
+        // An inventory flap (a scale-to-zero, an image not scanned yet):
+        // the findings come back, already announced, so no second card.
+        let resolved_at = Utc::now() - Duration::days(29);
+        announce_resolve_and_return(&pool, resolved_at).await;
+        let report = run(&pool, REALM, Utc::now()).await.unwrap();
+        let all = findings(&pool).await;
+        assert_eq!(all.len(), 2, "same keys, same rows");
+        assert!(all
+            .iter()
+            .all(|f| f.status == "open" && f.notified_at.is_some()));
+        assert!(report.opened.is_empty(), "{report:?}");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reopen_after_30_days_rearms(pool: PgPool) {
+        // Gone for over 30 days: coming back is a new occurrence.
+        let resolved_at = Utc::now() - Duration::days(31);
+        announce_resolve_and_return(&pool, resolved_at).await;
+        let report = run(&pool, REALM, Utc::now()).await.unwrap();
         let all = findings(&pool).await;
         assert_eq!(all.len(), 2, "same keys, same rows");
         assert!(all

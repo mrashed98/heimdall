@@ -73,11 +73,7 @@ pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(120))
         .build()
         .context("building the http client")?;
-    let state = AppState {
-        pool,
-        cfg: Arc::new(cfg),
-        http,
-    };
+    let state = AppState::new(pool, Arc::new(cfg), http);
 
     let listener = tokio::net::TcpListener::bind(LISTEN)
         .await
@@ -426,11 +422,7 @@ mod tests {
     fn state(pool: PgPool) -> AppState {
         let cfg: crate::config::HeimdallConfig =
             serde_yaml::from_str("realms: [prod, dev]").unwrap();
-        AppState {
-            pool,
-            cfg: Arc::new(cfg),
-            http: reqwest::Client::new(),
-        }
+        AppState::new(pool, Arc::new(cfg), reqwest::Client::new())
     }
 
     /// A recorder of this test's own, so parallel tests never share values.

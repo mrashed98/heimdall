@@ -285,11 +285,7 @@ mod tests {
         let mut cfg: crate::config::HeimdallConfig =
             serde_yaml::from_str("realms: [prod]").unwrap();
         cfg.admins = admins.iter().map(|s| s.to_string()).collect();
-        AppState {
-            pool,
-            cfg: Arc::new(cfg),
-            http: reqwest::Client::new(),
-        }
+        AppState::new(pool, Arc::new(cfg), reqwest::Client::new())
     }
 
     fn app(state: AppState) -> Router {

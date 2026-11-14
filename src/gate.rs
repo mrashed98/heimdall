@@ -18,7 +18,7 @@ use sqlx::PgPool;
 
 use crate::auth::{require, Authed, Scope};
 use crate::error::ApiError;
-use crate::ingest::api::{ingest_sbom_inner, SbomQuery, BODY_LIMIT};
+use crate::ingest::api::{ingest_sbom_inner, SbomQuery, UploadSlot, BODY_LIMIT};
 use crate::model::Severity;
 use crate::purl::{name_key, osv_package, OsvPackage};
 use crate::vuln::ghsa::{self, GhsaClient};
@@ -77,6 +77,10 @@ pub struct GateQuery {
     pub branch: String,
     pub default_branch: String,
     pub fail_on: Severity,
+    /// Accept an SBOM with no components (normally a 400: an empty SBOM
+    /// would empty the service's inventory).
+    #[serde(default)]
+    pub allow_empty: bool,
 }
 
 /// The advisory clients one gate run uses, with its time budgets. Built per
@@ -114,6 +118,7 @@ async fn gate(
     State(state): State<AppState>,
     authed: Authed,
     Query(q): Query<GateQuery>,
+    _slot: UploadSlot,
     body: Bytes,
 ) -> Result<Json<GateResponse>, ApiError> {
     require(&authed, Scope::Ingest)?;
@@ -134,6 +139,7 @@ pub async fn run(
         realm: q.realm.clone(),
         branch: q.branch.clone(),
         default_branch: q.default_branch.clone(),
+        allow_empty: q.allow_empty,
     };
     let outcome = ingest_sbom_inner(state, &sbom_query, body).await?;
     let checked = checkable(&outcome.purls);
@@ -544,11 +550,7 @@ mod tests {
 
     fn state(pool: PgPool) -> AppState {
         let cfg = HeimdallConfig::load(Path::new("heimdall.example.yaml")).unwrap();
-        AppState {
-            pool,
-            cfg: Arc::new(cfg),
-            http: reqwest::Client::new(),
-        }
+        AppState::new(pool, Arc::new(cfg), reqwest::Client::new())
     }
 
     fn clients(osv: &MockServer, ghsa: Option<&MockServer>) -> GateClients {
@@ -574,6 +576,7 @@ mod tests {
             branch: "feat-x".into(),
             default_branch: "main".into(),
             fail_on,
+            allow_empty: false,
         }
     }
 
@@ -671,6 +674,31 @@ mod tests {
             }]
         );
         assert!(r.unverified.is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn gate_rejects_empty_sbom(pool: PgPool) {
+        let osv = osv_with_high().await;
+        let err = run(
+            &state(pool.clone()),
+            &clients(&osv, None),
+            &query(Severity::High),
+            &body(&[]),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::BadRequest(m) if m.contains("empty SBOM")),
+            "{err:?}"
+        );
+        let q = GateQuery {
+            allow_empty: true,
+            ..query(Severity::High)
+        };
+        let r = run(&state(pool), &clients(&osv, None), &q, &body(&[]))
+            .await
+            .unwrap();
+        assert_eq!(r.verdict, Verdict::Pass);
     }
 
     #[sqlx::test(migrations = "./migrations")]

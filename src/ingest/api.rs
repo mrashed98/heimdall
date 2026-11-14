@@ -4,7 +4,8 @@
 use std::collections::HashSet;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -13,14 +14,39 @@ use crate::auth::{require, Authed, Scope};
 pub use crate::error::ApiError;
 use crate::ingest::sbom;
 use crate::inventory::store::{
-    replace_components, store_image_components, upsert_service, InventoryItem,
+    replace_components, replace_components_in, store_image_components, upsert_service,
+    InventoryItem,
 };
 use crate::model::Source;
 use crate::purl::name_key;
 use crate::AppState;
 
-/// Ingest bodies (SBOMs can be big) are capped at 50 MB.
-pub const BODY_LIMIT: usize = 50 * 1024 * 1024;
+/// Ingest bodies (SBOMs can be big) are capped at 20 MB. With at most
+/// `MAX_CONCURRENT_UPLOADS` read at once, uploads stay well inside 1 GB.
+pub const BODY_LIMIT: usize = 20 * 1024 * 1024;
+
+/// One of the `MAX_CONCURRENT_UPLOADS` upload slots, held until the handler
+/// returns. As an extractor it runs before the body is read (the body is
+/// always the last extractor), so a waiting upload holds no body in memory.
+pub struct UploadSlot {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl FromRequestParts<AppState> for UploadSlot {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(_: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // `acquire_owned` needs the Arc itself so the permit can outlive
+        // this borrow of the state.
+        let permit = state
+            .uploads
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(anyhow::Error::from)?;
+        Ok(UploadSlot { _permit: permit })
+    }
+}
 
 /// What Sight (the cluster scanner) posts: every service it saw in a realm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +80,10 @@ pub struct SbomQuery {
     pub realm: String,
     pub branch: String,
     pub default_branch: String,
+    /// Accept an SBOM with no components. Without it such an upload is a
+    /// 400: a broken SBOM generator would otherwise empty the service.
+    #[serde(default)]
+    pub allow_empty: bool,
 }
 
 /// What one SBOM upload did to the inventory.
@@ -69,7 +99,10 @@ pub struct IngestOutcome {
 
 #[derive(Deserialize)]
 struct SbomUpload {
-    sbom: serde_json::Value,
+    /// Kept as raw JSON text: the SBOM parser reads it once, straight into
+    /// its own structs, with no `Value` tree or second serialization in
+    /// between (an SBOM can be tens of MB).
+    sbom: Box<serde_json::value::RawValue>,
     #[serde(default)]
     direct: Vec<String>,
 }
@@ -108,6 +141,7 @@ async fn ingest_sbom(
     State(state): State<AppState>,
     authed: Authed,
     Query(q): Query<SbomQuery>,
+    _slot: UploadSlot,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Ingest)?;
@@ -131,9 +165,15 @@ pub async fn ingest_sbom_inner(
     check_realm(state, &q.realm)?;
     let upload: SbomUpload = serde_json::from_slice(body)
         .map_err(|e| ApiError::BadRequest(format!("invalid body: {e}")))?;
-    // Re-serialize the embedded object so the one SBOM parser is used everywhere.
-    let sbom_bytes = serde_json::to_vec(&upload.sbom).map_err(anyhow::Error::from)?;
-    let parsed = sbom::parse(&sbom_bytes).map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    let parsed = sbom::parse(upload.sbom.get().as_bytes())
+        .map_err(|e| ApiError::BadRequest(format!("{e:#}")))?;
+    // An SBOM with nothing in it is almost always a broken generator; taken
+    // as is, it would empty the service and resolve all its findings.
+    if parsed.components.is_empty() && !q.allow_empty {
+        return Err(ApiError::BadRequest(
+            "empty SBOM: no components with a purl (pass allow_empty=true to accept it)".into(),
+        ));
+    }
 
     let direct: HashSet<&str> = upload.direct.iter().map(|s| s.as_str()).collect();
     let purls: Vec<String> = parsed.components.iter().map(|c| c.purl.clone()).collect();
@@ -189,11 +229,16 @@ pub struct ClusterOutcome {
 /// The cluster ingest itself, shared by `/ingest/cluster` and Sight's
 /// in-process mode: check the realm, replace each reported service's cluster
 /// component set and empty the ones that vanished. The caller checks the scope.
+///
+/// It is all one transaction: a failure half-way must not leave some
+/// services replaced and the rest emptied, which would resolve findings and
+/// re-open them on the next run.
 pub async fn ingest_cluster_inner(
     state: &AppState,
     inv: &ClusterInventory,
 ) -> Result<ClusterOutcome, ApiError> {
     check_realm(state, &inv.realm)?;
+    let mut tx = state.pool.begin().await?;
 
     let mut added = 0;
     let mut removed = 0;
@@ -210,8 +255,8 @@ pub async fn ingest_cluster_inner(
                 via_image_digest: i.via_image_digest.clone(),
             })
             .collect();
-        let id = upsert_service(&state.pool, &inv.realm, &svc.name).await?;
-        let r = replace_components(&state.pool, id, Source::Cluster, &items).await?;
+        let id = upsert_service(&mut *tx, &inv.realm, &svc.name).await?;
+        let r = replace_components_in(&mut tx, id, Source::Cluster, &items).await?;
         added += r.added;
         removed += r.removed;
     }
@@ -224,14 +269,15 @@ pub async fn ingest_cluster_inner(
          WHERE s.realm = $1 AND sc.source = 'cluster'",
     )
     .bind(&inv.realm)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *tx)
     .await?;
     for (id, name) in known {
         if !listed.contains(&name) {
-            let r = replace_components(&state.pool, id, Source::Cluster, &[]).await?;
+            let r = replace_components_in(&mut tx, id, Source::Cluster, &[]).await?;
             removed += r.removed;
         }
     }
+    tx.commit().await?;
 
     Ok(ClusterOutcome {
         services: inv.services.len(),
@@ -251,6 +297,7 @@ async fn ingest_image(
     authed: Authed,
     Path(digest): Path<String>,
     Query(q): Query<ImageQuery>,
+    _slot: UploadSlot,
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Ingest)?;
@@ -305,14 +352,15 @@ mod tests {
     const GOOD: &str = include_str!("../../tests/fixtures/sbom/go-service.cdx.json");
 
     async fn setup(pool: PgPool) -> (Router, String, PgPool) {
+        let (app, key, pool, _) = setup_with_state(pool).await;
+        (app, key, pool)
+    }
+
+    async fn setup_with_state(pool: PgPool) -> (Router, String, PgPool, AppState) {
         let key = create_key(&pool, &[], "ci", Scope::Ingest).await.unwrap();
         let cfg = HeimdallConfig::load(std::path::Path::new("heimdall.example.yaml")).unwrap();
-        let state = AppState {
-            pool: pool.clone(),
-            cfg: Arc::new(cfg),
-            http: reqwest::Client::new(),
-        };
-        (server::router(state), key, pool)
+        let state = AppState::new(pool.clone(), Arc::new(cfg), reqwest::Client::new());
+        (server::router(state.clone()), key, pool, state)
     }
 
     async fn call(
@@ -422,11 +470,127 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn empty_sbom_rejected(pool: PgPool) {
+        let (app, key, pool) = setup(pool).await;
+        call(&app, &key, "POST", &sbom_uri("main"), sbom_body(&[])).await;
+        let before = effective_components(&pool, "dev-k3s").await.unwrap().len();
+        assert!(before > 0);
+        let empty = br#"{"sbom":{"bomFormat":"CycloneDX","components":[]},"direct":[]}"#;
+
+        let (st, body) = call(&app, &key, "POST", &sbom_uri("main"), empty.to_vec()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"].as_str().unwrap().contains("empty SBOM"),
+            "{body}"
+        );
+        let after = effective_components(&pool, "dev-k3s").await.unwrap().len();
+        assert_eq!(before, after, "the inventory is untouched");
+
+        // Asked for explicitly, an empty SBOM empties the service.
+        let uri = format!("{}&allow_empty=true", sbom_uri("main"));
+        let (st, _) = call(&app, &key, "POST", &uri, empty.to_vec()).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(effective_components(&pool, "dev-k3s")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cluster_ingest_is_all_or_nothing(pool: PgPool) {
+        let (app, key, pool) = setup(pool).await;
+        let uri = "/api/v1/ingest/cluster";
+        let (st, _) = call(&app, &key, "POST", uri, cluster_body(&["web", "worker"])).await;
+        assert_eq!(st, StatusCode::OK);
+        // Any write of the purl `pkg:npm/boom` fails.
+        sqlx::query(
+            "CREATE FUNCTION fail_boom() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN IF NEW.purl LIKE 'pkg:npm/boom@%' THEN RAISE EXCEPTION 'boom'; END IF; \
+             RETURN NEW; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_boom BEFORE INSERT ON components \
+             FOR EACH ROW EXECUTE FUNCTION fail_boom()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // `web` gets a new item first, then `api` fails; `worker` vanished.
+        let body = serde_json::to_vec(&serde_json::json!({ "realm": "dev-k3s", "services": [
+            { "name": "web", "items": [{ "purl": "pkg:npm/right-pad@2.0.0" }] },
+            { "name": "api", "items": [{ "purl": "pkg:npm/boom@1.0.0" }] },
+        ]}))
+        .unwrap();
+        let (st, _) = call(&app, &key, "POST", uri, body).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR);
+        let mut eff: Vec<(String, String)> = effective_components(&pool, "dev-k3s")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.service, e.purl))
+            .collect();
+        eff.sort();
+        let left_pad = "pkg:npm/left-pad@1.0.0".to_string();
+        assert_eq!(
+            eff,
+            vec![
+                ("web".to_string(), left_pad.clone()),
+                ("worker".to_string(), left_pad)
+            ],
+            "nothing of the failed ingest applied"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn oversized_body_413(pool: PgPool) {
         let (app, key, _) = setup(pool).await;
-        let big = vec![b' '; 51 * 1024 * 1024];
+        let big = vec![b' '; 21 * 1024 * 1024];
         let (st, _) = call(&app, &key, "POST", &sbom_uri("main"), big).await;
         assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn uploads_wait_for_a_free_slot(pool: PgPool) {
+        let (app, key, _, state) = setup_with_state(pool).await;
+        // Two uploads are already being handled.
+        let held = state
+            .uploads
+            .clone()
+            .acquire_many_owned(crate::MAX_CONCURRENT_UPLOADS as u32)
+            .await
+            .unwrap();
+        let wait = std::time::Duration::from_millis(300);
+        let image_uri = format!(
+            "/api/v1/ingest/image/sha256:{}?image_ref=reg.example/app",
+            "b".repeat(64)
+        );
+        let gate_uri = "/api/v1/gate?service=api&realm=dev-k3s&branch=main\
+                        &default_branch=main&fail_on=high"
+            .to_string();
+        for uri in [sbom_uri("main"), image_uri.clone(), gate_uri] {
+            let body = if uri == image_uri {
+                GOOD.as_bytes().to_vec()
+            } else {
+                sbom_body(&[])
+            };
+            let third = call(&app, &key, "POST", &uri, body);
+            assert!(
+                tokio::time::timeout(wait, third).await.is_err(),
+                "{uri} must wait"
+            );
+        }
+        drop(held);
+        let (st, _) = tokio::time::timeout(
+            wait * 10,
+            call(&app, &key, "POST", &sbom_uri("main"), sbom_body(&[])),
+        )
+        .await
+        .expect("runs once a slot is free");
+        assert_eq!(st, StatusCode::OK);
     }
 
     #[sqlx::test(migrations = "./migrations")]

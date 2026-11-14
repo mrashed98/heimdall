@@ -110,6 +110,9 @@ struct GateArgs {
     /// Repository default branch (default: from $GITHUB_EVENT_PATH)
     #[arg(long)]
     default_branch: Option<String>,
+    /// Accept an SBOM with no components (otherwise the server rejects it)
+    #[arg(long)]
+    allow_empty: bool,
 }
 
 #[derive(Args)]
@@ -300,7 +303,7 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
 
     let fail_on = serde_json::to_value(args.fail_on)?;
     let enc = Client::encode_segment;
-    let path = format!(
+    let mut path = format!(
         "/api/v1/gate?service={}&realm={}&branch={}&default_branch={}&fail_on={}",
         enc(&args.service),
         enc(&args.realm),
@@ -308,6 +311,9 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
         enc(&default_branch),
         enc(fail_on.as_str().unwrap_or_default()),
     );
+    if args.allow_empty {
+        path.push_str("&allow_empty=true");
+    }
     // The server answers within ~60 s; 120 s leaves room for the upload.
     // A timeout is an error, so it exits 2 like an unreachable server.
     let client = Client::from_env()?.with_timeout(std::time::Duration::from_secs(120))?;
@@ -325,11 +331,11 @@ async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
             let cfg = HeimdallConfig::load(&args.config)?;
             let url = std::env::var("DATABASE_URL")
                 .context("DATABASE_URL is not set (or use --push URL)")?;
-            Some(AppState {
-                pool: heimdall::db::connect(&url).await?,
-                cfg: std::sync::Arc::new(cfg),
-                http: reqwest::Client::new(),
-            })
+            Some(AppState::new(
+                heimdall::db::connect(&url).await?,
+                std::sync::Arc::new(cfg),
+                reqwest::Client::new(),
+            ))
         }
     };
     let out = sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?;

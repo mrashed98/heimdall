@@ -35,8 +35,13 @@ pub struct EffectiveComponent {
     pub direct: bool,
 }
 
-/// Find or create a service; returns its id.
-pub async fn upsert_service(pool: &PgPool, realm: &str, name: &str) -> anyhow::Result<i64> {
+/// Find or create a service; returns its id. Takes any executor (pool or
+/// open transaction) so a cluster ingest can do it inside its transaction.
+pub async fn upsert_service(
+    db: impl sqlx::PgExecutor<'_>,
+    realm: &str,
+    name: &str,
+) -> anyhow::Result<i64> {
     // DO UPDATE (a no-op write) so RETURNING yields the id on conflict too.
     let (id,): (i64,) = sqlx::query_as(
         "INSERT INTO services (realm, name) VALUES ($1, $2) \
@@ -45,7 +50,7 @@ pub async fn upsert_service(pool: &PgPool, realm: &str, name: &str) -> anyhow::R
     )
     .bind(realm)
     .bind(name)
-    .fetch_one(pool)
+    .fetch_one(db)
     .await
     .context("upsert service")?;
     Ok(id)
@@ -89,7 +94,19 @@ pub async fn replace_components(
     items: &[InventoryItem],
 ) -> anyhow::Result<ReplaceReport> {
     let mut tx = pool.begin().await?;
+    let report = replace_components_in(&mut tx, service_id, source, items).await?;
+    tx.commit().await?;
+    Ok(report)
+}
 
+/// `replace_components` on the caller's transaction, so several replaces
+/// (a whole cluster inventory) commit or roll back together.
+pub async fn replace_components_in(
+    tx: &mut PgConnection,
+    service_id: i64,
+    source: Source,
+    items: &[InventoryItem],
+) -> anyhow::Result<ReplaceReport> {
     let existing: Vec<(i64,)> = sqlx::query_as(
         "SELECT component_id FROM service_components WHERE service_id = $1 AND source = $2",
     )
@@ -102,7 +119,7 @@ pub async fn replace_components(
     let mut kept: HashSet<i64> = HashSet::new();
     let mut added = 0;
     for item in items {
-        let component_id = upsert_component(&mut tx, &item.purl, &item.cpes).await?;
+        let component_id = upsert_component(&mut *tx, &item.purl, &item.cpes).await?;
         // Two items can share a purl; the later one wins, but it counts once.
         if kept.insert(component_id) && !existing.contains(&component_id) {
             added += 1;
@@ -137,7 +154,6 @@ pub async fn replace_components(
     .await?
     .rows_affected() as usize;
 
-    tx.commit().await?;
     Ok(ReplaceReport { added, removed })
 }
 
