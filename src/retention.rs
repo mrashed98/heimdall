@@ -16,9 +16,11 @@ pub struct RetentionReport {
     pub findings: u64,
     pub releases: u64,
     pub outbox: u64,
+    pub scan_attempts: u64,
 }
 
-/// Delete resolved findings, releases and sent outbox rows past their age.
+/// Delete resolved findings, releases and sent outbox rows past their age,
+/// and scan-attempt rows of images that are no longer pending or running.
 /// Open findings and unsent outbox rows are never deleted, however old.
 pub async fn cleanup(
     pool: &PgPool,
@@ -40,10 +42,23 @@ pub async fn cleanup(
         .execute(pool)
         .await?
         .rows_affected();
+    // A digest is pending while a service references it and it has no SBOM.
+    // Once it is scanned (the SBOM row exists) or nothing references it
+    // (it left the cluster), its failure history is dead weight.
+    let scan_attempts = sqlx::query(
+        "DELETE FROM image_scan_attempts a \
+         WHERE EXISTS (SELECT 1 FROM image_sboms i WHERE i.digest = a.digest) \
+            OR NOT EXISTS (SELECT 1 FROM service_components sc \
+                           WHERE sc.via_image_digest = a.digest)",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(RetentionReport {
         findings,
         releases,
         outbox,
+        scan_attempts,
     })
 }
 
@@ -175,7 +190,8 @@ mod tests {
             RetentionReport {
                 findings: 1,
                 releases: 1,
-                outbox: 1
+                outbox: 1,
+                scan_attempts: 0,
             }
         );
         let keys: Vec<String> = sqlx::query_scalar("SELECT key FROM findings ORDER BY key")
@@ -292,5 +308,40 @@ mod tests {
         let r = cleanup(&pool, &cfg, now()).await.unwrap();
         assert_eq!(r.releases, 1);
         assert_eq!(release_ids(&pool).await, vec![recent]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retention_drops_scan_attempts_of_images_no_longer_pending(pool: PgPool) {
+        use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
+        let cfg: HeimdallConfig = serde_yaml::from_str("realms: [prod]").unwrap();
+        let svc = upsert_service(&pool, "prod", "api").await.unwrap();
+        let item = InventoryItem {
+            purl: "pkg:oci/api?repository_url=ghcr.io/x/api".into(),
+            cpes: vec![],
+            direct: true,
+            via_image_digest: Some("sha256:pending".into()),
+        };
+        replace_components(&pool, svc, crate::model::Source::Cluster, &[item])
+            .await
+            .unwrap();
+        // pending: referenced, no SBOM. scanned: has an SBOM. gone: unreferenced.
+        for d in ["sha256:pending", "sha256:scanned", "sha256:gone"] {
+            sqlx::query("INSERT INTO image_scan_attempts (digest, attempts) VALUES ($1, 2)")
+                .bind(d)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO image_sboms (digest, image_ref) VALUES ('sha256:scanned', 'r')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let r = cleanup(&pool, &cfg, now()).await.unwrap();
+        assert_eq!(r.scan_attempts, 2);
+        let left: Vec<String> = sqlx::query_scalar("SELECT digest FROM image_scan_attempts")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, vec!["sha256:pending"]);
     }
 }

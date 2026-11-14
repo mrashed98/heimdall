@@ -211,7 +211,8 @@ Polling intervals in minutes.
 ## `retention`
 
 How long old rows are kept, in days. Cleanup runs once a day. Oaths and their
-history are kept forever.
+history are kept forever. The same job also deletes the scan-failure history of
+images that were scanned or no longer run in any cluster.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|

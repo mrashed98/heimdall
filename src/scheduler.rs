@@ -264,6 +264,7 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
                 findings = r.findings,
                 releases = r.releases,
                 outbox = r.outbox,
+                scan_attempts = r.scan_attempts,
                 "retention cleanup ran"
             );
             Ok(())
