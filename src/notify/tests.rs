@@ -655,11 +655,11 @@ async fn digest_monday_9_once(pool: PgPool) {
     assert!(!maybe_send(&pool, &c, monday_0910() + Duration::days(1))
         .await
         .unwrap());
-    // 10:10 on the next Monday is the wrong hour.
+    // 08:40 on the next Monday is before the slot.
     assert!(!maybe_send(
         &pool,
         &c,
-        monday_0910() + Duration::days(7) + Duration::hours(1)
+        monday_0910() + Duration::days(7) - Duration::minutes(30)
     )
     .await
     .unwrap());
@@ -667,6 +667,42 @@ async fn digest_monday_9_once(pool: PgPool) {
         .await
         .unwrap());
     assert_eq!(outbox(&pool).await.len(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn digest_catches_up_after_missing_the_slot(pool: PgPool) {
+    let c = digest_cfg();
+    assert!(maybe_send(&pool, &c, monday_0910()).await.unwrap());
+    // The pod was down all of the next Monday's 09:00 hour.
+    let next_monday_1010 = monday_0910() + Duration::days(7) + Duration::hours(1);
+    assert!(maybe_send(&pool, &c, next_monday_1010).await.unwrap());
+    // Once per slot, even on later days.
+    assert!(!maybe_send(&pool, &c, next_monday_1010 + Duration::days(2))
+        .await
+        .unwrap());
+    assert_eq!(outbox(&pool).await.len(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn digest_hour_in_dst_gap_fires_at_next_valid_time(pool: PgPool) {
+    // Berlin 2026-03-29: 02:00 does not exist (clocks jump to 03:00 CEST).
+    let c = cfg("realms: [prod]\n\
+         digest: {weekday: Sun, hour: 2, timezone: Europe/Berlin}\n\
+         teams:\n  - {name: all, webhook_env: X, min_severity: high}\n");
+    // The previous week's slot was sent, so only the gap day is under test.
+    sqlx::query("INSERT INTO kv (key, value) VALUES ('digest_last', '2026-03-22')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 00:59 UTC = 01:59 CET: before the slot.
+    let before = Utc.with_ymd_and_hms(2026, 3, 29, 0, 59, 0).unwrap();
+    assert!(!maybe_send(&pool, &c, before).await.unwrap());
+    // 01:00 UTC = 03:00 CEST: the first valid local time.
+    let at = Utc.with_ymd_and_hms(2026, 3, 29, 1, 0, 0).unwrap();
+    assert!(maybe_send(&pool, &c, at).await.unwrap());
+    assert!(!maybe_send(&pool, &c, at + Duration::hours(1))
+        .await
+        .unwrap());
 }
 
 #[sqlx::test(migrations = "./migrations")]
