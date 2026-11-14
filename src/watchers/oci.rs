@@ -248,6 +248,7 @@ async fn bearer_token(
     let param = |k: &str| params.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     let realm = param("realm").context("challenge without realm")?;
     let mut url = Url::parse(&realm).with_context(|| format!("bad token realm {realm}"))?;
+    let send_creds = check_realm(&url, challenge.url())?;
     {
         let mut q = url.query_pairs_mut();
         if let Some(service) = param("service") {
@@ -256,7 +257,10 @@ async fn bearer_token(
         let scope = param("scope").unwrap_or_else(|| format!("repository:{repository}:pull"));
         q.append_pair("scope", &scope);
     }
-    let secret = creds.and_then(|c| std::env::var(&c.secret_env).ok());
+    // Credentials only ever go to an https token service.
+    let secret = creds
+        .filter(|_| send_creds)
+        .and_then(|c| std::env::var(&c.secret_env).ok());
     let resp = retry::send(&format!("token for {repository}"), || {
         let req = http.get(url.clone()).header(USER_AGENT, UA);
         match secret.as_deref().and_then(|s| s.split_once(':')) {
@@ -269,6 +273,21 @@ async fn bearer_token(
     t.token
         .or(t.access_token)
         .context("token response without a token")
+}
+
+/// Whether the token `realm` may be used for a challenge from `registry`, and
+/// whether Basic credentials may be sent to it. A realm must be https, unless
+/// the registry itself is plain http (a local or test registry); credentials
+/// are sent to https realms only.
+fn check_realm(realm: &Url, registry: &Url) -> anyhow::Result<bool> {
+    match realm.scheme() {
+        "https" => Ok(true),
+        "http" if registry.scheme() == "http" => Ok(false),
+        _ => bail!(
+            "refusing token realm {}: not https and the registry is not plain http",
+            realm.origin().ascii_serialization()
+        ),
+    }
 }
 
 /// `realm="https://x",service="y",scope="a:b:pull,push"` -> name/value pairs.
@@ -299,4 +318,38 @@ fn next_link(resp: &Response) -> Option<String> {
             let end = part.find('>')?;
             Some(part[start..end].to_string())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn https_realm_gets_credentials() {
+        assert!(check_realm(
+            &u("https://auth.example/token"),
+            &u("https://r.example/v2/")
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn http_realm_is_refused_for_an_https_registry() {
+        let e = check_realm(&u("http://evil.example/token"), &u("https://r.example/v2/"));
+        assert!(e.is_err());
+        assert!(check_realm(&u("ftp://x/token"), &u("http://r.example/v2/")).is_err());
+    }
+
+    #[test]
+    fn http_realm_on_a_plain_http_registry_never_gets_credentials() {
+        let send = check_realm(
+            &u("http://127.0.0.1:5000/token"),
+            &u("http://127.0.0.1:5000/v2/"),
+        );
+        assert!(!send.unwrap());
+    }
 }

@@ -15,7 +15,11 @@ heimdall serve --check-config heimdall.yaml     # prints "config ok"
 ```
 
 A problem prints `config error: ...` naming the file and the field, and exits
-with a failure code.
+with a failure code. The check is strict: an unknown key anywhere (a typo such
+as `major_componant`, or a key under the wrong parent) is an error, and so are
+`digest.hour` outside 0 to 23, any `*_minutes` (and `nvd.minutes`) of `0`, and a
+realm in `teams[].realms`, `declared[].realm` or `sight.realm` that is not
+listed in `realms`.
 
 ## Summary
 
@@ -207,7 +211,8 @@ Polling intervals in minutes.
 ## `retention`
 
 How long old rows are kept, in days. Cleanup runs once a day. Oaths and their
-history are kept forever.
+history are kept forever. The same job also deletes the scan-failure history of
+images that were scanned or no longer run in any cluster.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|

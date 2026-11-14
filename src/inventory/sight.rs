@@ -124,13 +124,17 @@ pub async fn run(
                 removed: n("removed"),
             })
         }
-        (None, Some(state)) => ingest_cluster_inner(state, &inv)
-            .await
-            .map_err(|e| match e {
-                ApiError::BadRequest(m) => anyhow::anyhow!(m),
-                ApiError::Internal(e) => e,
-                other => anyhow::anyhow!("ingest failed: {other:?}"),
-            }),
+        // A real cluster always has pods (DNS, the CNI), so an empty scan is a
+        // failed one (RBAC, wrong context) and must not empty the realm.
+        (None, Some(state)) => {
+            ingest_cluster_inner(state, &inv, false)
+                .await
+                .map_err(|e| match e {
+                    ApiError::BadRequest(m) => anyhow::anyhow!(m),
+                    ApiError::Internal(e) => e,
+                    other => anyhow::anyhow!("ingest failed: {other:?}"),
+                })
+        }
         (None, None) => anyhow::bail!("in-process ingest needs the application state"),
     }
 }

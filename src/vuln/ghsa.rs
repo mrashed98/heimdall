@@ -71,6 +71,8 @@ struct Node {
 struct Advisory {
     ghsa_id: String,
     severity: String,
+    /// Set when GitHub withdrew the advisory (a false alarm).
+    withdrawn_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,7 +190,7 @@ impl GhsaClient {
             fields.push(format!(
                 "q{k}: securityVulnerabilities(ecosystem: {eco}, package: $p{k}, first: 100, after: $a{k}) \
                  {{ pageInfo {{ hasNextPage endCursor }} \
-                 nodes {{ advisory {{ ghsaId severity }} \
+                 nodes {{ advisory {{ ghsaId severity withdrawnAt }} \
                  vulnerableVersionRange firstPatchedVersion {{ identifier }} }} }}"
             ));
             vars.insert(format!("p{k}"), Value::String(p.name.clone()));
@@ -224,6 +226,9 @@ fn hits_for(pkg: &OsvPackage, nodes: Vec<Node>) -> Vec<GhsaHit> {
     let mut seen = HashSet::new();
     let mut hits = Vec::new();
     for n in nodes {
+        if n.advisory.withdrawn_at.is_some() {
+            continue;
+        }
         if !in_range(&pkg.ecosystem, &pkg.version, &n.vulnerable_version_range) {
             continue;
         }
@@ -350,6 +355,31 @@ mod tests {
             }]
         );
         assert!(out[1].is_empty());
+    }
+
+    #[tokio::test]
+    async fn withdrawn_advisories_are_skipped() {
+        let node = |id: &str, withdrawn: Value| {
+            serde_json::json!({
+                "advisory": {"ghsaId": id, "severity": "HIGH", "withdrawnAt": withdrawn},
+                "vulnerableVersionRange": "< 2.0.0",
+                "firstPatchedVersion": null
+            })
+        };
+        let body = serde_json::json!({"data": {"q0": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": [
+                node("GHSA-gone", Value::String("2024-01-02T00:00:00Z".into())),
+                node("GHSA-live", Value::Null)
+            ]
+        }}});
+        let (server, c) = client(200, body).await;
+        let out = c.check(&[pkg("npm", "x", "1.0.0")]).await.unwrap();
+        assert_eq!(out[0].len(), 1);
+        assert_eq!(out[0][0].id, "GHSA-live");
+        // The query asks for the field.
+        let req = &server.received_requests().await.unwrap()[0];
+        assert!(String::from_utf8_lossy(&req.body).contains("withdrawnAt"));
     }
 
     #[tokio::test]

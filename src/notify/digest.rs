@@ -9,7 +9,7 @@
 //! kv keys: `digest_last` (local date of the last digest) and
 //! `digest_release_id` (highest release id covered).
 
-use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
@@ -37,8 +37,40 @@ struct Section {
     rows: Vec<Row>,
 }
 
-/// Queue the digest when `now`, in the digest timezone, is in the configured
-/// weekday and hour and no digest went out that local day. Returns whether
+/// The most recent digest slot at or before `now`: its local date and its
+/// instant. A local time that does not exist (DST spring-forward gap) moves to
+/// the next valid local time; an ambiguous one (fall-back) takes the first.
+fn latest_slot(
+    now: DateTime<Utc>,
+    weekday: Weekday,
+    hour: u32,
+    tz: Tz,
+) -> Option<(NaiveDate, DateTime<Utc>)> {
+    let local_date = now.with_timezone(&tz).date_naive();
+    let back =
+        (7 + local_date.weekday().num_days_from_monday() - weekday.num_days_from_monday()) % 7;
+    let mut date = local_date - Duration::days(i64::from(back));
+    for _ in 0..2 {
+        let mut t = date.and_time(NaiveTime::from_hms_opt(hour, 0, 0)?);
+        // Walk out of a gap (at most a few hours wide).
+        for _ in 0..(6 * 60) {
+            if let Some(at) = tz.from_local_datetime(&t).earliest() {
+                let at = at.with_timezone(&Utc);
+                if at <= now {
+                    return Some((date, at));
+                }
+                break;
+            }
+            t += Duration::minutes(1);
+        }
+        date -= Duration::days(7);
+    }
+    None
+}
+
+/// Queue the digest when `now` is past the latest weekly slot (configured
+/// weekday and hour in the digest timezone) and no digest went out for that
+/// slot, so a pod that was down during the slot catches up. Returns whether
 /// it queued. Vulnerabilities it lists are marked notified in the same
 /// transaction.
 pub async fn maybe_send(
@@ -47,18 +79,25 @@ pub async fn maybe_send(
     now: DateTime<Utc>,
 ) -> anyhow::Result<bool> {
     let d = &cfg.digest;
-    let local = now.with_timezone(&d.timezone);
-    if local.weekday() != d.weekday || local.hour() != d.hour || cfg.teams.is_empty() {
+    if cfg.teams.is_empty() {
         return Ok(false);
     }
-    let today = local.date_naive().to_string();
+    let Some((slot_date, _)) = latest_slot(now, d.weekday, d.hour, d.timezone) else {
+        return Ok(false);
+    };
+    let today = slot_date.to_string();
 
     let mut tx = pool.begin().await?;
     // Two schedulers in the same hour: the second waits and sees digest_last.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('digest'))")
         .execute(&mut *tx)
         .await?;
-    if kv_get(&mut tx, "digest_last").await?.as_deref() == Some(today.as_str()) {
+    // ISO dates compare as strings; a stored date at or after the slot's
+    // means this slot (or a later one) was already sent.
+    if kv_get(&mut tx, "digest_last")
+        .await?
+        .is_some_and(|last| last >= today)
+    {
         return Ok(false);
     }
     let last_release: Option<i64> = kv_get(&mut tx, "digest_release_id")
@@ -269,6 +308,7 @@ async fn releases(
                 }
             }
             Some("plain") => other.push(row(name)),
+            Some("gave_up") => no_notes.push(row(format!("{name} (notes could not be fetched)"))),
             Some(_) => no_notes.push(row(name)),
             // Not looked at yet (the notes run comes later): say so.
             None => no_notes.push(row(format!("{name} (not checked yet)"))),
