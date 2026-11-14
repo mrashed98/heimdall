@@ -189,6 +189,7 @@ struct FindingsQuery {
     kind: Option<String>,
     min_severity: Option<String>,
     limit: Option<String>,
+    offset: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -220,6 +221,19 @@ fn parse_limit(v: &Option<String>) -> Result<i64, ApiError> {
         Ok(n) if (1..=MAX).contains(&n) => Ok(n),
         _ => Err(ApiError::BadRequest(format!(
             "limit {s:?} must be a number from 1 to {MAX}"
+        ))),
+    }
+}
+
+/// Zero-based position within a list. Empty values retain the default.
+fn parse_offset(v: &Option<String>) -> Result<i64, ApiError> {
+    let Some(s) = given(v) else {
+        return Ok(0);
+    };
+    match s.parse::<i64>() {
+        Ok(n) if n >= 0 => Ok(n),
+        _ => Err(ApiError::BadRequest(format!(
+            "offset {s:?} must be a non-negative integer"
         ))),
     }
 }
@@ -270,6 +284,7 @@ async fn findings_handler(
     let realm = given(&q.realm);
     check_realm(&state.cfg, realm)?;
     let limit = parse_limit(&q.limit)?;
+    let offset = parse_offset(&q.offset)?;
     let status = given(&q.status).unwrap_or("open");
     if status != "open" && status != "resolved" {
         return Err(ApiError::BadRequest(format!(
@@ -310,13 +325,14 @@ async fn findings_handler(
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
          ORDER BY f.opened_at DESC, f.id DESC \
-         LIMIT $5",
+         LIMIT $5 OFFSET $6",
     )
     .bind(status)
     .bind(realm)
     .bind(kind)
     .bind(&severities)
     .bind(limit)
+    .bind(offset)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -538,6 +554,31 @@ mod tests {
         }
         let (status, _) = get(&app, "/api/v1/findings", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_pages_keep_response_shape_and_order(pool: PgPool) {
+        for key in ["vuln|a", "vuln|b", "vuln|c"] {
+            seed_finding(&pool, "prod", "api", key, "high").await;
+        }
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let (_, first) = get(&app, "/api/v1/findings?limit=2", Some(&key)).await;
+        let (_, second) = get(&app, "/api/v1/findings?limit=2&offset=2", Some(&key)).await;
+        let first: Vec<FindingRow> = serde_json::from_str(&first).unwrap();
+        let second: Vec<FindingRow> = serde_json::from_str(&second).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1);
+        assert!(first.iter().all(|row| row.id != second[0].id));
+        for invalid in ["-1", "abc", "9223372036854775808"] {
+            let (status, _) = get(
+                &app,
+                &format!("/api/v1/findings?offset={invalid}"),
+                Some(&key),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]
