@@ -69,6 +69,11 @@ scanImages:
 
 serviceMonitor:
   enabled: true
+  # Render the ServiceMonitor even when the cluster's API list is not known
+  # (ArgoCD and `helm template` render offline, so the
+  # monitoring.coreos.com/v1 check fails there). Set it when the
+  # Prometheus Operator CRDs are installed.
+  force: false
   interval: 60s
   # Labels so kube-prometheus-stack selects it.
   labels: {}

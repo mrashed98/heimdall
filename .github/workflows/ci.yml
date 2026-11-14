@@ -77,6 +77,11 @@ jobs:
         run: |
           helm template h deploy/helm/heimdall --api-versions monitoring.coreos.com/v1 \
             | kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS"
+      - name: Validate manifests (ServiceMonitor forced, offline render)
+        run: |
+          helm template h deploy/helm/heimdall --set serviceMonitor.force=true > forced.yaml
+          grep -q 'kind: ServiceMonitor' forced.yaml
+          kubeconform -strict -summary -schema-location default -schema-location "$CRD_SCHEMAS" forced.yaml
       - name: ClusterRole must not grant secrets (ADR 0003)
         run: |
           helm template h deploy/helm/heimdall --api-versions monitoring.coreos.com/v1 > rendered.yaml
@@ -116,17 +121,33 @@ jobs:
           cache-to: type=gha,mode=max,scope=scanner
 
   # Everything below runs only for version tags (v0.1.0).
+  # The tag, the chart's appVersion and the crate version must agree: the
+  # chart pulls the image tagged with its appVersion.
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must be v + Chart.yaml appVersion + Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          app="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/heimdall/Chart.yaml)"
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          echo "tag=${tag} appVersion=${app} cargo=${crate}"
+          if [ "${tag}" != "v${app}" ] || [ "${tag}" != "v${crate}" ]; then
+            echo "::error::tag ${tag} must equal v${app} (Chart.yaml appVersion) and v${crate} (Cargo.toml)"
+            exit 1
+          fi
+
   binaries:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [fmt, clippy, test, helm, audit, docker]
+    needs: [fmt, clippy, test, helm, audit, docker, version]
     strategy:
       matrix:
         include:
           - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: heimdall-linux-amd64 }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: heimdall-linux-arm64 }
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -135,13 +156,33 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release --locked --bin heimdall --target ${{ matrix.target }}
       - run: cp target/${{ matrix.target }}/release/heimdall ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # One job creates the release and attaches every binary, so the matrix
+  # jobs never race to create the same release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: heimdall-linux-*
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: heimdall-linux-*
+          fail_on_unmatched_files: true
 
   images:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [fmt, clippy, test, helm, audit, docker]
+    needs: [fmt, clippy, test, helm, audit, docker, version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -155,9 +196,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Images are tagged with the version without the `v` (0.1.0), the
+      # tag the chart's default (`.Chart.AppVersion`) pulls.
       - id: meta
         run: |
           echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -165,7 +209,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.meta.outputs.repo }}:${{ github.ref_name }}
+            ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.repo }}:latest
       - uses: docker/build-push-action@v6
         with:
@@ -174,5 +218,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.meta.outputs.repo }}-scanner:${{ github.ref_name }}
+            ${{ steps.meta.outputs.repo }}-scanner:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.repo }}-scanner:latest
