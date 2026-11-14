@@ -205,13 +205,22 @@ pub async fn ingest_sbom_inner(
     })
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ClusterQuery {
+    /// Accept an inventory with no services. Without it such an upload is a
+    /// 400: a failed scan would otherwise empty every cluster service.
+    #[serde(default)]
+    allow_empty: bool,
+}
+
 async fn ingest_cluster(
     State(state): State<AppState>,
     authed: Authed,
+    Query(q): Query<ClusterQuery>,
     Json(inv): Json<ClusterInventory>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Ingest)?;
-    let out = ingest_cluster_inner(&state, &inv).await?;
+    let out = ingest_cluster_inner(&state, &inv, q.allow_empty).await?;
     Ok(Json(serde_json::json!({
         "services": out.services,
         "added": out.added,
@@ -230,6 +239,8 @@ pub struct ClusterOutcome {
 /// The cluster ingest itself, shared by `/ingest/cluster` and Sight's
 /// in-process mode: check the realm, replace each reported service's cluster
 /// component set and empty the ones that vanished. The caller checks the scope.
+/// An inventory with no services is refused unless `allow_empty`: it would
+/// empty every cluster service of the realm.
 ///
 /// It is all one transaction: a failure half-way must not leave some
 /// services replaced and the rest emptied, which would resolve findings and
@@ -237,8 +248,14 @@ pub struct ClusterOutcome {
 pub async fn ingest_cluster_inner(
     state: &AppState,
     inv: &ClusterInventory,
+    allow_empty: bool,
 ) -> Result<ClusterOutcome, ApiError> {
     check_realm(state, &inv.realm)?;
+    if inv.services.is_empty() && !allow_empty {
+        return Err(ApiError::BadRequest(
+            "empty cluster inventory: no services (pass allow_empty=true to accept it)".into(),
+        ));
+    }
     let mut tx = state.pool.begin().await?;
 
     let mut added = 0;
@@ -639,6 +656,37 @@ mod tests {
             .collect();
         serde_json::to_vec(&serde_json::json!({ "realm": "dev-k3s", "services": services }))
             .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn empty_cluster_inventory_rejected(pool: PgPool) {
+        let (app, key, pool) = setup(pool).await;
+        let uri = "/api/v1/ingest/cluster";
+        let (st, _) = call(&app, &key, "POST", uri, cluster_body(&["web"])).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = call(&app, &key, "POST", uri, cluster_body(&[])).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("empty cluster inventory"),
+            "{body}"
+        );
+        // Nothing was emptied.
+        assert_eq!(
+            effective_components(&pool, "dev-k3s").await.unwrap().len(),
+            1
+        );
+        // Asked for explicitly, it empties the realm.
+        let uri = "/api/v1/ingest/cluster?allow_empty=true";
+        let (st, body) = call(&app, &key, "POST", uri, cluster_body(&[])).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["removed"], 1);
+        assert!(effective_components(&pool, "dev-k3s")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]

@@ -188,6 +188,13 @@ Scope `ingest`. Upload what Sight saw in a realm. Services in the realm that hav
 cluster components but are not listed are emptied. The whole upload is one
 transaction: if anything fails, nothing of it is applied.
 
+An inventory with no services is refused with `400` and `empty cluster
+inventory` in the message, and the inventory is left alone: a failed scan
+(missing RBAC, wrong context) would otherwise empty every cluster service of the
+realm and resolve its findings. Pass the query parameter `allow_empty=true` when
+the cluster really runs nothing. Sight never sends an empty inventory on
+purpose, so an empty scan shows up as an error in its log.
+
 ```json
 {
   "realm": "dev-k3s",
