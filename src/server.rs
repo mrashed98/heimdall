@@ -184,7 +184,10 @@ fn read_routes() -> Router<AppState> {
         .route("/api/v1/services", get(services_handler))
         .route("/api/v1/services/{id}/components", get(components_handler))
         .route("/api/v1/releases", get(releases_handler))
+        .merge(ui_data_routes())
 }
+
+include!("ui_data.rs");
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RealmRow {
@@ -854,6 +857,21 @@ mod tests {
         let (_, filtered) = get_session("/api/v1/status?realms=b".into()).await;
         assert!(filtered["severity"].as_array().unwrap().is_empty());
         assert!(filtered["services"].as_array().unwrap().is_empty());
+        for path in [
+            "/api/v1/ui/services?realms=b",
+            "/api/v1/ui/oaths?realms=b",
+            "/api/v1/ui/releases?realms=b",
+        ] {
+            let (status, rows) = get_session(path.into()).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {rows}");
+            assert!(rows.as_array().unwrap().is_empty(), "{path}: {rows}");
+        }
+        assert_eq!(
+            get_session(format!("/api/v1/ui/services/{service_b}/components"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(
             get_session(format!("/api/v1/services/{service_b}/components"))
                 .await
@@ -924,6 +942,104 @@ mod tests {
             assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
             assert_eq!(body, serde_json::json!({"error":"no_access"}));
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn data_page_projections_page_filter_and_sort(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "a", "critical").await;
+        seed_finding(&pool, "prod", "api", "b", "high").await;
+        seed_finding(&pool, "dev", "worker", "c", "low").await;
+        let id: i64 = sqlx::query_scalar("SELECT id FROM services WHERE name='api'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:generic/test@1','pkg:generic/test','generic','1')").execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO image_sboms(digest,image_ref) VALUES ('sha256:abc','example/image:1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO service_components(service_id,component_id,source,via_image_digest) SELECT $1,id,'cluster','sha256:abc' FROM components").bind(id).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO releases(target,version,notes_class) VALUES ('widget','2','gave_up')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO findings(key,kind,realm,ref_id,severity,details) VALUES ('rel','majorrelease','prod','2','high','{\"target\":\"widget\",\"version\":\"2\"}'),('eol','eol','dev','1','high','{\"target\":\"widget\"}')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO oaths(advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,created_by,expires_at,status) VALUES ('CVE-1','pkg','api','prod','snooze','reason','1','alice',now()+interval '2 days','active'),('CVE-2','pkg','api','prod','snooze','reason','1','alice',now()-interval '2 days','active'),('CVE-3','pkg','api','dev','snooze','reason','1','alice',now()+interval '2 days','active')").execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let request = |path: String| {
+            let app = &app;
+            let key = &key;
+            async move {
+                let (status, body) = get(app, &path, Some(key)).await;
+                assert_eq!(status, StatusCode::OK, "{path}: {body}");
+                serde_json::from_str::<serde_json::Value>(&body).unwrap()
+            }
+        };
+        let services =
+            request("/api/v1/ui/services?realms=prod&limit=1&sort=critical&order=desc".into())
+                .await;
+        assert_eq!(services[0]["critical"], 1);
+        assert_eq!(services[0]["high"], 1);
+        assert!(
+            request("/api/v1/ui/services?realms=prod&limit=1&offset=1".into())
+                .await
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            request(format!("/api/v1/ui/services/{id}/info")).await[0]["name"],
+            "api"
+        );
+        assert_eq!(
+            request(format!("/api/v1/ui/services/{id}/components?sort=purl")).await[0]["source"],
+            "cluster"
+        );
+        assert_eq!(
+            request(format!("/api/v1/ui/services/{id}/images?sort=image")).await[0]["digest"],
+            "sha256:abc"
+        );
+        assert_eq!(
+            request(format!(
+                "/api/v1/ui/services/{id}/findings?sort=severity&limit=1"
+            ))
+            .await[0]["severity"],
+            "critical"
+        );
+        let releases = request("/api/v1/ui/releases?realms=prod&kind=majorrelease".into()).await;
+        assert_eq!(releases[0]["notes_class"], "gave_up");
+        assert!(request("/api/v1/ui/releases?realms=prod&kind=eol".into())
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            request("/api/v1/ui/oaths?realms=prod&tab=expiring".into())
+                .await
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            request("/api/v1/ui/oaths?realms=prod&tab=past".into()).await[0]["advisory_id"],
+            "CVE-2"
+        );
+        assert_eq!(
+            get(&app, "/api/v1/ui/oaths?sort=invalid", Some(&key))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get(&app, "/api/v1/ui/services", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
