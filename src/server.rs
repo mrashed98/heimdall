@@ -27,6 +27,7 @@ const LISTEN: &str = "0.0.0.0:8080";
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(auth::routes())
+        .merge(crate::admin::routes())
         .merge(crate::local_auth::routes())
         .merge(ingest::api::routes())
         .merge(gate::routes())

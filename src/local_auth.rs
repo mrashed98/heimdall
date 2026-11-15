@@ -105,7 +105,7 @@ pub async fn set_password(pool: &PgPool, name: &str, password: &str) -> anyhow::
     tx.commit().await?;
     Ok(())
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Grant {
     pub role: String,
     pub realm: String,
@@ -120,9 +120,10 @@ pub struct Principal {
     pub(crate) session_hash: Option<Vec<u8>>,
     pub scope: Option<Scope>,
 }
+type CacheEntries = HashMap<i64, (Instant, Option<Vec<Grant>>)>;
 pub struct GrantCache {
     ttl: Duration,
-    entries: Mutex<HashMap<i64, (Instant, Vec<Grant>)>>,
+    entries: Mutex<CacheEntries>,
 }
 impl GrantCache {
     pub fn new(ttl: Duration) -> Self {
@@ -131,10 +132,16 @@ impl GrantCache {
             entries: Mutex::new(HashMap::new()),
         }
     }
+    pub fn invalidate(&self, user_id: i64) {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(user_id, (Instant::now(), None));
+    }
     async fn get(&self, pool: &PgPool, user_id: i64) -> Result<Vec<Grant>, sqlx::Error> {
         if let Some((at, grants)) = self.entries.lock().unwrap().get(&user_id) {
-            if at.elapsed() < self.ttl {
-                return Ok(grants.clone());
+            if at.elapsed() < self.ttl && grants.is_some() {
+                return Ok(grants.clone().unwrap());
             }
         }
         let fetched_at = Instant::now();
@@ -149,7 +156,7 @@ impl GrantCache {
             .get(&user_id)
             .is_none_or(|(at, _)| *at <= fetched_at)
         {
-            entries.insert(user_id, (fetched_at, grants.clone()));
+            entries.insert(user_id, (fetched_at, Some(grants.clone())));
         }
         Ok(grants)
     }
@@ -166,10 +173,10 @@ impl Principal {
         }
         let needed = rank(role);
         needed > 0
-            && self
-                .grants
-                .iter()
-                .any(|g| (g.realm == "*" || g.realm == realm) && rank(&g.role) >= needed)
+            && self.grants.iter().any(|g| {
+                g.role == "admin"
+                    || ((g.realm == "*" || g.realm == realm) && rank(&g.role) >= needed)
+            })
     }
     pub fn readable_realms(&self, all: &[String]) -> Vec<String> {
         all.iter()

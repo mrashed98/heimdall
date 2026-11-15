@@ -116,6 +116,18 @@ pub async fn create_key(
     name: &str,
     scope: Scope,
 ) -> anyhow::Result<String> {
+    let mut tx = pool.begin().await?;
+    let key = create_key_in(&mut tx, admins, name, scope).await?;
+    tx.commit().await?;
+    Ok(key)
+}
+
+async fn create_key_in(
+    conn: &mut sqlx::PgConnection,
+    admins: &[String],
+    name: &str,
+    scope: Scope,
+) -> anyhow::Result<String> {
     if let Err(m) = check_name(name) {
         bail!("invalid key name {name:?}: {m}");
     }
@@ -130,7 +142,7 @@ pub async fn create_key(
         .bind(name)
         .bind(hash(&key))
         .bind(scope.as_str())
-        .execute(pool)
+        .execute(conn)
         .await
         .with_context(|| format!("storing key {name:?} (name already in use?)"))?;
     Ok(key)
@@ -182,10 +194,7 @@ impl FromRequestParts<AppState> for Authed {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         if !parts.headers.contains_key("authorization") {
             let principal = crate::local_auth::Principal::from_request_parts(parts, state).await?;
-            let scope = if principal
-                .grants
-                .iter()
-                .any(|g| g.role == "admin" && g.realm == "*")
+            let scope = if principal.grants.iter().any(|g| g.role == "admin")
                 && state.cfg.admins.contains(&principal.name)
             {
                 Scope::Admin
@@ -280,7 +289,16 @@ async fn create_key_handler(
             req.name
         )));
     }
-    let key = create_key(&state.pool, &state.cfg.admins, &req.name, req.scope).await?;
+    let mut tx = state.pool.begin().await?;
+    let key = create_key_in(&mut tx, &state.cfg.admins, &req.name, req.scope).await?;
+    crate::admin::record(
+        &mut tx,
+        &authed.name,
+        "api_key_created",
+        serde_json::json!({"name": req.name, "scope": req.scope}),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(Json(CreateKeyResponse {
         name: req.name,
         scope: req.scope,
@@ -307,13 +325,22 @@ async fn revoke_key(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Admin)?;
+    let mut tx = state.pool.begin().await?;
     let done = sqlx::query("DELETE FROM api_keys WHERE name = $1")
         .bind(&name)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     if done.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    crate::admin::record(
+        &mut tx,
+        &authed.name,
+        "api_key_revoked",
+        serde_json::json!({"name": name}),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(Json(serde_json::json!({ "revoked": name })))
 }
 

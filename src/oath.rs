@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::auth::{require, Authed, Scope};
+use crate::auth::Scope;
 use crate::error::ApiError;
 use crate::local_auth::Principal;
 use crate::model::OathKind;
@@ -218,8 +218,15 @@ async fn add_event(
         .bind(event)
         .bind(by)
         .bind(note)
-        .execute(tx)
+        .execute(&mut *tx)
         .await?;
+    crate::admin::record(
+        tx,
+        by,
+        &format!("oath_{event}"),
+        serde_json::json!({"oath_id": oath_id, "note": note}),
+    )
+    .await?;
     Ok(())
 }
 
@@ -431,12 +438,33 @@ fn api_error(e: anyhow::Error) -> ApiError {
     }
 }
 
+fn require_editor(p: &Principal, realm: &str) -> Result<(), ApiError> {
+    // Legacy keys may write oaths only with admin scope.
+    if (p.kind == "key" && p.scope != Some(Scope::Admin)) || !p.can("editor", realm) {
+        Err(ApiError::Forbidden)
+    } else {
+        Ok(())
+    }
+}
+async fn authorize_existing(state: &AppState, p: &Principal, id: i64) -> Result<(), ApiError> {
+    if p.kind == "key" && p.scope != Some(Scope::Admin) {
+        return Err(ApiError::Forbidden);
+    }
+    let realm: Option<(Option<String>,)> = sqlx::query_as("SELECT realm FROM oaths WHERE id=$1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let (realm,) = realm.ok_or(ApiError::NotFound)?;
+    require_editor(p, realm.as_deref().unwrap_or("*"))
+}
+
 async fn create_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Json(body): Json<NewOathBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require(&authed, Scope::Admin)?;
+    let realm = if body.all_realms { "*" } else { &body.realm };
+    require_editor(&authed, realm)?;
     // An empty realm is left for `create` to judge together with all_realms.
     if !body.all_realms && !body.realm.is_empty() && !state.cfg.realms.contains(&body.realm) {
         return Err(ApiError::BadRequest(format!(
@@ -478,10 +506,10 @@ async fn list_handler(
 
 async fn revoke_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Path(id): Path<i64>,
 ) -> Result<Json<Oath>, ApiError> {
-    require(&authed, Scope::Admin)?;
+    authorize_existing(&state, &authed, id).await?;
     let oath = revoke(&state.pool, id, &authed.name)
         .await
         .map_err(api_error)?;
@@ -490,11 +518,11 @@ async fn revoke_handler(
 
 async fn extend_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Path(id): Path<i64>,
     Json(body): Json<ExtendBody>,
 ) -> Result<Json<Oath>, ApiError> {
-    require(&authed, Scope::Admin)?;
+    authorize_existing(&state, &authed, id).await?;
     let oath = extend(&state.pool, id, body.until, &authed.name)
         .await
         .map_err(api_error)?;
