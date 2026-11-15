@@ -2,6 +2,9 @@
   import { onMount } from 'svelte';
   import Overview from './lib/Overview.svelte';
   import Findings from './lib/Findings.svelte';
+  import Services from './lib/Services.svelte';
+  import Releases from './lib/Releases.svelte';
+  import Oaths from './lib/Oaths.svelte';
   import logo from './lib/assets/logo.svg';
   import SignInHero from './lib/illustrations/SignInHero.svelte';
   import NoAccess from './lib/illustrations/NoAccess.svelte';
@@ -28,7 +31,8 @@
     { path: '/access', label: 'Access', description: 'Access: users, API keys and audit' }
   ];
   let admin = $derived(isAdmin(identity?.grants ?? []));
-  let page = $derived(pages.find(p => p.path === path && (p.path !== '/access' || admin)));
+  let serviceId = $derived(/^\/services\/[1-9]\d*$/.test(path) ? Number(path.split('/')[2]) : null);
+  let page = $derived(pages.find(p => (p.path === path || (p.path === '/services' && serviceId !== null)) && (p.path !== '/access' || admin)));
   function syncLocation() { path = location.pathname; selected = selectedRealms(location.search); }
   function navigate(to: string) { history.pushState({}, '', to + location.search); syncLocation(); menu = false; }
   function selectRealm(name: string, checked: boolean) { selected = checked ? [...selected, name] : selected.filter(r => r !== name); history.replaceState({}, '', realmUrl(location.href, selected)); }
@@ -78,7 +82,7 @@
       {#if identity}<details class="dropdown"><summary>{identity.name}</summary><div class="popover"><strong>{identity.name}</strong><p>{[...new Set(identity.grants.map(g => g.role))].join(', ') || 'No roles'}</p><button onclick={signOut}>Sign out</button></div></details>{/if}
     </div>
   </header>
-  {#if authState === 'ready'}<div class="layout"><nav aria-label="Main navigation"><button class="mobile-menu" onclick={() => menu = !menu} aria-expanded={menu}>Menu ☰</button><div class:open={menu} class="navlinks">{#each pages.filter(p => p.path !== '/access' || admin) as item}<a href={item.path + location.search} title={item.description} aria-current={path === item.path ? 'page' : undefined} onclick={(e) => { e.preventDefault(); navigate(item.path); }}>{item.label}</a>{/each}</div></nav><main class="content">{#if page}<p class="eyebrow">YOUR REALMS / {page.label.toUpperCase()}</p><h1>{page.label}</h1><p class="description">{page.description.split(': ')[1]}</p>{#if path === '/'}<Overview realms={selected} />{:else if path === '/findings'}<Findings realms={selected} grants={identity?.grants ?? []} />{:else}<div class="placeholder"><span class="marker"></span><p>Coming in the next step</p></div>{/if}{:else}<NotFound /><a href="/" onclick={(e) => { e.preventDefault(); navigate('/'); }}>Return to overview</a>{/if}</main></div>
+  {#if authState === 'ready'}<div class="layout"><nav aria-label="Main navigation"><button class="mobile-menu" onclick={() => menu = !menu} aria-expanded={menu}>Menu ☰</button><div class:open={menu} class="navlinks">{#each pages.filter(p => p.path !== '/access' || admin) as item}<a href={item.path + location.search} title={item.description} aria-current={path === item.path ? 'page' : undefined} onclick={(e) => { e.preventDefault(); navigate(item.path); }}>{item.label}</a>{/each}</div></nav><main class="content">{#if page}<p class="eyebrow">YOUR REALMS / {page.label.toUpperCase()}</p><h1>{page.label}</h1><p class="description">{page.description.split(': ')[1]}</p>{#if path === '/'}<Overview realms={selected} />{:else if path === '/findings'}<Findings realms={selected} grants={identity?.grants ?? []} />{:else if path === '/services' || serviceId !== null}<Services realms={selected} {serviceId} />{:else if path === '/releases'}<Releases realms={selected} />{:else if path === '/oaths'}<Oaths realms={selected} grants={identity?.grants ?? []} />{:else}<div class="placeholder"><span class="marker"></span><p>Coming in the next step</p></div>{/if}{:else}<NotFound /><a href="/" onclick={(e) => { e.preventDefault(); navigate('/'); }}>Return to overview</a>{/if}</main></div>
   {:else}<main class="authState-page">{#if authState === 'noaccess'}<NoAccess /><button onclick={signOut}>Sign out</button>{:else}<ErrorState /><button onclick={() => location.reload()}>Try again</button>{/if}</main>{/if}
 {/if}
 <style>
