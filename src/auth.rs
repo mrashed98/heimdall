@@ -2,7 +2,7 @@
 //! and looked up by hash (see docs/adr/0004-sha256-api-keys.md).
 
 use anyhow::{bail, Context};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -308,13 +308,24 @@ async fn create_key_handler(
 async fn list_keys(
     State(state): State<AppState>,
     authed: Authed,
+    Query(q): Query<crate::admin::ListQuery>,
 ) -> Result<Json<Vec<KeyInfo>>, ApiError> {
     require(&authed, Scope::Admin)?;
-    let keys = sqlx::query_as::<_, KeyInfo>(
-        "SELECT name, scope, created_at FROM api_keys ORDER BY created_at, name",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    let (field, order) = crate::admin::list_order(
+        &q,
+        &[
+            ("name", "name"),
+            ("scope", "scope"),
+            ("created", "created_at"),
+        ],
+        "created_at",
+    );
+    let sql = format!("SELECT name, scope, created_at FROM api_keys ORDER BY {field} {order}, name ASC LIMIT $1 OFFSET $2");
+    let keys = sqlx::query_as::<_, KeyInfo>(&sql)
+        .bind(q.limit.map(|n| n.clamp(0, 500)))
+        .bind(q.offset.unwrap_or(0).max(0))
+        .fetch_all(&state.pool)
+        .await?;
     Ok(Json(keys))
 }
 

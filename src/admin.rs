@@ -58,13 +58,54 @@ struct User {
     #[sqlx(skip)]
     grants: Vec<Grant>,
 }
-async fn users(State(s): State<AppState>, p: Principal) -> Result<Json<Vec<User>>, ApiError> {
-    require_admin(&p)?;
-    let mut users: Vec<User> = sqlx::query_as(
-        "SELECT id, kind, username AS name, email, disabled, last_login_at FROM users ORDER BY id",
+#[derive(Default, Deserialize)]
+pub(crate) struct ListQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub sort: Option<String>,
+    pub order: Option<String>,
+}
+pub(crate) fn list_order<'a>(
+    q: &ListQuery,
+    fields: &'a [(&str, &str)],
+    default: &'a str,
+) -> (&'a str, &'static str) {
+    let field = fields
+        .iter()
+        .find(|(name, _)| Some(*name) == q.sort.as_deref())
+        .map_or(default, |(_, column)| *column);
+    (
+        field,
+        if q.order.as_deref() == Some("desc") {
+            "DESC"
+        } else {
+            "ASC"
+        },
     )
-    .fetch_all(&s.pool)
-    .await?;
+}
+async fn users(
+    State(s): State<AppState>,
+    p: Principal,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Vec<User>>, ApiError> {
+    require_admin(&p)?;
+    let (field, order) = list_order(
+        &q,
+        &[
+            ("kind", "kind"),
+            ("name", "username"),
+            ("email", "email"),
+            ("login", "last_login_at"),
+            ("status", "disabled"),
+        ],
+        "id",
+    );
+    let sql = format!("SELECT id, kind, username AS name, email, disabled, last_login_at FROM users ORDER BY {field} {order} NULLS LAST, id ASC LIMIT $1 OFFSET $2");
+    let mut users: Vec<User> = sqlx::query_as(&sql)
+        .bind(q.limit.map(|n| n.clamp(0, 500)))
+        .bind(q.offset.unwrap_or(0).max(0))
+        .fetch_all(&s.pool)
+        .await?;
     for u in &mut users {
         u.grants = db_grants(&s.pool, u.id).await?;
     }
@@ -195,6 +236,8 @@ struct AuditQuery {
     until: Option<DateTime<Utc>>,
     limit: Option<i64>,
     offset: Option<i64>,
+    sort: Option<String>,
+    order: Option<String>,
 }
 #[derive(Serialize, sqlx::FromRow)]
 struct AuditRow {
@@ -214,7 +257,32 @@ async fn audit(
     require_admin(&p)?;
     let limit = q.limit.unwrap_or(100).clamp(0, 500);
     let offset = q.offset.unwrap_or(0).max(0);
-    let rows = sqlx::query_as("SELECT id,occurred_at,action,username AS actor,method,ip,detail FROM audit_log WHERE ($1::text IS NULL OR username=$1) AND ($2::text IS NULL OR action=$2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4) ORDER BY occurred_at DESC,id DESC LIMIT $5 OFFSET $6")
-        .bind(q.actor).bind(q.action).bind(q.since).bind(q.until).bind(limit).bind(offset).fetch_all(&s.pool).await?;
+    let (field, order) = if q.sort.is_some() {
+        list_order(
+            &ListQuery {
+                sort: q.sort.clone(),
+                order: q.order.clone(),
+                ..Default::default()
+            },
+            &[
+                ("date", "occurred_at"),
+                ("actor", "username"),
+                ("action", "action"),
+            ],
+            "occurred_at",
+        )
+    } else {
+        ("occurred_at", "DESC")
+    };
+    let sql = format!("SELECT id,occurred_at,action,username AS actor,method,ip,detail FROM audit_log WHERE ($1::text IS NULL OR username=$1) AND ($2::text IS NULL OR action=$2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4) ORDER BY {field} {order} NULLS LAST,id DESC LIMIT $5 OFFSET $6");
+    let rows = sqlx::query_as(&sql)
+        .bind(q.actor)
+        .bind(q.action)
+        .bind(q.since)
+        .bind(q.until)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&s.pool)
+        .await?;
     Ok(Json(rows))
 }

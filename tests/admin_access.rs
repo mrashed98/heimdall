@@ -355,3 +355,68 @@ async fn audit_default_and_maximum_page_size(pool: PgPool) {
         capped[499]["occurred_at"].as_str().unwrap() > rest[0]["occurred_at"].as_str().unwrap()
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn access_lists_page_and_sort_without_changing_defaults(pool: PgPool) {
+    let app = setup(&pool).await;
+    user(&pool, "zebra", &[("viewer", "prod")]).await;
+    user(&pool, "alpha", &[("viewer", "dev")]).await;
+    for name in ["zkey", "akey"] {
+        auth::create_key(&pool, &[], name, auth::Scope::Read)
+            .await
+            .unwrap();
+    }
+    let (_, all) = call(&app, "GET", "/api/v1/users", BOOT, Value::Null).await;
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    let (_, first) = call(
+        &app,
+        "GET",
+        "/api/v1/users?sort=name&order=asc&limit=1",
+        BOOT,
+        Value::Null,
+    )
+    .await;
+    let (_, second) = call(
+        &app,
+        "GET",
+        "/api/v1/users?sort=name&order=asc&limit=1&offset=1",
+        BOOT,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(first[0]["name"], "alpha");
+    assert_eq!(second[0]["name"], "zebra");
+    let (_, keys) = call(
+        &app,
+        "GET",
+        "/api/v1/keys?sort=name&order=desc&limit=1",
+        BOOT,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(keys[0]["name"], "zkey");
+    sqlx::query("INSERT INTO audit_log(action,username) VALUES ('a','z'),('z','a')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, audit) = call(
+        &app,
+        "GET",
+        "/api/v1/audit?sort=actor&order=asc&limit=1",
+        BOOT,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(audit[0]["actor"], "a");
+    let (_, viewer) = user(&pool, "viewer2", &[("viewer", "*")]).await;
+    for path in [
+        "/api/v1/users?limit=1",
+        "/api/v1/keys?limit=1",
+        "/api/v1/audit?limit=1",
+    ] {
+        assert_eq!(
+            call(&app, "GET", path, &viewer, Value::Null).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+}
