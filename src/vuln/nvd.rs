@@ -519,8 +519,12 @@ async fn link_targets(
     ids: &[String],
     hit: &BTreeSet<i64>,
 ) -> anyhow::Result<Vec<(i64, String)>> {
-    if ids.len() == 1 {
-        return Ok(hit.iter().map(|c| (*c, ids[0].clone())).collect());
+    match ids {
+        // No advisory and no match: nothing to link (and no canonical to pick).
+        _ if hit.is_empty() => return Ok(Vec::new()),
+        [] => anyhow::bail!("{cve_id}: matched components but no advisory row"),
+        [one] => return Ok(hit.iter().map(|c| (*c, one.clone())).collect()),
+        _ => {}
     }
     let canon = canonical_for_cve(cve_id, ids);
     let components: Vec<i64> = hit.iter().copied().collect();
@@ -921,6 +925,25 @@ mod tests {
             links(&pool).await,
             [("GHSA-pg".to_string(), "both".to_string())]
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn unmatched_cve_with_no_advisory_is_skipped(pool: PgPool) {
+        // A changed CVE for a product nothing runs: no advisory row, no hit.
+        // This once panicked in canonical() on an empty group.
+        let server = MockServer::start().await;
+        mock_changed(&server, page_with("CVE-2026-7100", 9.8, "nobody:runs-this")).await;
+        mock_backfill(&server, empty_page(), 1).await;
+        seed_pg(&pool).await;
+
+        let report = refresh(&pool, &client(&server), &[], at(13)).await.unwrap();
+        assert_eq!(report.matched, 0);
+        let n: i64 = sqlx::query_scalar("select count(*) from advisories")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(links(&pool).await.is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]
