@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-use super::alert::{clip, Alert, AlertKind, Fact, Link};
+use super::alert::{clip, Alert, AlertKind, Fact, Line, Link};
 use super::AlertGroup;
 use crate::model::Severity;
 
@@ -71,7 +71,11 @@ fn finding_card_with(a: &Alert, cap: usize) -> Value {
         ));
     }
     for s in &a.sections {
-        let lines: Vec<String> = s.lines.iter().map(|l| format!("- {}", clip(l))).collect();
+        let lines: Vec<String> = s
+            .lines
+            .iter()
+            .map(|l| format!("- {}", clip(&line(l))))
+            .collect();
         if !lines.is_empty() {
             body.push(text_block(&format!("{}:", s.title), false));
             body.push(text_block(&lines.join("\n"), false));
@@ -100,8 +104,12 @@ fn digest_card(a: &Alert) -> Value {
         for s in &a.sections {
             body.push(json!({"type": "TextBlock", "text": s.title,
                              "weight": "Bolder", "wrap": true, "spacing": "Medium"}));
-            let mut lines: Vec<String> =
-                s.lines.iter().take(cap).map(|r| format!("- {r}")).collect();
+            let mut lines: Vec<String> = s
+                .lines
+                .iter()
+                .take(cap)
+                .map(|r| format!("- {}", line(r)))
+                .collect();
             if s.lines.len() > cap {
                 lines.push(format!("- and {} more", s.lines.len() - cap));
             }
@@ -116,6 +124,18 @@ fn digest_card(a: &Alert) -> Value {
         }
     }
     card
+}
+
+/// A section line in Teams Markdown: Heimdall's own link, then the text with
+/// any Markdown link in it broken (`](` becomes `] (`), so upstream text
+/// (release notes) never turns into a clickable link.
+fn line(l: &Line) -> String {
+    let link = l
+        .link
+        .as_ref()
+        .map(|k| format!("[{}]({})", k.title.replace(['[', ']'], ""), k.url))
+        .unwrap_or_default();
+    format!("{link}{}", l.text.replace("](", "] ("))
 }
 
 /// Wrap card body and actions in the Workflows webhook payload.

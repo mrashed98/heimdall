@@ -155,7 +155,8 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
 
 /// The "Heimdall has opened his eyes" card for `realm`: open findings counted
 /// by severity, queued once per realm (kv `first_run|<realm>`) to every
-/// channel covering the realm. The scheduler calls it before the realm's
+/// channel covering the realm that takes the digest (`wants_digest`). The
+/// scheduler calls it before the realm's
 /// first `enqueue_alerts`, so it is the first alert sent. Returns whether it
 /// queued.
 pub async fn enqueue_first_run_summary(
@@ -166,7 +167,7 @@ pub async fn enqueue_first_run_summary(
     let routes: Vec<ChannelConfig> = cfg
         .channels()
         .into_iter()
-        .filter(|c| c.covers(realm))
+        .filter(|c| c.covers(realm) && c.wants_digest())
         .collect();
     if routes.is_empty() {
         return Ok(false);

@@ -13,7 +13,7 @@ use super::email::{MailError, Mailer};
 use super::*;
 use crate::config::{EmailChannel, HeimdallConfig};
 use crate::model::{FindingKind, Severity};
-use crate::notify::alert::{Alert, Section};
+use crate::notify::alert::{Alert, Line, Link, Section};
 use crate::notify::outbox::{drain_with, Delivery, DrainResult};
 use crate::notify::{AdvisoryInfo, AlertGroup, AlertItem, ReleaseInfo};
 
@@ -112,10 +112,19 @@ fn digest_alert() -> Alert {
         "2026-11-16",
         vec![Section {
             title: "Security releases".to_string(),
-            lines: vec!["[postgres 17.2](https://example.com/17.2) & more".to_string()],
+            lines: vec![Line {
+                link: Some(Link {
+                    title: "postgres 17.2".to_string(),
+                    url: "https://example.com/17.2".to_string(),
+                }),
+                // Upstream release-note text with its own Markdown link.
+                text: ": fixes [click](https://evil.example/x) & more".to_string(),
+            }],
         }],
     )
 }
+
+const EVIL: &str = "https://evil.example/x";
 
 /// 500 services with long names: every formatter must stay in its limits.
 fn huge_alert() -> Alert {
@@ -190,9 +199,10 @@ fn slack_escapes_and_converts_links() {
     assert!(!t.contains("<script>"), "{t}");
     let d = slack::render(&digest_alert()).to_string();
     assert!(
-        d.contains("<https://example.com/17.2|postgres 17.2> &amp; more"),
+        d.contains("<https://example.com/17.2|postgres 17.2>: fixes [click](https://evil.example/x) &amp; more"),
         "{d}"
     );
+    assert!(!d.contains(&format!("<{EVIL}")), "{d}");
 }
 
 #[test]
@@ -218,9 +228,11 @@ fn discord_escapes_markdown_and_mentions() {
         .unwrap()
         .to_string();
     assert!(
-        d.contains("[postgres 17.2](https://example.com/17.2) & more"),
+        d.contains(r"[postgres 17.2](https://example.com/17.2): fixes \[click\](https://evil.example/x) & more"),
         "{d}"
     );
+    // The brackets are escaped, so Discord shows the text, not a link.
+    assert!(!d.contains(&format!("[click]({EVIL}")), "{d}");
 }
 
 #[test]
@@ -263,9 +275,10 @@ fn telegram_escapes_html() {
     );
     let d = telegram::render(&digest_alert(), "1").to_string();
     assert!(
-        d.contains(r#"<a href=\"https://example.com/17.2\">postgres 17.2</a> &amp; more"#),
+        d.contains(r#"<a href=\"https://example.com/17.2\">postgres 17.2</a>: fixes [click](https://evil.example/x) &amp; more"#),
         "{d}"
     );
+    assert!(!d.contains(&format!("href=\\\"{EVIL}")), "{d}");
 }
 
 #[test]
@@ -338,8 +351,23 @@ fn webhook_payload_and_signature() {
     assert_eq!(got["alert"]["severity"], "high");
     // RFC 4231 test case 2.
     assert_eq!(
-        webhook::signature("Jefe", b"what do ya want for nothing?"),
-        "sha256=5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        webhook::hmac_hex("Jefe", b"what do ya want for nothing?"),
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    );
+    // The timestamp is signed with the body: "{ts}.{body}".
+    assert_eq!(
+        webhook::signature("k", 1700000000, b"{}"),
+        format!("sha256={}", webhook::hmac_hex("k", b"1700000000.{}"))
+    );
+    assert_ne!(
+        webhook::signature("k", 1700000000, b"{}"),
+        webhook::signature("k", 1700000001, b"{}")
+    );
+    // Upstream Markdown in a digest row stays text in the JSON too.
+    let d = webhook::render(&digest_alert());
+    assert_eq!(
+        d["alert"]["sections"][0]["lines"][0]["link"]["url"],
+        "https://example.com/17.2"
     );
 }
 
@@ -390,16 +418,49 @@ fn email_payload_and_message() {
 }
 
 #[test]
-fn email_digest_converts_links() {
+fn email_digest_links_only_heimdalls_links() {
     let got = email::render(&digest_alert());
-    assert!(got["text"]
-        .as_str()
-        .unwrap()
-        .contains("postgres 17.2 <https://example.com/17.2> & more"));
-    assert!(got["html"]
-        .as_str()
-        .unwrap()
-        .contains("<a href=\"https://example.com/17.2\">postgres 17.2</a> &amp; more"));
+    assert!(got["text"].as_str().unwrap().contains(
+        "postgres 17.2 <https://example.com/17.2>: fixes [click](https://evil.example/x) & more"
+    ));
+    let html = got["html"].as_str().unwrap();
+    assert!(html.contains(
+        "<a href=\"https://example.com/17.2\">postgres 17.2</a>: fixes [click](https://evil.example/x) &amp; more"
+    ), "{html}");
+    assert!(!html.contains(&format!("href=\"{EVIL}")), "{html}");
+}
+
+#[test]
+fn teams_digest_breaks_upstream_markdown_links() {
+    let c = crate::notify::teams::render(&digest_alert()).to_string();
+    assert!(
+        c.contains("- [postgres 17.2](https://example.com/17.2): fixes [click] (https://evil.example/x) & more"),
+        "{c}"
+    );
+    assert!(!c.contains(&format!("]({EVIL}")), "{c}");
+}
+
+#[test]
+fn smtp_auth_failures_hold_the_channel() {
+    use email::{classify, MailError};
+    for code in [530, 534, 535] {
+        assert_eq!(
+            classify(Some(code), true, "x".into()),
+            MailError::Auth("x".into())
+        );
+    }
+    assert_eq!(
+        classify(Some(550), true, "x".into()),
+        MailError::Permanent("x".into())
+    );
+    assert_eq!(
+        classify(Some(421), false, "x".into()),
+        MailError::Transient("x".into())
+    );
+    assert_eq!(
+        classify(None, false, "x".into()),
+        MailError::Transient("x".into())
+    );
 }
 
 #[test]
@@ -747,9 +808,20 @@ async fn webhook_signature_verifies(pool: PgPool) {
         .unwrap()
         .to_str()
         .unwrap();
-    // Recompute the HMAC over the bytes the receiver got.
-    assert_eq!(sig, webhook::signature("shh", &req.body));
-    assert_ne!(sig, webhook::signature("wrong", &req.body));
+    // The timestamp is the send time; recompute the HMAC over
+    // "{timestamp}.{body}" as the receiver got them.
+    let ts: i64 = req
+        .headers
+        .get("x-heimdall-timestamp")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(ts, now().timestamp());
+    assert_eq!(sig, webhook::signature("shh", ts, &req.body));
+    assert_ne!(sig, webhook::signature("wrong", ts, &req.body));
+    assert_ne!(sig, webhook::signature("shh", ts + 1, &req.body));
     assert_eq!(req.headers.get("content-type").unwrap(), "application/json");
     let got: Value = serde_json::from_slice(&req.body).unwrap();
     assert_eq!(got["alert"]["key"], "alert|vuln|GHSA-gin-0001");
@@ -818,6 +890,60 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
         .unwrap();
     assert_eq!(drain_with(&pool, &d, &c, now()).await.unwrap().failed, 1);
     assert_eq!(row(&pool, id).await.card["failed"], json!(true));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn smtp_auth_failure_holds_the_backlog(pool: PgPool) {
+    let c = cfg(
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+                 from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
+    );
+    let http = reqwest::Client::new();
+    let bad_login = mailer(Err(MailError::Auth("535 bad credentials".into())));
+    let d = Delivery {
+        http: &http,
+        mailer: &bad_login,
+    };
+    let ids = [
+        queue(&pool, "mail", "email", &email::render(&vuln_alert())).await,
+        queue(&pool, "mail", "email", &email::render(&vuln_alert())).await,
+        queue(&pool, "mail", "email", &email::render(&vuln_alert())).await,
+    ];
+    let r = drain_with(&pool, &d, &c, now()).await.unwrap();
+    assert_eq!((r.retry, r.failed), (1, 0));
+    for id in ids {
+        let row = row(&pool, id).await;
+        assert!(row.sent_at.is_none(), "nothing discarded");
+        assert_eq!(row.next_attempt_at, now() + Duration::seconds(30));
+    }
+    // The whole channel waits: nothing else is tried until then.
+    assert_eq!(
+        drain_with(&pool, &d, &c, now()).await.unwrap(),
+        DrainResult::default()
+    );
+    assert_eq!(bad_login.sent.lock().unwrap().len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn orphaned_rows_are_found(pool: PgPool) {
+    let c = cfg("realms: [prod]\nteams:\n  - {name: ops, webhook_env: CH_ORPHAN_UNSET, min_severity: high}\n");
+    queue(&pool, "ops", "teams", &json!({})).await;
+    queue(&pool, "ops", "slack", &json!({})).await;
+    queue(&pool, "gone", "teams", &json!({})).await;
+    let sent = queue(&pool, "old", "email", &json!({})).await;
+    sqlx::query("UPDATE outbox SET sent_at = now() WHERE id = $1")
+        .bind(sent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let o = crate::notify::outbox::orphaned(&pool, &c).await.unwrap();
+    assert_eq!(
+        o,
+        vec![
+            ("gone".to_string(), "teams".to_string()),
+            ("ops".to_string(), "slack".to_string())
+        ]
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -929,12 +1055,27 @@ async fn teams_and_slack_routes_in_different_realms(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
-    let c = cfg("realms: [prod, dev]\n\
+    let c = cfg("realms: [prod, dev, stage]\n\
                  digest: {weekday: Mon, hour: 9, timezone: UTC}\n\
                  teams:\n  - {name: t, webhook_env: X, realms: [prod], min_severity: high}\n\
                  channels:\n\
                  \x20 - {type: email, name: m, host: h, from: a@b.c, to: [d@e.f], realms: [dev], min_severity: low}\n\
-                 \x20 - {type: alertmanager, name: am, url: 'http://am:9093', min_severity: critical}\n");
+                 \x20 - {type: alertmanager, name: am, url: 'http://am:9093', min_severity: critical}\n\
+                 \x20 - {type: pagerduty, name: pd, routing_key_env: K, realms: [stage], min_severity: low}\n\
+                 \x20 - {type: alertmanager, name: am2, url: 'http://am:9093', realms: [dev], min_severity: critical, digest: true}\n");
+    // A medium vuln in a realm only paging channels cover: no digest takes
+    // it, so it stays pending.
+    let sid = crate::inventory::store::upsert_service(&pool, "stage", "db")
+        .await
+        .unwrap();
+    let medium: i64 = sqlx::query_scalar(
+        "INSERT INTO findings (key, kind, realm, service_id, ref_id, severity, details) \
+         VALUES ('d|stage', 'vuln', 'stage', $1, 'GHSA-m', 'medium', '{}') RETURNING id",
+    )
+    .bind(sid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let monday = Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap();
     assert!(crate::notify::digest::maybe_send(&pool, &c, monday)
         .await
@@ -952,11 +1093,25 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
         .filter(|r| r.0.starts_with("digest|"))
         .map(|r| r.1.as_str())
         .collect();
-    assert_eq!(digest, vec!["t", "m", "am"]);
+    // Paging channels skip the digest unless they opt in (am2).
+    assert_eq!(digest, vec!["t", "m", "am2"]);
     let first: Vec<&str> = rows
         .iter()
         .filter(|r| r.0 == "first_run|dev")
-        .map(|r| r.2.as_str())
+        .map(|r| r.1.as_str())
         .collect();
-    assert_eq!(first, vec!["email", "alertmanager"]);
+    assert_eq!(first, vec!["m", "am2"]);
+    assert!(
+        !crate::notify::enqueue_first_run_summary(&pool, &c, "stage")
+            .await
+            .unwrap(),
+        "no summary for a realm only a paging channel covers"
+    );
+    let pending: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT notified_at FROM findings WHERE id = $1")
+            .bind(medium)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(pending.is_none());
 }

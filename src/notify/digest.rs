@@ -14,8 +14,8 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
-use super::alert::{self, clip, package_name, severity_name, Alert};
-use super::{channels, outbox, realm_has_route, FIX_ALERTS_AT_ONCE};
+use super::alert::{self, clip, package_name, severity_name, Alert, Line, Link};
+use super::{channels, outbox, warn_once, FIX_ALERTS_AT_ONCE};
 use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::Severity;
 use crate::version::is_prerelease;
@@ -27,7 +27,7 @@ const FIX_LINES: usize = 3;
 /// realm, such as a release or an all-realms oath).
 struct Row {
     realm: Option<String>,
-    text: String,
+    line: Line,
 }
 
 struct Section {
@@ -77,7 +77,12 @@ pub async fn maybe_send(
     now: DateTime<Utc>,
 ) -> anyhow::Result<bool> {
     let d = &cfg.digest;
-    let chans = cfg.channels();
+    // Paging channels (PagerDuty, Alertmanager) skip the digest by default.
+    let chans: Vec<ChannelConfig> = cfg
+        .channels()
+        .into_iter()
+        .filter(ChannelConfig::wants_digest)
+        .collect();
     if chans.is_empty() {
         return Ok(false);
     }
@@ -105,10 +110,11 @@ pub async fn maybe_send(
 
     let (mut listed, vulns) = vulnerabilities(&mut tx).await?;
     listed.extend(quiet_fixes(&mut tx).await?);
-    // A vuln of a realm no route covers stays pending for a later digest.
+    // A vuln of a realm no digest channel covers stays pending for a later
+    // digest.
     let vuln_ids: Vec<i64> = listed
         .into_iter()
-        .filter(|(_, realm)| realm_has_route(cfg, realm))
+        .filter(|(_, realm)| digest_covers(&chans, realm))
         .map(|(id, _)| id)
         .collect();
     let mut sections = vec![vulns];
@@ -138,6 +144,18 @@ pub async fn maybe_send(
     Ok(true)
 }
 
+/// Does a digest channel cover this realm? Warns once per realm when none does.
+fn digest_covers(chans: &[ChannelConfig], realm: &str) -> bool {
+    let covered = chans.iter().any(|c| c.covers(realm));
+    if !covered {
+        warn_once(
+            &format!("digest-realm|{realm}"),
+            &format!("no digest channel covers realm {realm}; its digest findings stay pending"),
+        );
+    }
+    covered
+}
+
 /// The channel's digest: only rows of the realms it covers (rows of no
 /// realm go to every channel). Each formatter caps the sections.
 fn alert_for(ch: &ChannelConfig, today: &str, sections: &[Section]) -> Alert {
@@ -149,7 +167,7 @@ fn alert_for(ch: &ChannelConfig, today: &str, sections: &[Section]) -> Alert {
                 .rows
                 .iter()
                 .filter(|r| r.realm.as_deref().is_none_or(|realm| ch.covers(realm)))
-                .map(|r| r.text.clone())
+                .map(|r| r.line.clone())
                 .collect(),
         })
         .collect();
@@ -188,14 +206,14 @@ async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, Str
         .map(|r| {
             let fix = r.fix.map(|f| format!(" (fix: {f})")).unwrap_or_default();
             Row {
-                text: format!(
+                line: Line::plain(format!(
                     "{} ({}): {}/{} {}{fix}",
                     r.ref_id.unwrap_or_default(),
                     severity_name(r.severity),
                     r.realm,
                     r.service.unwrap_or_default(),
                     r.purl.unwrap_or_default()
-                ),
+                )),
                 realm: Some(r.realm),
             }
         })
@@ -260,11 +278,26 @@ async fn releases(
     let mut other = Vec::new();
     let mut no_notes = Vec::new();
     for r in rows.into_iter().filter(|r| !is_prerelease(&r.version)) {
-        let name = match &r.notes_url {
-            Some(url) => format!("[{} {}]({url})", r.target, r.version),
-            None => format!("{} {}", r.target, r.version),
+        // The release name links to its notes (a link Heimdall makes); the
+        // rest of the row is upstream text, rendered plain.
+        let name = format!("{} {}", r.target, r.version);
+        let (link, name) = match &r.notes_url {
+            Some(url) => (
+                Some(Link {
+                    title: name,
+                    url: url.clone(),
+                }),
+                String::new(),
+            ),
+            None => (None, name),
         };
-        let row = |text: String| Row { realm: None, text };
+        let row = |text: String| Row {
+            realm: None,
+            line: Line {
+                link: link.clone(),
+                text,
+            },
+        };
         match r.notes_class.as_deref() {
             Some("security") => security.push(row(name)),
             Some("bugfix") => {
@@ -359,7 +392,7 @@ async fn oaths(tx: &mut PgConnection, tz: Tz) -> anyhow::Result<Section> {
         }
         rows.push(Row {
             realm: o.realm,
-            text,
+            line: Line::plain(text),
         });
     }
     Ok(Section {
@@ -409,11 +442,11 @@ async fn declared(tx: &mut PgConnection, tz: Tz) -> anyhow::Result<Section> {
     let rows = list
         .into_iter()
         .map(|(realm, service, purl, version, since)| Row {
-            text: format!(
+            line: Line::plain(format!(
                 "{service}: {} {version}, declared since {} ({realm})",
                 package_name(&purl),
                 since.with_timezone(&tz).date_naive()
-            ),
+            )),
             realm: Some(realm),
         })
         .collect();

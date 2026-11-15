@@ -73,12 +73,38 @@ pub struct Link {
     pub url: String,
 }
 
-/// A titled list of lines (breaking changes, a digest section). Lines may
-/// hold Markdown links `[text](url)`; formatters convert them.
+/// A titled list of lines (breaking changes, a digest section).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Section {
     pub title: String,
-    pub lines: Vec<String>,
+    pub lines: Vec<Line>,
+}
+
+/// One line of a section: an optional link Heimdall made itself (a release's
+/// notes), then text. The text may come from upstream (release notes, oath
+/// reasons): formatters always render it as plain, escaped text, so a
+/// Markdown link in it never becomes clickable.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Line {
+    pub link: Option<Link>,
+    pub text: String,
+}
+
+impl Line {
+    pub fn plain(text: impl Into<String>) -> Line {
+        Line {
+            link: None,
+            text: text.into(),
+        }
+    }
+
+    /// The line as plain text, the link written as `title <url>`.
+    pub fn to_plain(&self) -> String {
+        match &self.link {
+            Some(l) => format!("{} <{}>{}", l.title, l.url, self.text),
+            None => self.text.clone(),
+        }
+    }
 }
 
 /// One finding on an alert.
@@ -202,7 +228,12 @@ impl Alert {
             })
             .collect();
         if let Some(r) = &g.release {
-            let lines: Vec<String> = r.breaking.iter().take(MAX_BREAKING).cloned().collect();
+            let lines: Vec<Line> = r
+                .breaking
+                .iter()
+                .take(MAX_BREAKING)
+                .map(|l| Line::plain(l.as_str()))
+                .collect();
             if !lines.is_empty() {
                 a.sections.push(Section {
                     title: "Breaking changes".to_string(),
@@ -570,40 +601,6 @@ fn links(g: &AlertGroup) -> Vec<Link> {
     out
 }
 
-/// A piece of a line: plain text or a Markdown link.
-#[derive(Debug, PartialEq)]
-pub(crate) enum Span<'a> {
-    Text(&'a str),
-    Link { text: &'a str, url: &'a str },
-}
-
-/// Split a line into plain text and `[text](http…)` links, so formatters
-/// can escape the text and render links their own way.
-pub(crate) fn spans(line: &str) -> Vec<Span<'_>> {
-    use std::sync::OnceLock;
-    static RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        regex::Regex::new(r"\[([^\[\]]+)\]\((https?://[^()\s]+)\)").expect("valid regex")
-    });
-    let mut out = Vec::new();
-    let mut at = 0;
-    for c in re.captures_iter(line) {
-        let m = c.get(0).expect("whole match");
-        if m.start() > at {
-            out.push(Span::Text(&line[at..m.start()]));
-        }
-        out.push(Span::Link {
-            text: c.get(1).map_or("", |x| x.as_str()),
-            url: c.get(2).map_or("", |x| x.as_str()),
-        });
-        at = m.end();
-    }
-    if at < line.len() {
-        out.push(Span::Text(&line[at..]));
-    }
-    out
-}
-
 /// How a chat formatter marks text up.
 pub(crate) struct Markup {
     pub escape: fn(&str) -> String,
@@ -613,15 +610,15 @@ pub(crate) struct Markup {
 }
 
 impl Markup {
-    /// One line with its Markdown links converted and the rest escaped.
-    pub fn line(&self, line: &str) -> String {
-        spans(line)
-            .into_iter()
-            .map(|s| match s {
-                Span::Text(t) => (self.escape)(t),
-                Span::Link { text, url } => (self.link)(text, url),
-            })
-            .collect()
+    /// One section line: Heimdall's own link (if any), then the text,
+    /// escaped, so nothing in it becomes a link.
+    pub fn line(&self, line: &Line) -> String {
+        let link = line
+            .link
+            .as_ref()
+            .map(|l| (self.link)(&l.title, &l.url))
+            .unwrap_or_default();
+        format!("{link}{}", (self.escape)(&clip(&line.text)))
     }
 }
 
@@ -668,7 +665,7 @@ pub(crate) fn body_lines(a: &Alert, m: &Markup, max_rows: usize) -> Vec<String> 
         out.push(String::new());
         out.push((m.bold)(&s.title));
         for l in s.lines.iter().take(max_rows) {
-            out.push(format!("{} {}", (m.escape)("-"), m.line(&clip(l))));
+            out.push(format!("{} {}", (m.escape)("-"), m.line(l)));
         }
         if s.lines.len() > max_rows {
             out.push((m.escape)(&format!(
@@ -713,20 +710,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spans_split_markdown_links() {
+    fn line_links_only_heimdalls_own_link() {
+        fn esc(s: &str) -> String {
+            s.replace('<', "&lt;")
+        }
+        fn link(t: &str, u: &str) -> String {
+            format!("<a href={u}>{t}</a>")
+        }
+        let m = Markup {
+            escape: esc,
+            bold: esc,
+            link,
+        };
+        let l = Line {
+            link: Some(Link {
+                title: "pg 17.1".into(),
+                url: "https://x.org/n".into(),
+            }),
+            text: ": see [click](https://evil.example) <b>".into(),
+        };
         assert_eq!(
-            spans("[pg 17.1](https://x.org/n) fixes <a> & b"),
-            vec![
-                Span::Link {
-                    text: "pg 17.1",
-                    url: "https://x.org/n"
-                },
-                Span::Text(" fixes <a> & b"),
-            ]
+            m.line(&l),
+            "<a href=https://x.org/n>pg 17.1</a>: see [click](https://evil.example) &lt;b>"
         );
         assert_eq!(
-            spans("plain [not a link]"),
-            vec![Span::Text("plain [not a link]")]
+            l.to_plain(),
+            "pg 17.1 <https://x.org/n>: see [click](https://evil.example) <b>"
         );
     }
 

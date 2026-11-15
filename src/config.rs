@@ -185,6 +185,9 @@ pub struct TeamsRoute {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 fn check_name(key: &str, name: &str, seen: &mut Vec<(String, String)>) -> anyhow::Result<()> {
@@ -284,6 +287,17 @@ impl ChannelConfig {
     }
 
     /// Does this channel cover `realm`? An empty realm list covers all.
+    /// Does this channel receive the weekly digest and the first-run
+    /// summary? The `digest` key, else true except for paging channels
+    /// (PagerDuty, Alertmanager), where a weekly summary would page someone.
+    pub fn wants_digest(&self) -> bool {
+        let explicit = common!(self, c => c.digest);
+        explicit.unwrap_or(!matches!(
+            self,
+            ChannelConfig::PagerDuty(_) | ChannelConfig::Alertmanager(_)
+        ))
+    }
+
     pub fn covers(&self, realm: &str) -> bool {
         let realms = self.realms();
         realms.is_empty() || realms.iter().any(|r| r == realm)
@@ -345,6 +359,12 @@ impl ChannelConfig {
                 if c.username_env.is_some() != c.password_env.is_some() {
                     bail!("{key}.username_env and {key}.password_env must be set together");
                 }
+                if c.security == SmtpSecurity::None && c.username_env.is_some() {
+                    bail!(
+                        "{key}.username_env: SMTP credentials need `security: starttls` or `tls`; \
+                         `none` would send the password in clear text"
+                    );
+                }
                 c.from.parse::<lettre::message::Mailbox>().map_err(|e| {
                     anyhow::anyhow!("{key}.from: invalid address `{}`: {e}", c.from)
                 })?;
@@ -372,6 +392,9 @@ pub struct WebhookChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 /// A Telegram chat id: a number (`-1001234567890`) or `@channelname`.
@@ -403,6 +426,9 @@ pub struct TelegramChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -418,6 +444,9 @@ pub struct PagerDutyChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -438,6 +467,9 @@ pub struct AlertmanagerChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 fn default_expire_after_hours() -> u32 {
@@ -456,6 +488,9 @@ pub struct GenericWebhookChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 /// How the SMTP connection is secured.
@@ -487,6 +522,9 @@ pub struct EmailChannel {
     #[serde(default)]
     pub realms: Vec<String>,
     pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: true,
+    /// except for paging channels (pagerduty, alertmanager).
+    pub digest: Option<bool>,
 }
 
 impl EmailChannel {
@@ -767,6 +805,44 @@ channels:\n\
             panic!()
         };
         assert_eq!(m.port(), 465);
+    }
+
+    #[test]
+    fn digest_defaults_off_for_paging_channels() {
+        let cfg = load_str(
+            "realms: [a]\n\
+             teams:\n  - {name: t, webhook_env: T, min_severity: high, digest: false}\n\
+             channels:\n\
+             \x20 - {type: slack, name: s, webhook_env: S, min_severity: high}\n\
+             \x20 - {type: pagerduty, name: pd, routing_key_env: K, min_severity: high}\n\
+             \x20 - {type: alertmanager, name: am, url: 'http://am', min_severity: high}\n\
+             \x20 - {type: alertmanager, name: am2, url: 'http://am', min_severity: high, digest: true}\n",
+        )
+        .unwrap();
+        let chans = cfg.channels();
+        let wants: Vec<(&str, bool)> = chans.iter().map(|c| (c.name(), c.wants_digest())).collect();
+        assert_eq!(
+            wants,
+            [
+                ("t", false),
+                ("s", true),
+                ("pd", false),
+                ("am", false),
+                ("am2", true)
+            ]
+        );
+    }
+
+    #[test]
+    fn smtp_credentials_need_tls() {
+        let e = err("realms: [a]\nchannels:\n  - {type: email, name: m, host: h, security: none, \
+                     username_env: U, password_env: P, from: a@b.c, to: [a@b.c], min_severity: high}");
+        assert!(e.contains("channels[0].username_env"), "{e}");
+        assert!(load_str(
+            "realms: [a]\nchannels:\n  - {type: email, name: m, host: h, security: none, \
+                          from: a@b.c, to: [a@b.c], min_severity: high}"
+        )
+        .is_ok());
     }
 
     #[test]

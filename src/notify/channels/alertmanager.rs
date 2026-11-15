@@ -94,7 +94,7 @@ fn one(a: &Alert, e: Option<&Entry>) -> Value {
             );
             for s in &a.sections {
                 lines.push(format!("{}:", s.title));
-                lines.extend(s.lines.iter().map(|l| format!("- {}", clip(l))));
+                lines.extend(s.lines.iter().map(|l| format!("- {}", clip(&l.to_plain()))));
             }
             join_capped(&lines, DESCRIPTION_CHARS, "…")
         }

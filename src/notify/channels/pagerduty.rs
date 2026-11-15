@@ -63,7 +63,7 @@ pub fn render(a: &Alert) -> Value {
             .lines
             .iter()
             .take(MAX_ROWS)
-            .map(|l| truncate(l, 300))
+            .map(|l| truncate(&l.to_plain(), 300))
             .collect();
         details.insert(s.title.clone(), json!(lines));
     }

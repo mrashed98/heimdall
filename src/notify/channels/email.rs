@@ -139,6 +139,19 @@ pub enum MailError {
     Transient(String),
     /// The server refused it for good (a 5xx reply): retrying would fail again.
     Permanent(String),
+    /// Authentication failed (530, 534, 535): a channel problem, not this
+    /// message's. Every queued message of the channel waits and retries, so
+    /// a wrong password never discards the backlog.
+    Auth(String),
+}
+
+/// Classify an SMTP failure by its reply code (if the server sent one).
+pub fn classify(code: Option<u16>, permanent: bool, why: String) -> MailError {
+    match code {
+        Some(530 | 534 | 535) => MailError::Auth(why),
+        _ if permanent => MailError::Permanent(why),
+        _ => MailError::Transient(why),
+    }
 }
 
 /// Sends mail. Behind a trait so the outbox can be tested without a server.
@@ -162,13 +175,11 @@ impl Mailer for SmtpMailer {
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>> {
         Box::pin(async move {
             let transport = transport(ch).map_err(|e| MailError::Transient(e.to_string()))?;
-            transport.send(msg).await.map(|_| ()).map_err(|e| {
-                if e.is_permanent() {
-                    MailError::Permanent(e.to_string())
-                } else {
-                    MailError::Transient(e.to_string())
-                }
-            })
+            transport
+                .send(msg)
+                .await
+                .map(|_| ())
+                .map_err(|e| classify(e.status().map(u16::from), e.is_permanent(), e.to_string()))
         })
     }
 }

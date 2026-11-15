@@ -153,12 +153,13 @@ pub fn request(ch: &ChannelConfig, payload: &Value, now: DateTime<Utc>) -> anyho
         }
         ChannelConfig::Webhook(c) => {
             let body = json(payload);
-            let mut headers = Vec::new();
+            let ts = now.timestamp();
+            let mut headers = vec![(webhook::TIMESTAMP_HEADER, ts.to_string())];
             if let Some(var) = &c.secret_env {
                 let secret = need(var)?;
                 headers.push((
                     webhook::SIGNATURE_HEADER,
-                    webhook::signature(&secret, &body),
+                    webhook::signature(&secret, ts, &body),
                 ));
             }
             Request::Http {

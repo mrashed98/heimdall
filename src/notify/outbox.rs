@@ -88,6 +88,16 @@ pub async fn drain_with(
     cfg: &HeimdallConfig,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
+    for (route, kind) in orphaned(pool, cfg).await? {
+        super::warn_once(
+            &format!("orphan|{route}|{kind}"),
+            &format!(
+                "outbox has unsent {kind} alerts for channel `{route}`, which is no longer \
+                 configured as a {kind} channel; they stay queued (see the alert channels \
+                 guide to clear them)"
+            ),
+        );
+    }
     let mut ready: Vec<ChannelConfig> = Vec::new();
     for ch in cfg.channels() {
         match channels::missing_env(&ch) {
@@ -160,6 +170,31 @@ pub async fn drain_with(
             .await?;
             result.retry = 1;
         }
+        Outcome::Hold(why) => {
+            // The channel itself is broken (SMTP login refused): back this row
+            // off and hold every other queued row of the channel until then,
+            // instead of burning through (or discarding) the backlog.
+            let next = now + backoff(attempts, None);
+            tracing::warn!(route = %route, channel_type = kind, outbox_id = id, retry_at = %next,
+                           "{kind} channel {route} is failing; holding its queue: {why}");
+            sqlx::query(
+                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = $2 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(next)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE outbox SET next_attempt_at = GREATEST(next_attempt_at, $2) \
+                 WHERE route = $1 AND channel_type = $3 AND sent_at IS NULL",
+            )
+            .bind(&route)
+            .bind(next)
+            .bind(kind)
+            .execute(&mut *tx)
+            .await?;
+            result.retry = 1;
+        }
         Outcome::Rejected(why) => {
             // Sending the same payload again would be rejected again.
             tracing::error!(route = %route, channel_type = kind, outbox_id = id,
@@ -179,6 +214,28 @@ pub async fn drain_with(
     Ok(result)
 }
 
+/// `(route, channel_type)` of unsent rows no configured channel matches
+/// (removed, renamed, or changed type). They are never sent.
+pub async fn orphaned(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let chans = cfg.channels();
+    let names: Vec<&str> = chans.iter().map(|c| c.name()).collect();
+    let types: Vec<&str> = chans.iter().map(|c| c.type_name()).collect();
+    let rows = sqlx::query_as(
+        "SELECT DISTINCT route, channel_type FROM outbox \
+         WHERE sent_at IS NULL \
+           AND (route, channel_type) NOT IN (SELECT * FROM unnest($1::text[], $2::text[])) \
+         ORDER BY 1, 2",
+    )
+    .bind(&names)
+    .bind(&types)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 #[derive(Debug, PartialEq)]
 enum Outcome {
     Sent,
@@ -186,6 +243,8 @@ enum Outcome {
         retry_after_secs: Option<i64>,
         why: String,
     },
+    /// Retry, and hold the channel's other queued rows as long.
+    Hold(String),
     Rejected(String),
 }
 
@@ -209,6 +268,7 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, req: Request) -> Outcome {
                     why,
                 },
                 Err(MailError::Permanent(why)) => Outcome::Rejected(why),
+                Err(MailError::Auth(why)) => Outcome::Hold(why),
             }
         }
     }
