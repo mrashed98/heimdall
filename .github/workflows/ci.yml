@@ -91,6 +91,19 @@ jobs:
       - run: helm lint deploy/helm/heimdall
       - name: Validate manifests (no ServiceMonitor CRD)
         run: helm template h deploy/helm/heimdall | kubeconform -strict -summary
+      - name: Validate auth configuration and secret wiring
+        run: |
+          helm template h deploy/helm/heimdall --set config.auth.public_url=https://heimdall.example.com --set config.auth.local.enabled=true --set config.auth.oidc.issuer=https://id.example.com --set config.auth.oidc.client_id=heimdall --set config.auth.oidc.client_secret_env=HEIMDALL_OIDC_CLIENT_SECRET > auth.yaml
+          grep -q 'public_url: https://heimdall.example.com' auth.yaml
+          grep -q 'client_secret_env: HEIMDALL_OIDC_CLIENT_SECRET' auth.yaml
+          grep -q 'name: heimdall-secrets' auth.yaml
+          kubeconform -strict -summary auth.yaml
+      - name: Validate enabled ingress with multiple hosts
+        run: |
+          helm template h deploy/helm/heimdall --set ingress.enabled=true --set 'ingress.hosts[0]=one.example.com' --set 'ingress.hosts[1]=two.example.com' > ingress.yaml
+          grep -q 'host: "one.example.com"' ingress.yaml
+          grep -q 'host: "two.example.com"' ingress.yaml
+          kubeconform -strict -summary ingress.yaml
       - name: Validate manifests (with ServiceMonitor CRD)
         run: |
           helm template h deploy/helm/heimdall --api-versions monitoring.coreos.com/v1 \
