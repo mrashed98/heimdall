@@ -1,10 +1,13 @@
 ---
 title: Alert rules and the digest
-description: Which findings alert immediately in Teams, how cards are grouped, and what goes in the weekly digest.
+description: Which findings alert immediately, how alerts are grouped, and what goes in the weekly digest.
 ---
 
-Heimdall tries hard not to cry wolf. If the Teams channel gets muted, it has
-failed. So alerts follow strict rules.
+Heimdall tries hard not to cry wolf. If its channel gets muted, it has failed.
+So alerts follow strict rules, the same for every [alert
+channel](/heimdall/guides/alert-channels/) (Teams, Slack, Discord, Telegram,
+PagerDuty, Alertmanager, webhooks, email). "Card" below means one alert message
+on any channel.
 
 ## Immediate alerts
 
@@ -45,18 +48,18 @@ number counts as the major version.
   sends a short "Heimdall has opened his eyes" card per realm with counts by
   severity.
 - Cards go through a queue stored in the database, sent about one every 2
-  seconds, so a big first run does not hit Teams throttling. Failed sends retry
+  seconds, so a big first run does not hit throttling. Failed sends retry
   with growing delays, and queued cards survive a restart.
 
 ## Routing
 
-Each Teams route has a `min_severity` and an optional realm list. Releases, end
+Each channel (or Teams route) has a `min_severity` and an optional realm list. Releases, end
 of support and Kubernetes CVEs count as `high` for routing. See
-[Microsoft Teams alerts](/heimdall/guides/teams/).
+[Alert channels](/heimdall/guides/alert-channels/).
 
 ## The weekly digest
 
-Everything that did not deserve an immediate alert goes into one card per route
+Everything that did not deserve an immediate alert goes into one card per channel
 each week (default Monday 09:00 UTC, see `digest` in the
 [configuration reference](/heimdall/reference/configuration/#digest)):
 

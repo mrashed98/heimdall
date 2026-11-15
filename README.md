@@ -26,8 +26,9 @@ It does four things:
 4. **Blocks bad builds.** `heimdall gate` (Hofund) fails a CI build when it
    finds vulnerabilities, using the same data.
 
-Alerts go to Microsoft Teams (Workflows webhook, Adaptive Cards), grouped per
-advisory or release so one CVE is one card, and sent once. Heimdall is **not
+Alerts go to Microsoft Teams, Slack, Discord, Telegram, PagerDuty, Prometheus
+Alertmanager, a generic webhook or email, routed per realm and severity,
+grouped per advisory or release so one CVE is one alert, and sent once. Heimdall is **not
 exposed to the internet**: CI runs on self-hosted runners that reach the
 in-cluster Service.
 
@@ -47,6 +48,38 @@ in-cluster Service.
   scanned yet, a scale to zero) is not announced again.
 
 Details: [alert rules](https://mrashed98.github.io/heimdall/concepts/alerts/).
+
+### Alert channels
+
+Route alerts per realm and severity to any mix of channels. The `teams:` list
+keeps working; `channels:` adds the other types. Secrets are only ever named
+(`*_env`), never written in the config:
+
+```yaml
+teams:
+  - { name: default, webhook_env: TEAMS_WEBHOOK_DEFAULT, min_severity: high }
+channels:
+  - { type: slack, name: dev, webhook_env: SLACK_WEBHOOK_DEV, realms: [dev], min_severity: high }
+  - { type: pagerduty, name: oncall, routing_key_env: PAGERDUTY_KEY, realms: [prod], min_severity: critical }
+  - { type: alertmanager, name: am, url: "http://alertmanager:9093", min_severity: high }
+  - { type: webhook, name: siem, url_env: SIEM_URL, secret_env: SIEM_HMAC, min_severity: low }
+  - type: email
+    name: security
+    host: smtp.example.com
+    username_env: SMTP_USERNAME
+    password_env: SMTP_PASSWORD
+    from: Heimdall <heimdall@example.com>
+    to: [security@example.com]
+    min_severity: high
+```
+
+Also `discord` (`webhook_env`) and `telegram` (`bot_token_env`, `chat_id`).
+Each channel gets its own queued copy with the same pacing, retries and
+exactly-once delivery; the weekly digest goes to every channel covering the
+realm (paging channels, PagerDuty and Alertmanager, only with `digest: true`).
+Alertmanager alerts are sent once with `endsAt` = delivery +
+`expire_after_hours` (default 24). Details:
+[alert channels](https://mrashed98.github.io/heimdall/guides/alert-channels/).
 
 ## Why Heimdall
 
@@ -74,7 +107,7 @@ Code modules use plain names so the source is easy to navigate. See also
 | **Bifröst** | The ingest API: everything entering Heimdall (SBOM uploads, cluster inventory) crosses it | `ingest` |
 | **Sight** | Inventory scanning: what is actually running (cluster scanner + image SBOM job) | `inventory` |
 | **Watchers** | Pollers for new releases and new advisories ("Heimdall hears the grass grow") | `watchers` |
-| **Gjallarhorn** | The notifier: Teams alerts and the weekly digest | `notify` |
+| **Gjallarhorn** | The notifier: alerts on Teams, Slack, Discord, Telegram, PagerDuty, Alertmanager, webhooks or email, and the weekly digest | `notify` |
 | **Hofund** | The CI gate that blocks a build at the bridge | `gate` |
 | **Oath** | A suppression: ignore or snooze a CVE, with a reason | `oath` |
 
@@ -88,7 +121,7 @@ Code modules use plain names so the source is easy to navigate. See also
         ┌───────────┐   HTTPS          │   ├─ Sight    (kube-rs cluster scan)   │
         │  Bifröst  │◄─────────────────┤   ├─ Watchers (tokio scheduled tasks)  │
         └───────────┘                  │   ├─ Matcher  (inventory × advisories) │
-                                       │   ├─ Gjallarhorn (Teams)               │
+                                       │   ├─ Gjallarhorn (alert channels)      │
   Image SBOM CronJob (syft) ──POST────►│   └─ /metrics, OTLP ──► OTel collector │
   (own limits, per unique digest)      └──────────────────────────────────────┘
                                                        │ sqlx
@@ -104,7 +137,7 @@ The full design is in
 
 ## Quick start (local)
 
-You need Rust (stable), Docker and a Teams Workflows webhook URL (optional).
+You need Rust (stable), Docker and, optionally, an alert channel (a Teams or Slack webhook URL, for example).
 
 1. **Start Postgres.** The repo ships a dev database on port 5433:
 
@@ -129,15 +162,15 @@ You need Rust (stable), Docker and a Teams Workflows webhook URL (optional).
    SHA-256 is stored in the database.
 
 3. **Write a config.** Copy `heimdall.example.yaml` to `heimdall.yaml` and
-   edit at least `realms`, `own_registries` and `teams`. Check it:
+   edit at least `realms`, `own_registries` and `teams` (or `channels`). Check it:
 
    ```bash
    cargo run -- serve --check-config heimdall.yaml     # prints "config ok"
    ```
 
 4. **Run the server.** Optional environment: `GITHUB_TOKEN` (5000 req/h
-   instead of 60 for GitHub), `NVD_API_KEY`, and one variable per Teams
-   webhook named in `teams[].webhook_env`.
+   instead of 60 for GitHub), `NVD_API_KEY`, and one variable per alert
+   channel secret named in `teams[].webhook_env` or a `channels[]` `*_env` key.
 
    ```bash
    cargo run -- serve heimdall.yaml     # listens on 0.0.0.0:8080
@@ -172,6 +205,7 @@ Create a Secret (SOPS-managed in a real setup) with these keys, then install:
 | `GITHUB_TOKEN` | GitHub releases, release notes, and the gate's GitHub Advisory DB fallback |
 | `NVD_API_KEY` | NVD (name set by `nvd.api_key_env`) |
 | `TEAMS_WEBHOOK_*` | One per `teams[].webhook_env` |
+| Channel secrets | One per `*_env` key of a `channels[]` entry (webhook URLs, bot token, routing key, HMAC secret, SMTP or Alertmanager credentials) |
 | `HEIMDALL_API_KEY` | An **ingest-scope** key, used by the scanner CronJob |
 
 ```bash
@@ -214,6 +248,7 @@ is a complete example.
 | `admins` | `[]` | Key names allowed to hold an `admin` key (besides `bootstrap`). One key per person. Removing a name disables their admin keys on the next request. Oaths record the admin's name. |
 | `own_registries` | `[]` | Registry hosts or `host/org` prefixes (e.g. `ghcr.io/mrashed98`). Those images are CVE-scanned but never release-watched. |
 | `teams[]` | `[]` | Teams routes. Each: `name`, `webhook_env` (name of the env var holding the webhook URL), `realms` (empty = all), `min_severity` (`critical`, `high`, `medium`, `low`). |
+| `channels[]` | `[]` | Alert channels of any `type`: `teams`, `slack`, `discord`, `telegram`, `pagerduty`, `alertmanager`, `webhook`, `email`. Each: `name` (unique across `teams` and `channels`), `realms`, `min_severity`, plus its type's keys. Secrets only via `*_env` keys. See [Alert channels](#alert-channels). |
 | `watchers.github[]` | `[]` | `repo`, `inventory_name`, optional `major_component` (see below), optional `cpe`. |
 | `watchers.endoflife[]` | `[]` | `product`, `inventory_name`, optional `major_component`, `cpe`, and `repo` (GitHub repo for release notes). |
 | `watchers.tf_registry[]` | `[]` | `registry` (`registry.terraform.io` or `registry.opentofu.org`), `kind` (`provider` or `module`), `source`, `current` (version you run). |
@@ -451,7 +486,8 @@ back to the GitHub Advisory Database (needs `GITHUB_TOKEN` on the server).
 | `heimdall_versions_behind` | `realm`, `target` | How many releases newer than the running version. |
 | `heimdall_watcher_failures_total` | `watcher` | Failed fetches per watcher type. |
 | `heimdall_watcher_duration_seconds` | `watcher` | Time spent per watcher type per run (a Prometheus summary: quantiles plus `_sum` and `_count`). |
-| `heimdall_teams_failures_total` | | Cards Teams rejected. |
+| `heimdall_teams_failures_total` | | Cards Teams rejected (Teams channels only). |
+| `heimdall_notify_failures_total` | `channel_type` | Alerts any channel rejected, by type. |
 | `heimdall_outbox_pending` | | Notifications waiting to be sent. |
 | `heimdall_oaths_active` | `kind` | Active oaths (`snooze`, `ignore`). |
 | `heimdall_oath_next_expiry_timestamp_seconds` | | Unix time of the nearest oath date; `0` when none. |
@@ -478,9 +514,9 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 - **Gate exits 2 in CI**: the runner cannot reach Heimdall, or the server
   could not verify some components. The final line reads `verdict: UNVERIFIED (checked against …)`, and the
   `unverified:` lines above it list the components that could not be checked.
-- **No Teams cards**: check the webhook variable named in `teams[].webhook_env`
-  exists in the Secret, and watch `heimdall_outbox_pending` and
-  `heimdall_teams_failures_total`.
+- **No alerts arrive**: check that the variables named in `teams[].webhook_env`
+  and the `channels[]` `*_env` keys exist in the Secret, and watch `heimdall_outbox_pending` and
+  `heimdall_notify_failures_total` (the logs name the failing channel).
 - **GitHub rate limit errors in logs**: set `GITHUB_TOKEN`.
 - **Scanner CronJob fails with a missing key**: add `HEIMDALL_API_KEY`
   (ingest scope) to the Secret.

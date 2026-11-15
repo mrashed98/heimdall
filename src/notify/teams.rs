@@ -1,32 +1,43 @@
-//! Teams Adaptive Cards (version 1.4) wrapped in the Workflows webhook
-//! payload. Every card Gjallarhorn sends is built here.
-
-use std::collections::BTreeSet;
+//! Teams formatter: Adaptive Cards (version 1.4) wrapped in the Workflows
+//! webhook payload, rendered from the neutral [`Alert`].
 
 use serde_json::{json, Value};
 
+use super::alert::{clip, Alert, AlertKind, Fact, Line, Link};
 use super::AlertGroup;
-use crate::model::{FindingKind, Severity};
+use crate::model::Severity;
 
 /// Items shown on one card; the rest are counted ("and N more"). Teams
 /// rejects payloads over about 28 KB.
 pub(crate) const MAX_ROWS: usize = 25;
-/// Breaking-change lines quoted on a major release card.
-const MAX_BREAKING: usize = 5;
-/// Longest advisory summary, fact or quoted line, in characters.
-const MAX_TEXT: usize = 300;
-/// Services named in a card title before "and N more".
-const TITLE_SERVICES: usize = 3;
 /// Serialized card size above which rows are cut further (Teams rejects
 /// payloads over about 28 KB, and a rejected card is lost).
 pub(crate) const MAX_CARD_BYTES: usize = 24_000;
 
+/// The Workflows payload for any alert.
+pub fn render(a: &Alert) -> Value {
+    match a.kind {
+        AlertKind::Finding(_) => finding_card(a),
+        AlertKind::FirstRun => first_run_card(a),
+        AlertKind::Digest => digest_card(a),
+    }
+}
+
 /// The Workflows payload for one alert group. Shows up to 25 items; when the
 /// card is still too big, fewer.
 pub fn card(group: &AlertGroup) -> Value {
+    render(&Alert::from_group(group))
+}
+
+/// The "Heimdall has opened his eyes" card: open findings by severity.
+pub fn summary_card(realm: &str, counts: &[(Severity, i64)]) -> Value {
+    render(&Alert::first_run(realm, counts))
+}
+
+fn finding_card(a: &Alert) -> Value {
     let mut card = Value::Null;
     for cap in [MAX_ROWS, 10, 5, 1] {
-        card = card_with(group, cap);
+        card = finding_card_with(a, cap);
         if card.to_string().len() <= MAX_CARD_BYTES {
             break;
         }
@@ -35,88 +46,100 @@ pub fn card(group: &AlertGroup) -> Value {
 }
 
 /// The card showing at most `cap` items.
-fn card_with(group: &AlertGroup, cap: usize) -> Value {
-    let mut body = vec![title_block(&clip(&title(group)), group.worst())];
-    if let Some(a) = &group.advisory {
-        if !a.summary.is_empty() {
-            body.push(text_block(&clip(&a.summary), true));
-        }
+fn finding_card_with(a: &Alert, cap: usize) -> Value {
+    let mut body = vec![title_block(&clip(&a.title), a.worst())];
+    if let Some(s) = &a.summary {
+        body.push(text_block(&clip(s), true));
     }
-    if let Some(s) = scores(group) {
-        body.push(text_block(&s, true));
+    if let Some(s) = &a.scores {
+        body.push(text_block(s, true));
     }
-    for item in group.items.iter().take(cap) {
-        let heading = match &item.service {
-            Some(s) if !s.is_empty() => format!("{} / {s}", item.realm),
-            _ => item.realm.clone(),
-        };
+    for e in a.entries.iter().take(cap) {
         body.push(json!({
             "type": "Container",
             "separator": true,
             "items": [
-                {"type": "TextBlock", "text": clip(&heading), "weight": "Bolder", "wrap": true},
-                {"type": "FactSet", "facts": facts(item.kind, &item.details)},
+                {"type": "TextBlock", "text": clip(&e.heading()), "weight": "Bolder", "wrap": true},
+                {"type": "FactSet", "facts": facts(&e.facts)},
             ],
         }));
     }
-    if group.items.len() > cap {
+    if a.entries.len() > cap {
         body.push(text_block(
-            &format!("and {} more", group.items.len() - cap),
+            &format!("and {} more", a.entries.len() - cap),
             true,
         ));
     }
-    if let Some(r) = &group.release {
-        let lines: Vec<String> = r
-            .breaking
+    for s in &a.sections {
+        let lines: Vec<String> = s
+            .lines
             .iter()
-            .take(MAX_BREAKING)
-            .map(|l| format!("- {}", clip(l)))
+            .map(|l| format!("- {}", clip(&line(l))))
             .collect();
         if !lines.is_empty() {
-            body.push(text_block("Breaking changes:", false));
+            body.push(text_block(&format!("{}:", s.title), false));
             body.push(text_block(&lines.join("\n"), false));
         }
     }
-    message(body, links(group))
+    message(body, links(&a.links))
 }
 
-/// The "Heimdall has opened his eyes" card: open findings by severity.
-pub fn summary_card(realm: &str, counts: &[(Severity, i64)]) -> Value {
-    let order = [
-        Severity::Critical,
-        Severity::High,
-        Severity::Medium,
-        Severity::Low,
-        Severity::Unknown,
-    ];
-    let facts: Vec<Value> = order
-        .iter()
-        .map(|sev| {
-            let n = counts
-                .iter()
-                .find(|(s, _)| s == sev)
-                .map(|(_, n)| *n)
-                .unwrap_or(0);
-            fact(&capitalized(*sev), &n.to_string())
-        })
-        .collect();
+fn first_run_card(a: &Alert) -> Value {
+    let note = |i: usize| a.notes.get(i).map(String::as_str).unwrap_or_default();
     let body = vec![
-        title_block("Heimdall has opened his eyes", Severity::Unknown),
-        text_block(
-            &format!("Realm {realm} is now watched. Open findings by severity:"),
-            false,
-        ),
-        json!({"type": "FactSet", "facts": facts}),
-        text_block(
-            "Critical and high findings follow as separate cards; the rest come in the weekly digest.",
-            true,
-        ),
+        title_block(&a.title, Severity::Unknown),
+        text_block(note(0), false),
+        json!({"type": "FactSet", "facts": facts(&a.facts)}),
+        text_block(note(1), true),
     ];
     message(body, Vec::new())
 }
 
+/// The digest card, each section capped; rows are cut further if the card
+/// is still too big for Teams.
+fn digest_card(a: &Alert) -> Value {
+    let mut card = Value::Null;
+    for cap in [MAX_ROWS, 10, 5] {
+        let mut body = vec![title_block(&a.title, Severity::Unknown)];
+        for s in &a.sections {
+            body.push(json!({"type": "TextBlock", "text": s.title,
+                             "weight": "Bolder", "wrap": true, "spacing": "Medium"}));
+            let mut lines: Vec<String> = s
+                .lines
+                .iter()
+                .take(cap)
+                .map(|r| format!("- {}", line(r)))
+                .collect();
+            if s.lines.len() > cap {
+                lines.push(format!("- and {} more", s.lines.len() - cap));
+            }
+            body.push(text_block(&lines.join("\n"), false));
+        }
+        for n in &a.notes {
+            body.push(text_block(n, true));
+        }
+        card = message(body, Vec::new());
+        if card.to_string().len() <= MAX_CARD_BYTES {
+            break;
+        }
+    }
+    card
+}
+
+/// A section line in Teams Markdown: Heimdall's own link, then the text with
+/// any Markdown link in it broken (`](` becomes `] (`), so upstream text
+/// (release notes) never turns into a clickable link.
+fn line(l: &Line) -> String {
+    let link = l
+        .link
+        .as_ref()
+        .map(|k| format!("[{}]({})", k.title.replace(['[', ']'], ""), k.url))
+        .unwrap_or_default();
+    format!("{link}{}", l.text.replace("](", "] ("))
+}
+
 /// Wrap card body and actions in the Workflows webhook payload.
-pub(crate) fn message(body: Vec<Value>, actions: Vec<Value>) -> Value {
+fn message(body: Vec<Value>, actions: Vec<Value>) -> Value {
     json!({
         "type": "message",
         "attachments": [{
@@ -133,7 +156,7 @@ pub(crate) fn message(body: Vec<Value>, actions: Vec<Value>) -> Value {
     })
 }
 
-pub(crate) fn title_block(text: &str, severity: Severity) -> Value {
+fn title_block(text: &str, severity: Severity) -> Value {
     let color = match severity {
         Severity::Critical | Severity::High => "Attention",
         Severity::Medium => "Warning",
@@ -143,276 +166,23 @@ pub(crate) fn title_block(text: &str, severity: Severity) -> Value {
            "color": color, "wrap": true})
 }
 
-pub(crate) fn text_block(text: &str, subtle: bool) -> Value {
+fn text_block(text: &str, subtle: bool) -> Value {
     json!({"type": "TextBlock", "text": text, "wrap": true, "isSubtle": subtle})
 }
 
-pub(crate) fn link(title: &str, url: &str) -> Value {
-    json!({"type": "Action.OpenUrl", "title": title, "url": url})
-}
-
-fn fact(title: &str, value: &str) -> Value {
-    json!({"title": title, "value": clip(value)})
-}
-
-/// "a, b, c and 7 more".
-fn capped_list(names: &[String]) -> String {
-    let shown = names
+fn facts(facts: &[Fact]) -> Vec<Value> {
+    facts
         .iter()
-        .take(TITLE_SERVICES)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut out = shown.join(", ");
-    if names.len() > TITLE_SERVICES {
-        out.push_str(&format!(" and {} more", names.len() - TITLE_SERVICES));
-    }
-    out
-}
-
-/// Cut long text so one card stays well under the Teams size limit.
-pub(crate) fn clip(s: &str) -> String {
-    if s.chars().count() <= MAX_TEXT {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(MAX_TEXT).collect();
-    format!("{cut}…")
-}
-
-/// "critical", "high", ... as stored.
-pub(crate) fn severity_name(s: Severity) -> &'static str {
-    match s {
-        Severity::Critical => "critical",
-        Severity::High => "high",
-        Severity::Medium => "medium",
-        Severity::Low => "low",
-        Severity::Unknown => "unknown",
-    }
-}
-
-fn capitalized(s: Severity) -> String {
-    let name = severity_name(s);
-    name[..1].to_uppercase() + &name[1..]
-}
-
-/// The package name in a purl: `github.com/gin-gonic/gin` for
-/// `pkg:golang/github.com/gin-gonic/gin@v1.9.0`, `postgresql` for
-/// `pkg:generic/postgresql@17.2`. Falls back to the purl itself.
-pub(crate) fn package_name(purl: &str) -> String {
-    use std::str::FromStr;
-    match packageurl::PackageUrl::from_str(purl) {
-        Ok(p) => match p.namespace() {
-            Some(ns) => format!("{ns}/{}", p.name()),
-            None => p.name().to_string(),
-        },
-        Err(_) => purl.to_string(),
-    }
-}
-
-/// Where to read about an advisory: NVD for a bare CVE id, OSV otherwise
-/// (GHSA, GO, OSV ids and the like).
-pub(crate) fn advisory_url(id: &str) -> String {
-    if id.starts_with("CVE-") {
-        format!("https://nvd.nist.gov/vuln/detail/{id}")
-    } else {
-        format!("https://osv.dev/vulnerability/{id}")
-    }
-}
-
-/// "upgrade to 2.4.1 (latest 3.0.0)", or "upgrade to 2.4.1" when that is the latest.
-fn advice_text(advice: &Value) -> Option<String> {
-    let suggest = advice["suggest"].as_str()?;
-    match advice["latest"].as_str() {
-        Some(latest) if latest != suggest => {
-            Some(format!("upgrade to {suggest} (latest {latest})"))
-        }
-        _ => Some(format!("upgrade to {suggest}")),
-    }
-}
-
-fn str_of<'a>(d: &'a Value, field: &str) -> &'a str {
-    d[field].as_str().unwrap_or_default()
-}
-
-/// Services named by the group's items (or by a release-note CVE's details).
-fn services(group: &AlertGroup) -> Vec<String> {
-    let mut out: BTreeSet<String> = BTreeSet::new();
-    for item in &group.items {
-        match &item.service {
-            Some(s) if !s.is_empty() => {
-                out.insert(s.clone());
-            }
-            _ => {}
-        }
-        // An OathExpired finding names its service in details.
-        if let Some(s) = item.details["service"].as_str() {
-            out.insert(s.to_string());
-        }
-        if let Some(list) = item.details["services"].as_array() {
-            out.extend(list.iter().filter_map(|s| s.as_str().map(str::to_string)));
-        }
-    }
-    out.into_iter().collect()
-}
-
-fn title(g: &AlertGroup) -> String {
-    let first = g.items.first().map(|i| &i.details).unwrap_or(&Value::Null);
-    match g.kind {
-        FindingKind::Vuln => {
-            let affected: BTreeSet<(&str, Option<&str>)> = g
-                .items
-                .iter()
-                .map(|i| (i.realm.as_str(), i.service.as_deref()))
-                .collect();
-            format!(
-                "⚠ {} ({}) affects {} service(s)",
-                g.ref_id,
-                severity_name(g.worst()),
-                affected.len()
-            )
-        }
-        FindingKind::FixAvailable => format!(
-            "Fix available: upgrade {} {} → {} fixes {}",
-            package_name(str_of(first, "purl")),
-            str_of(first, "version"),
-            first["advice"]["suggest"].as_str().unwrap_or("?"),
-            g.ref_id
-        ),
-        FindingKind::MajorRelease => format!(
-            "{} {} released (major)",
-            str_of(first, "target"),
-            str_of(first, "version")
-        ),
-        FindingKind::OathExpired => {
-            format!(
-                "Oath expired: {} on {}",
-                g.ref_id,
-                capped_list(&services(g))
-            )
-        }
-        FindingKind::Eol => format!(
-            "{} {} reaches end of support on {}",
-            str_of(first, "target"),
-            str_of(first, "cycle"),
-            str_of(first, "eol")
-        ),
-        FindingKind::K8sCve => format!("Kubernetes security advisory {}", g.ref_id),
-        FindingKind::ReleaseNoteCve => format!(
-            "{} {} release notes mention {} (affects {})",
-            str_of(first, "target"),
-            str_of(first, "version"),
-            first["id"].as_str().unwrap_or(&g.ref_id),
-            capped_list(&services(g))
-        ),
-    }
-}
-
-/// "OSV 7.5 · NVD 9.8", or the one score known.
-fn scores(g: &AlertGroup) -> Option<String> {
-    let from_advisory = g.advisory.as_ref().map(|a| &a.scores);
-    let from_item = g.items.first().map(|i| &i.details["scores"]);
-    let s = from_advisory
-        .filter(|s| s.as_object().is_some_and(|o| !o.is_empty()))
-        .or(from_item)?;
-    let parts: Vec<String> = [("osv", "OSV"), ("nvd", "NVD")]
-        .iter()
-        .filter_map(|(k, label)| s[*k].as_f64().map(|v| format!("{label} {v}")))
-        .collect();
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// The facts about one finding, by its kind.
-fn facts(kind: FindingKind, d: &Value) -> Vec<Value> {
-    let mut out = Vec::new();
-    match kind {
-        FindingKind::Vuln | FindingKind::FixAvailable => {
-            out.push(fact("Component", str_of(d, "purl")));
-            out.push(fact("Version", str_of(d, "version")));
-            let fix = advice_text(&d["advice"]).unwrap_or_else(|| "no fixed version yet".into());
-            out.push(fact("Fix", &fix));
-            let notes = labels(d);
-            if !notes.is_empty() {
-                out.push(fact("Note", &notes.join(" · ")));
-            }
-        }
-        FindingKind::OathExpired => {
-            out.push(fact("Component", str_of(d, "name_key")));
-            out.push(fact("Oath", str_of(d, "kind")));
-            out.push(fact("Reason", &clip(str_of(d, "reason"))));
-            out.push(fact("Sworn on version", str_of(d, "version_at_creation")));
-        }
-        FindingKind::MajorRelease => {
-            out.push(fact("Running", str_of(d, "current")));
-            out.push(fact("New major", str_of(d, "version")));
-        }
-        FindingKind::Eol => {
-            out.push(fact("Running", str_of(d, "version")));
-            out.push(fact("End of support", str_of(d, "eol")));
-            out.push(fact("Latest in cycle", str_of(d, "latest")));
-        }
-        FindingKind::K8sCve => {
-            out.push(fact("Summary", &clip(str_of(d, "summary"))));
-        }
-        FindingKind::ReleaseNoteCve => {
-            let ids: Vec<&str> = d["ids"]
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            out.push(fact("Mentioned", &ids.join(", ")));
-            out.push(fact("Advisory", str_of(d, "advisory")));
-        }
-    }
-    out
-}
-
-/// "indirect dependency" and "NVD match only, verify" where they apply.
-/// The NVD label is for libraries only: infra (generic, oci) is matched by
-/// CPE on purpose.
-fn labels(d: &Value) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    if d["direct"] == Value::Bool(false) {
-        out.push("indirect dependency");
-    }
-    let purl_type = str_of(d, "purl")
-        .strip_prefix("pkg:")
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or_default();
-    if d["match_source"] == "nvd" && !matches!(purl_type, "generic" | "oci" | "") {
-        out.push("NVD match only, verify");
-    }
-    out
+        .map(|f| json!({"title": f.title, "value": clip(&f.value)}))
+        .collect()
 }
 
 /// Buttons: the advisory, the release notes, the Kubernetes issue.
-fn links(g: &AlertGroup) -> Vec<Value> {
-    let mut out = Vec::new();
-    let first = g.items.first().map(|i| &i.details).unwrap_or(&Value::Null);
-    match g.kind {
-        FindingKind::Vuln
-        | FindingKind::FixAvailable
-        | FindingKind::OathExpired
-        | FindingKind::ReleaseNoteCve
-        | FindingKind::K8sCve => {
-            out.push(link(
-                &format!("Open {}", g.ref_id),
-                &advisory_url(&g.ref_id),
-            ));
-        }
-        FindingKind::MajorRelease | FindingKind::Eol => {}
-    }
-    let notes = g
-        .release
-        .as_ref()
-        .and_then(|r| r.notes_url.clone())
-        .or_else(|| first["notes_url"].as_str().map(str::to_string));
-    if let Some(url) = notes {
-        out.push(link("Release notes", &url));
-    }
-    if g.kind == FindingKind::K8sCve {
-        if let Some(url) = first["url"].as_str().filter(|u| !u.is_empty()) {
-            out.push(link("Tracking issue", url));
-        }
-    }
-    out
+fn links(links: &[Link]) -> Vec<Value> {
+    links
+        .iter()
+        .map(|l| json!({"type": "Action.OpenUrl", "title": l.title, "url": l.url}))
+        .collect()
 }
 
 #[cfg(test)]

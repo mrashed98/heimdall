@@ -69,6 +69,7 @@ config:
 | `NVD_API_KEY` | NVD. |
 | `HEIMDALL_BOOTSTRAP_ADMIN_KEY` | The `bootstrap` admin key. |
 | `TEAMS_WEBHOOK_*` | One per `teams[].webhook_env`. |
+| Channel secrets | One per `*_env` key of a `channels[]` entry (`webhook_env`, `bot_token_env`, `routing_key_env`, `url_env`, `secret_env`, `username_env`, `password_env`, `bearer_token_env`). See [Alert channels](/heimdall/guides/alert-channels/). |
 | `HEIMDALL_API_KEY` | An ingest-scope key, used by the scanner CronJob. |
 
 ## Template notes

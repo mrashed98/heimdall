@@ -405,6 +405,29 @@ These override earlier sections where they conflict. Terms are defined in
 11. **Fix recommendation:** suggest the smallest fixed version in the current
     major line, and show the latest version alongside.
 12. **Digest timezone:** configurable (`digest.timezone`), default UTC.
+13. **Alert channels (2026-11-15, issue #17):** Teams is no longer the only
+    notifier. `channels:` entries have a `type` (teams, slack, discord,
+    telegram, pagerduty, alertmanager, webhook, email), `name`, `realms` and
+    `min_severity`; secrets only through `*_env` keys. `teams:` keeps working
+    as Teams channels; names are unique across both lists.
+    - One neutral alert model (`notify::alert`) rendered by a formatter per
+      type; the Teams card is the Teams formatter, unchanged byte for byte.
+    - The outbox keeps one row per alert and channel (`route` = channel name,
+      `channel_type` added in migration 0007) with the same pacing, retries,
+      Retry-After clamp and exactly-once delivery. Secrets are read at send
+      time and never stored.
+    - A realm is covered if any channel covers it; the digest and first-run
+      summary go to every covering channel with `digest` on (default off for
+      pagerduty and alertmanager). Only links Heimdall makes are clickable;
+      upstream text is rendered as plain text. Webhook signatures cover
+      `"{timestamp}.{body}"` (`X-Heimdall-Timestamp`). SMTP login failures
+      hold the channel instead of discarding mail.
+    - Alertmanager: one alert per finding; Heimdall does not track findings
+      after announcing them, so no resolution is sent: `endsAt` = delivery +
+      `expire_after_hours` (default 24). PagerDuty: `trigger` only,
+      `dedup_key` = alert key.
+    - `heimdall_teams_failures_total` stays Teams-only;
+      `heimdall_notify_failures_total{channel_type}` counts every rejection.
 
 ## 13. Left to the builder
 

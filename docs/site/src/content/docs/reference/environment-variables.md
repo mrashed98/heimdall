@@ -12,6 +12,7 @@ description: Every environment variable Heimdall reads, and which command or com
 | `GITHUB_TOKEN` | no | Raises the GitHub rate limit (5000 requests an hour instead of 60), fetches release notes, and enables the gate's GitHub Advisory Database fallback. |
 | `NVD_API_KEY` | no | NVD API key. The variable name is configurable with `nvd.api_key_env`. |
 | `TEAMS_WEBHOOK_*` | no | One variable per `teams[].webhook_env`, holding the webhook URL. The names are yours to choose. |
+| Channel secrets | no | One variable per `*_env` key of a `channels[]` entry: webhook URLs, the Telegram bot token, the PagerDuty routing key, the webhook HMAC secret, SMTP and Alertmanager credentials. The names are yours to choose. See [Alert channels](/heimdall/guides/alert-channels/). |
 | Registry credentials | no | One variable per `registries[].secret_env`, holding `user:password`. |
 | `RUST_LOG` | no | Log filter. Default `info`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | When set, traces are exported over OTLP/HTTP. Other standard `OTEL_*` variables are read by the exporter. |

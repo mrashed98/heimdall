@@ -50,6 +50,7 @@ export default defineConfig({
           items: [
             { slug: 'guides/ci-gate' },
             { slug: 'guides/oaths' },
+            { slug: 'guides/alert-channels' },
             { slug: 'guides/teams' },
             { slug: 'guides/watching-infrastructure' },
             { slug: 'guides/private-registries' },

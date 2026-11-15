@@ -14,11 +14,9 @@ use chrono_tz::Tz;
 use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
-use super::teams::{
-    clip, message, package_name, severity_name, text_block, title_block, MAX_CARD_BYTES, MAX_ROWS,
-};
-use super::{covers, outbox, realm_has_route, FIX_ALERTS_AT_ONCE};
-use crate::config::{HeimdallConfig, TeamsRoute};
+use super::alert::{self, clip, package_name, severity_name, Alert, Line, Link};
+use super::{channels, outbox, warn_once, FIX_ALERTS_AT_ONCE};
+use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::Severity;
 use crate::version::is_prerelease;
 
@@ -29,7 +27,7 @@ const FIX_LINES: usize = 3;
 /// realm, such as a release or an all-realms oath).
 struct Row {
     realm: Option<String>,
-    text: String,
+    line: Line,
 }
 
 struct Section {
@@ -79,7 +77,13 @@ pub async fn maybe_send(
     now: DateTime<Utc>,
 ) -> anyhow::Result<bool> {
     let d = &cfg.digest;
-    if cfg.teams.is_empty() {
+    // Paging channels (PagerDuty, Alertmanager) skip the digest by default.
+    let chans: Vec<ChannelConfig> = cfg
+        .channels()
+        .into_iter()
+        .filter(ChannelConfig::wants_digest)
+        .collect();
+    if chans.is_empty() {
         return Ok(false);
     }
     let Some((slot_date, _)) = latest_slot(now, d.weekday, d.hour, d.timezone) else {
@@ -106,10 +110,11 @@ pub async fn maybe_send(
 
     let (mut listed, vulns) = vulnerabilities(&mut tx).await?;
     listed.extend(quiet_fixes(&mut tx).await?);
-    // A vuln of a realm no route covers stays pending for a later digest.
+    // A vuln of a realm no digest channel covers stays pending for a later
+    // digest.
     let vuln_ids: Vec<i64> = listed
         .into_iter()
-        .filter(|(_, realm)| realm_has_route(cfg, realm))
+        .filter(|(_, realm)| digest_covers(&chans, realm))
         .map(|(id, _)| id)
         .collect();
     let mut sections = vec![vulns];
@@ -117,9 +122,9 @@ pub async fn maybe_send(
     sections.push(oaths(&mut tx, d.timezone).await?);
     sections.push(declared(&mut tx, d.timezone).await?);
 
-    for route in &cfg.teams {
-        let card = card_for(route, &today, &sections);
-        outbox::push(&mut tx, &format!("digest|{today}"), &card, &route.name).await?;
+    for ch in &chans {
+        let payload = channels::render(ch, &alert_for(ch, &today, &sections));
+        outbox::push(&mut tx, &format!("digest|{today}"), &payload, ch).await?;
     }
     sqlx::query("UPDATE findings SET notified_at = now() WHERE id = ANY($1)")
         .bind(&vuln_ids)
@@ -139,42 +144,34 @@ pub async fn maybe_send(
     Ok(true)
 }
 
-/// The route's card: rows of the realms it covers, each section capped.
-/// Rows are cut further if the card is still too big for Teams.
-fn card_for(route: &TeamsRoute, today: &str, sections: &[Section]) -> Value {
-    let mut card = Value::Null;
-    for cap in [MAX_ROWS, 10, 5] {
-        let mut body = vec![title_block(
-            &format!("Heimdall weekly digest {today}"),
-            Severity::Unknown,
-        )];
-        for s in sections {
-            let rows: Vec<&str> = s
+/// Does a digest channel cover this realm? Warns once per realm when none does.
+fn digest_covers(chans: &[ChannelConfig], realm: &str) -> bool {
+    let covered = chans.iter().any(|c| c.covers(realm));
+    if !covered {
+        warn_once(
+            &format!("digest-realm|{realm}"),
+            &format!("no digest channel covers realm {realm}; its digest findings stay pending"),
+        );
+    }
+    covered
+}
+
+/// The channel's digest: only rows of the realms it covers (rows of no
+/// realm go to every channel). Each formatter caps the sections.
+fn alert_for(ch: &ChannelConfig, today: &str, sections: &[Section]) -> Alert {
+    let sections = sections
+        .iter()
+        .map(|s| alert::Section {
+            title: s.title.to_string(),
+            lines: s
                 .rows
                 .iter()
-                .filter(|r| r.realm.as_deref().is_none_or(|realm| covers(route, realm)))
-                .map(|r| r.text.as_str())
-                .collect();
-            if rows.is_empty() {
-                continue;
-            }
-            body.push(serde_json::json!({"type": "TextBlock", "text": s.title,
-                                          "weight": "Bolder", "wrap": true, "spacing": "Medium"}));
-            let mut lines: Vec<String> = rows.iter().take(cap).map(|r| format!("- {r}")).collect();
-            if rows.len() > cap {
-                lines.push(format!("- and {} more", rows.len() - cap));
-            }
-            body.push(text_block(&lines.join("\n"), false));
-        }
-        if body.len() == 1 {
-            body.push(text_block("Nothing to report this week.", true));
-        }
-        card = message(body, Vec::new());
-        if card.to_string().len() <= MAX_CARD_BYTES {
-            break;
-        }
-    }
-    card
+                .filter(|r| r.realm.as_deref().is_none_or(|realm| ch.covers(realm)))
+                .map(|r| r.line.clone())
+                .collect(),
+        })
+        .collect();
+    Alert::digest(today, sections)
 }
 
 #[derive(FromRow)]
@@ -209,14 +206,14 @@ async fn vulnerabilities(tx: &mut PgConnection) -> anyhow::Result<(Vec<(i64, Str
         .map(|r| {
             let fix = r.fix.map(|f| format!(" (fix: {f})")).unwrap_or_default();
             Row {
-                text: format!(
+                line: Line::plain(format!(
                     "{} ({}): {}/{} {}{fix}",
                     r.ref_id.unwrap_or_default(),
                     severity_name(r.severity),
                     r.realm,
                     r.service.unwrap_or_default(),
                     r.purl.unwrap_or_default()
-                ),
+                )),
                 realm: Some(r.realm),
             }
         })
@@ -281,11 +278,26 @@ async fn releases(
     let mut other = Vec::new();
     let mut no_notes = Vec::new();
     for r in rows.into_iter().filter(|r| !is_prerelease(&r.version)) {
-        let name = match &r.notes_url {
-            Some(url) => format!("[{} {}]({url})", r.target, r.version),
-            None => format!("{} {}", r.target, r.version),
+        // The release name links to its notes (a link Heimdall makes); the
+        // rest of the row is upstream text, rendered plain.
+        let name = format!("{} {}", r.target, r.version);
+        let (link, name) = match &r.notes_url {
+            Some(url) => (
+                Some(Link {
+                    title: name,
+                    url: url.clone(),
+                }),
+                String::new(),
+            ),
+            None => (None, name),
         };
-        let row = |text: String| Row { realm: None, text };
+        let row = |text: String| Row {
+            realm: None,
+            line: Line {
+                link: link.clone(),
+                text,
+            },
+        };
         match r.notes_class.as_deref() {
             Some("security") => security.push(row(name)),
             Some("bugfix") => {
@@ -380,7 +392,7 @@ async fn oaths(tx: &mut PgConnection, tz: Tz) -> anyhow::Result<Section> {
         }
         rows.push(Row {
             realm: o.realm,
-            text,
+            line: Line::plain(text),
         });
     }
     Ok(Section {
@@ -430,11 +442,11 @@ async fn declared(tx: &mut PgConnection, tz: Tz) -> anyhow::Result<Section> {
     let rows = list
         .into_iter()
         .map(|(realm, service, purl, version, since)| Row {
-            text: format!(
+            line: Line::plain(format!(
                 "{service}: {} {version}, declared since {} ({realm})",
                 package_name(&purl),
                 since.with_timezone(&tz).date_naive()
-            ),
+            )),
             realm: Some(realm),
         })
         .collect();

@@ -17,9 +17,11 @@ heimdall serve --check-config heimdall.yaml     # prints "config ok"
 A problem prints `config error: ...` naming the file and the field, and exits
 with a failure code. The check is strict: an unknown key anywhere (a typo such
 as `major_componant`, or a key under the wrong parent) is an error, and so are
-`digest.hour` outside 0 to 23, any `*_minutes` (and `nvd.minutes`) of `0`, and a
-realm in `teams[].realms`, `declared[].realm` or `sight.realm` that is not
-listed in `realms`.
+`digest.hour` outside 0 to 23, any `*_minutes` (and `nvd.minutes`) of `0`, a
+realm in `teams[].realms`, `channels[].realms`, `declared[].realm` or
+`sight.realm` that is not listed in `realms`, a channel name used twice (across
+`teams` and `channels`), and a channel setting that cannot work (an empty
+`*_env`, a URL with credentials in it, an invalid email address).
 
 ## Summary
 
@@ -30,6 +32,7 @@ listed in `realms`.
 | [`admins`](#admins) | list of strings | `[]` |
 | [`own_registries`](#own_registries) | list of strings | `[]` |
 | [`teams`](#teams) | list of routes | `[]` |
+| [`channels`](#channels) | list of channels | `[]` |
 | [`watchers`](#watchers) | object | empty |
 | [`declared`](#declared) | list | `[]` |
 | [`registries`](#registries) | list | `[]` |
@@ -105,6 +108,58 @@ teams:
   - name: default
     webhook_env: TEAMS_WEBHOOK_DEFAULT
     realms: []
+    min_severity: high
+```
+
+`teams` routes are Teams channels; the same route can be written under
+`channels` with `type: teams`.
+
+## `channels`
+
+Type: list of channels. Default: `[]`. See [Alert channels](/heimdall/guides/alert-channels/).
+Every channel has:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `type` | `teams`, `slack`, `discord`, `telegram`, `pagerduty`, `alertmanager`, `webhook`, `email` | The kind of channel. **Required.** |
+| `name` | string | Channel name, unique across `teams` and `channels`. **Required.** |
+| `realms` | list of strings | Realms this channel covers. Empty means all. Default `[]`. |
+| `min_severity` | `critical`, `high`, `medium`, `low`, `unknown` | Lowest severity the channel receives. **Required.** |
+| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty` and `alertmanager`. Also accepted on `teams` routes. |
+
+And, by type (keys of other types are rejected):
+
+| Type | Key | Type | Meaning |
+|---|---|---|---|
+| `teams`, `slack`, `discord` | `webhook_env` | string | Variable holding the webhook URL. **Required.** |
+| `telegram` | `bot_token_env` | string | Variable holding the bot token. **Required.** |
+| `telegram` | `chat_id` | integer or string | Chat id (`-1001234567890`) or `@channelname`. **Required.** |
+| `telegram` | `api_url` | URL | Bot API base. Default `https://api.telegram.org`. |
+| `pagerduty` | `routing_key_env` | string | Variable holding the Events API v2 routing key. **Required.** |
+| `pagerduty` | `url` | URL | Events endpoint. Default `https://events.pagerduty.com/v2/enqueue`. |
+| `alertmanager` | `url` | URL | Base URL; alerts go to `{url}/api/v2/alerts`. No credentials in it. **Required.** |
+| `alertmanager` | `username_env`, `password_env` | string | Variables holding basic auth credentials (both or neither). |
+| `alertmanager` | `bearer_token_env` | string | Variable holding a bearer token (not with basic auth). |
+| `alertmanager` | `expire_after_hours` | integer | `endsAt` = delivery time + this. Default `24`. |
+| `webhook` | `url_env` | string | Variable holding the URL to POST to. **Required.** |
+| `webhook` | `secret_env` | string | Variable holding the HMAC-SHA256 secret for `X-Heimdall-Signature`. |
+| `email` | `host` | string | SMTP server. **Required.** |
+| `email` | `port` | integer | Default 587 (`starttls`), 465 (`tls`) or 25 (`none`). |
+| `email` | `security` | `starttls`, `tls`, `none` | Default `starttls`. |
+| `email` | `username_env`, `password_env` | string | Variables holding the SMTP login (both or neither; not with `security: none`). |
+| `email` | `from` | string | Sender address. **Required.** |
+| `email` | `to` | list of strings | Recipients, at least one. **Required.** |
+
+```yaml
+channels:
+  - type: slack
+    name: dev-chat
+    webhook_env: SLACK_WEBHOOK_DEV
+    realms: [dev]
+    min_severity: high
+  - type: alertmanager
+    name: am
+    url: http://alertmanager.monitoring:9093
     min_severity: high
 ```
 

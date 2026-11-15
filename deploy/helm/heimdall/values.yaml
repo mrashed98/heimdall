@@ -25,6 +25,27 @@ config:
       webhook_env: TEAMS_WEBHOOK_DEFAULT
       realms: []
       min_severity: high
+  # More alert channels (Slack, Discord, Telegram, PagerDuty, Alertmanager,
+  # a generic webhook, email). Each `*_env` key names a key of
+  # existingSecret; never put the secret itself here. For example:
+  # channels:
+  #   - type: slack
+  #     name: dev-chat
+  #     webhook_env: SLACK_WEBHOOK_DEV
+  #     realms: [dev-k3s]
+  #     min_severity: high
+  #   - type: alertmanager
+  #     name: am
+  #     url: http://alertmanager.monitoring:9093
+  #     min_severity: high
+  #   - type: email
+  #     name: security
+  #     host: smtp.example.com
+  #     username_env: SMTP_USERNAME
+  #     password_env: SMTP_PASSWORD
+  #     from: Heimdall <heimdall@example.com>
+  #     to: [security@example.com]
+  #     min_severity: high
   sight:
     realm: dev-k3s
 
@@ -32,6 +53,9 @@ config:
 # environment variable. Expected keys:
 #   DATABASE_URL, GITHUB_TOKEN, NVD_API_KEY, HEIMDALL_BOOTSTRAP_ADMIN_KEY,
 #   one TEAMS_WEBHOOK_* per `teams[].webhook_env`,
+#   one key per `*_env` of each `config.channels[]` entry (webhook URLs, the
+#   Telegram bot token, the PagerDuty routing key, the webhook HMAC secret,
+#   SMTP or Alertmanager credentials),
 #   HEIMDALL_API_KEY (an ingest-scope key, used by the scanner CronJob).
 existingSecret: heimdall-secrets
 
