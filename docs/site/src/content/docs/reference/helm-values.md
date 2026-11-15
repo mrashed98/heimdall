@@ -40,6 +40,7 @@ for a walkthrough.
 | `ingress.enabled` | `false` | Create an Ingress. Heimdall is not meant to be internet-exposed. |
 | `ingress.className` | `""` | Ingress class. |
 | `ingress.annotations` | `{}` | Ingress annotations. |
+| `ingress.hosts` | `[]` | Host names; when non-empty overrides `ingress.host`. |
 | `ingress.host` | `heimdall.internal.example` | Host name. |
 | `ingress.tls` | `[]` | TLS blocks. |
 
@@ -68,6 +69,7 @@ config:
 | `GITHUB_TOKEN` | GitHub releases, release notes and the gate's fallback. |
 | `NVD_API_KEY` | NVD. |
 | `HEIMDALL_BOOTSTRAP_ADMIN_KEY` | The `bootstrap` admin key. |
+| `HEIMDALL_OIDC_CLIENT_SECRET` | OIDC client secret when selected by `config.auth.oidc.client_secret_env`. |
 | `TEAMS_WEBHOOK_*` | One per `teams[].webhook_env`. |
 | Channel secrets | One per `*_env` key of a `channels[]` entry (`webhook_env`, `bot_token_env`, `routing_key_env`, `url_env`, `secret_env`, `username_env`, `password_env`, `bearer_token_env`). See [Alert channels](/heimdall/guides/alert-channels/). |
 | `HEIMDALL_API_KEY` | An ingest-scope key, used by the scanner CronJob. |
@@ -79,3 +81,5 @@ config:
 - The pod config checksum is an annotation, so changing `config` restarts the pod.
 - The scanner reads `HEIMDALL_API_KEY` from the Secret, and reaches Heimdall at
   `http://<release>.<namespace>.svc:<service.port>`.
+
+Set `config.auth` to the authentication block described in the [configuration reference](/heimdall/reference/configuration/). Its secret is read from `existingSecret`, not stored in values. Configure `ingress.hosts`, `ingress.className`, annotations, and TLS when enabling ingress.

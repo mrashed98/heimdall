@@ -3,8 +3,7 @@ title: HTTP API
 description: Every HTTP route, with its required scope, parameters and response shape.
 ---
 
-The CLI is a thin client of this API, and the API is designed for a future web UI
-to use as it is. All bodies are JSON. The server listens on port `8080`.
+The CLI and web UI use this API. All bodies are JSON. The server listens on port `8080`.
 
 ## Authentication
 
@@ -18,7 +17,7 @@ Keys have one of three scopes: `ingest`, `read` and `admin`. **`admin` satisfies
 every scope**; `read` and `ingest` satisfy only themselves. An admin key whose
 name is not in `admins` (and is not `bootstrap`) is refused with `403`.
 
-`/healthz` and `/metrics` need no key.
+`/healthz` and `/metrics` need no key. Browser sessions use the `heimdall_session` cookie; mutations require the `X-CSRF-Token` returned by `GET /auth/me`. Bearer keys do not need CSRF tokens.
 
 ## Errors
 
@@ -39,8 +38,10 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 |---|---|---|
 | `GET /healthz` | none | Health check. |
 | `GET /metrics` | none | Prometheus metrics. |
+| `GET /api/v1/status` | read | Realm-scoped overview and feed status. |
 | `GET /api/v1/realms` | read | Realms with counts. |
 | `GET /api/v1/findings` | read | List findings. |
+| `GET /api/v1/findings/{id}` | read | Finding details. |
 | `GET /api/v1/services` | read | List services. |
 | `GET /api/v1/services/{id}/components` | read | A service's components. |
 | `GET /api/v1/releases` | read | Recorded releases. |
@@ -54,6 +55,11 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `POST /api/v1/oaths` | admin | Create an oath. |
 | `POST /api/v1/oaths/{id}/revoke` | admin | Revoke an oath. |
 | `POST /api/v1/oaths/{id}/extend` | admin | Move an oath's date. |
+| `GET /api/v1/users` | admin | List users. |
+| `PATCH /api/v1/users/{id}` | admin | Enable or disable a user. |
+| `GET /api/v1/users/{id}/grants` | admin | List stored grants. |
+| `PUT /api/v1/users/{id}/grants` | admin | Replace stored grants. |
+| `GET /api/v1/audit` | admin | Query audit events. |
 | `GET /api/v1/keys` | admin | List keys. |
 | `POST /api/v1/keys` | admin | Create a key. |
 | `DELETE /api/v1/keys/{name}` | admin | Revoke a key. |
@@ -88,6 +94,13 @@ Scope `read`. Newest first.
 | `kind` | all | `vuln`, `fixavailable`, `majorrelease`, `oathexpired`, `eol`, `k8scve`, `releasenotecve`. |
 | `min_severity` | `low` | Lowest severity: `critical`, `high`, `medium`, `low`, `unknown`. |
 | `limit` | `500` | 1 to 5000. |
+| `offset` | `0` | Pagination offset. |
+| `realms` | permitted realms | Comma-separated realm selection. |
+| `view_status` | unset | `open`, `snoozed`, `ignored`, or `resolved`. |
+| `severity` | all | Exact severity. |
+| `service`, `search` | unset | Service name, or advisory/alias/package search. |
+| `has_fix` | unset | Boolean fix-availability filter. |
+| `sort`, `order` | `opened_at`, `desc` | Sort by `opened_at`, `severity`, `kind`, `realm`, `service`, or `advisory`; order `asc` or `desc`. |
 
 Each row:
 
@@ -113,7 +126,7 @@ object whose contents depend on `kind`.
 
 ### `GET /api/v1/services`
 
-Scope `read`. Optional `realm`. Returns `{"id", "realm", "name", "components"}`
+Scope `read`. Optional `realm`, `limit`, and `offset`. Returns `{"id", "realm", "name", "components"}`
 rows ordered by realm and name.
 
 ### `GET /api/v1/services/{id}/components`
@@ -135,6 +148,7 @@ Scope `read`. Newest first.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `target` | all | Only this watcher target. |
+| `offset` | `0` | Pagination offset. |
 | `since` | none | A date (`2026-01-31`, midnight UTC) or an RFC 3339 time. |
 | `limit` | `500` | 1 to 5000. |
 
@@ -291,7 +305,7 @@ Each oath:
 
 ### `POST /api/v1/oaths`
 
-Scope `admin`.
+API keys require `admin`; sessions require editor access to the oath realm.
 
 ```json
 {
@@ -325,7 +339,7 @@ such an oath applies only once an advisory with exactly that id is linked.
 
 ### `POST /api/v1/oaths/{id}/revoke`
 
-Scope `admin`. Returns the oath. `404` if there is no such id. Revoking an already
+API keys require `admin`; sessions require editor access to the oath realm. Returns the oath. `404` if there is no such id. Revoking an already
 revoked oath changes nothing.
 
 ### `POST /api/v1/oaths/{id}/extend`
@@ -350,3 +364,18 @@ invalid, reserved (`bootstrap`), already used, or an `admin` name not listed in
 ### `DELETE /api/v1/keys/{name}`
 
 Scope `admin`. Returns `{ "revoked": "<name>" }`, or `404`.
+
+## Browser authentication and access
+
+| Method and path | Purpose |
+|---|---|
+| `GET /auth/login` | Discover enabled local and OIDC methods. |
+| `POST /auth/local` | Sign in with JSON `username` and `password`; sets the session cookie. |
+| `GET /auth/oidc/start` | Begin OIDC authorization. |
+| `GET /auth/oidc/callback` | Finish OIDC authorization. |
+| `GET /auth/me` | Current `kind`, `name`, `grants`, and `csrf_token`. |
+| `POST /auth/logout` | Delete the session (requires CSRF token). |
+
+Users, stored grants, and audit endpoints require global admin. PATCH a user with `{"disabled": true}` or `false`; PUT grants with an array such as `[{"role":"viewer","realm":"payments"}]`. List users supports `limit`, `offset`, `sort`, and `order`. Audit supports `actor`, `action`, `since`, `until`, `limit`, `offset`, `sort`, and `order`. Local users are created with the CLI.
+
+`GET /api/v1/status` accepts comma-separated `realms`. UI projections `/api/v1/ui/services`, `/api/v1/ui/services/{id}/{section}`, `/api/v1/ui/releases`, and `/api/v1/ui/oaths` support `realms`, `limit`, `offset`, `sort`, and `order`; release projections also accept `kind`, and oath projections accept `tab`. These are separate from the existing services and releases response shapes. Lists are filtered to the session's permitted realms.

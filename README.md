@@ -32,6 +32,13 @@ grouped per advisory or release so one CVE is one alert, and sent once. Heimdall
 exposed to the internet**: CI runs on self-hosted runners that reach the
 in-cluster Service.
 
+### Web UI
+
+Open your Heimdall URL and sign in with your configured OIDC provider, a local
+account, or an API key. Choose your realms in the top bar, then explore
+findings, services, releases and oaths. Administrators can configure access as
+described in the [sign-in guide](https://mrashed98.github.io/heimdall/guides/sign-in-access-control/).
+
 ### Alert rules in short
 
 - Immediate: critical and high vulnerabilities (not under an oath), major
