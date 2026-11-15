@@ -130,6 +130,8 @@ type SessionRow = (
     Option<String>,
     String,
     Option<String>,
+    bool,
+    Option<chrono::DateTime<chrono::Utc>>,
 );
 type CacheEntries = HashMap<i64, (Instant, Option<Vec<Grant>>)>;
 pub struct GrantCache {
@@ -276,15 +278,23 @@ impl FromRequestParts<AppState> for Principal {
             })
             .ok_or(ApiError::Unauthorized)?;
         let id = hash(cookie);
-        let row: Option<SessionRow> = sqlx::query_as("UPDATE sessions s SET last_seen_at=now() FROM users u WHERE s.id_hash=$1 AND s.user_id=u.id AND NOT u.disabled AND s.expires_at>now() AND s.last_seen_at > now() - ($2 * interval '1 hour') RETURNING u.id,u.username,s.csrf_token,s.groups,u.email,u.kind,u.preferred_username")
+        let row: Option<SessionRow> = sqlx::query_as("UPDATE sessions s SET last_seen_at=now() FROM users u WHERE s.id_hash=$1 AND s.user_id=u.id AND NOT u.disabled AND s.expires_at>now() AND s.last_seen_at > now() - ($2 * interval '1 hour') RETURNING u.id,u.username,s.csrf_token,s.groups,u.email,u.kind,u.preferred_username,u.email_verified,s.groups_refreshed_at")
             .bind(&id).bind(i64::from(cfg.session.idle_hours)).fetch_optional(&state.pool).await?;
-        let (user_id, name, csrf, groups, email, user_kind, preferred) =
+        let (user_id, name, csrf, groups, email, user_kind, preferred, email_verified, refreshed) =
             row.ok_or(ApiError::Unauthorized)?;
         let admin_allowed = if user_kind == "oidc" {
-            preferred
-                .as_ref()
-                .is_some_and(|n| state.cfg.admins.contains(n))
-                || email.as_ref().is_some_and(|e| state.cfg.admins.contains(e))
+            let oidc = cfg.oidc.as_ref().ok_or(ApiError::Reauth)?;
+            if refreshed.is_none_or(|at| {
+                at < chrono::Utc::now()
+                    - chrono::Duration::minutes(i64::from(oidc.groups_max_age_minutes))
+            }) {
+                return Err(ApiError::Reauth);
+            }
+            (oidc.admin_match_username
+                && preferred
+                    .as_ref()
+                    .is_some_and(|n| state.cfg.admins.contains(n)))
+                || (email_verified && email.as_ref().is_some_and(|e| state.cfg.admins.contains(e)))
         } else {
             state.cfg.admins.contains(&name)
         };
@@ -342,9 +352,42 @@ async fn methods(State(state): State<AppState>) -> Json<serde_json::Value> {
 fn ip(parts: &axum::extract::ConnectInfo<std::net::SocketAddr>) -> String {
     parts.0.ip().to_string()
 }
+pub(crate) fn client_ip(
+    peer: Option<&axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: &HeaderMap,
+    proxies: &[String],
+) -> String {
+    let Some(mut address) = peer.map(|p| p.0.ip()) else {
+        return "unknown".into();
+    };
+    let trusted = |ip: std::net::IpAddr| {
+        proxies
+            .iter()
+            .any(|c| c.parse::<ipnet::IpNet>().is_ok_and(|n| n.contains(&ip)))
+    };
+    if trusted(address) {
+        let values: Vec<_> = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .collect();
+        for value in values.into_iter().rev() {
+            if !trusted(address) {
+                break;
+            }
+            match value.trim().parse() {
+                Ok(ip) => address = ip,
+                Err(_) => break,
+            }
+        }
+    }
+    address.to_string()
+}
 async fn login(
     State(state): State<AppState>,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
     Json(req): Json<Login>,
 ) -> Result<Response, ApiError> {
     let cfg = state
@@ -353,10 +396,10 @@ async fn login(
         .as_ref()
         .filter(|a| a.local.enabled)
         .ok_or(ApiError::Unauthorized)?;
-    let address = peer
-        .as_ref()
-        .map(|v| ip(&v.0))
-        .unwrap_or_else(|| "unknown".into());
+    if req.username.chars().count() > 128 {
+        return Err(ApiError::BadRequest("username_too_long".into()));
+    }
+    let address = client_ip(peer.as_ref().map(|v| &v.0), &headers, &cfg.trusted_proxies);
     // Serialize checks and inserts for both dimensions, preventing concurrent bypasses.
     let mut tx = state.pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -364,10 +407,13 @@ async fn login(
         .execute(&mut *tx)
         .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("login-user:{}", req.username))
+        .bind(format!("login-user-ip:{}:{address}", req.username))
         .execute(&mut *tx)
         .await?;
-    let failures: (i64,i64) = sqlx::query_as("SELECT count(*) FILTER (WHERE username=$1), count(*) FILTER (WHERE ip=$2) FROM login_failures WHERE occurred_at > now()-interval '15 minutes'").bind(&req.username).bind(&address).fetch_one(&mut *tx).await?;
+    let failures: (i64,i64) = sqlx::query_as("SELECT count(*) FILTER (WHERE username=$1 AND ip=$2), count(*) FILTER (WHERE ip=$2) FROM login_failures WHERE occurred_at > now()-interval '15 minutes'").bind(&req.username).bind(&address).fetch_one(&mut *tx).await?;
+    if failures.0 >= 5 || failures.1 >= 20 {
+        return Err(ApiError::Unauthorized);
+    }
     let user: Option<(i64, Option<String>, bool)> = sqlx::query_as(
         "SELECT id,password_hash,disabled FROM users WHERE username=$1 AND kind='local'",
     )
@@ -382,7 +428,7 @@ async fn login(
             .verify_password(req.password.as_bytes(), &p)
             .is_ok()
     });
-    if !valid || user.as_ref().is_none_or(|u| u.2) || failures.0 >= 5 || failures.1 >= 5 {
+    if !valid || user.as_ref().is_none_or(|u| u.2) {
         sqlx::query("INSERT INTO login_failures(username,ip) VALUES ($1,$2)")
             .bind(&req.username)
             .bind(&address)
@@ -501,6 +547,118 @@ mod tests {
         let headers = res.headers().clone();
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+    #[test]
+    fn forwarded_for_requires_trusted_peer_and_walks_right() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.1, 203.0.113.4, 10.0.0.2".parse().unwrap(),
+        );
+        let peer = axum::extract::ConnectInfo("10.0.0.1:1234".parse().unwrap());
+        assert_eq!(client_ip(Some(&peer), &headers, &[]), "10.0.0.1");
+        assert_eq!(
+            client_ip(Some(&peer), &headers, &["10.0.0.0/8".into()]),
+            "203.0.113.4"
+        );
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn oidc_freshness_and_admin_claims(pool: PgPool) {
+        let yaml = "realms: [prod]\nadmins: [alice, alice@example.com]\nauth:\n  public_url: http://localhost\n  oidc: {issuer: 'https://example.com', client_id: x, client_secret_env: SECRET}\n";
+        let mut cfg = crate::config::HeimdallConfig::from_yaml(yaml).unwrap();
+        let id: i64 = sqlx::query_scalar("INSERT INTO users(kind,username,oidc_issuer,oidc_subject,email,preferred_username) VALUES ('oidc','alice','issuer','sub','alice@example.com','alice') RETURNING id").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_grants VALUES ($1,'admin','*')")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,groups_refreshed_at,expires_at) VALUES ($1,$2,'x',now(),now()+interval '1 day')").bind(hash("token")).bind(id).execute(&pool).await.unwrap();
+        let make = |cfg: crate::config::HeimdallConfig| {
+            crate::server::router(AppState::with_grant_cache_ttl(
+                pool.clone(),
+                Arc::new(cfg),
+                reqwest::Client::new(),
+                Duration::ZERO,
+            ))
+        };
+        let (_, _, body) = call(
+            &make(cfg.clone()),
+            "GET",
+            "/auth/me",
+            Some("heimdall_session=token"),
+            None,
+            "",
+        )
+        .await;
+        assert!(!body.contains("admin"));
+        cfg.auth
+            .as_mut()
+            .unwrap()
+            .oidc
+            .as_mut()
+            .unwrap()
+            .admin_match_username = true;
+        let (_, _, body) = call(
+            &make(cfg.clone()),
+            "GET",
+            "/auth/me",
+            Some("heimdall_session=token"),
+            None,
+            "",
+        )
+        .await;
+        assert!(body.contains("admin"));
+        cfg.auth
+            .as_mut()
+            .unwrap()
+            .oidc
+            .as_mut()
+            .unwrap()
+            .admin_match_username = false;
+        sqlx::query("UPDATE users SET email_verified=true WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, _, body) = call(
+            &make(cfg.clone()),
+            "GET",
+            "/auth/me",
+            Some("heimdall_session=token"),
+            None,
+            "",
+        )
+        .await;
+        assert!(body.contains("admin"));
+        sqlx::query("UPDATE sessions SET groups_refreshed_at=now()-interval '61 minutes'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, _, body) = call(
+            &make(cfg),
+            "GET",
+            "/auth/me",
+            Some("heimdall_session=token"),
+            None,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body, r#"{"error":"reauth"}"#);
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn long_username_is_rejected_without_audit(pool: PgPool) {
+        let app = app(pool.clone());
+        let body = serde_json::json!({"username":"a".repeat(129),"password":"x"}).to_string();
+        assert_eq!(
+            call(&app, "POST", "/auth/local", None, None, &body).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
     #[test]
     fn effective_config_grants_respect_groups_roles_and_admin_list() {
@@ -679,7 +837,28 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(n, 6);
+        assert_eq!(n, 5);
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM login_failures")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 5);
+        create_user(&pool, &[], "bob", "correct", None)
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/auth/local")
+            .header("content-type", "application/json")
+            .extension(axum::extract::ConnectInfo(
+                "192.0.2.9:1234".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::from(r#"{"username":"bob","password":"correct"}"#))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
     }
     #[sqlx::test(migrations = "./migrations")]
     async fn sessions_follow_user_changes_and_retention(pool: PgPool) {
@@ -801,7 +980,7 @@ mod tests {
         create_user(&pool, &[], "alice", "correct", None)
             .await
             .unwrap();
-        for i in 0..5 {
+        for i in 0..20 {
             sqlx::query("INSERT INTO login_failures(username,ip) VALUES ($1,'192.0.2.1')")
                 .bind(format!("unknown{i}"))
                 .execute(&pool)

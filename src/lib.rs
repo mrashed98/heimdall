@@ -42,6 +42,8 @@ pub struct AppState {
     /// it works. Shared by every clone of the state.
     pub uploads: Arc<tokio::sync::Semaphore>,
     pub grants_cache: Arc<local_auth::GrantCache>,
+    pub oidc_rate:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>>,
     pub oidc_metadata: Arc<tokio::sync::RwLock<Option<openidconnect::core::CoreProviderMetadata>>>,
 }
 
@@ -66,6 +68,7 @@ impl AppState {
             http,
             uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
             grants_cache: Arc::new(local_auth::GrantCache::new(ttl)),
+            oidc_rate: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             oidc_metadata: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }

@@ -206,6 +206,10 @@ async fn administration_validation_sessions_and_audit(pool: PgPool) {
             "invalid_realm",
         ),
         (json!([{"role":"admin","realm":"*"}]), "admin_not_allowed"),
+        (
+            json!([{"role":"admin","realm":"prod"}]),
+            "admin_requires_all_realms",
+        ),
     ] {
         let (status, result) = call(&app, "PUT", &grants, BOOT, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

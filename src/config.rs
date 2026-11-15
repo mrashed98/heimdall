@@ -90,7 +90,24 @@ impl HeimdallConfig {
             if auth.session.idle_hours == 0 || auth.session.absolute_days == 0 {
                 bail!("auth.session timeouts must be positive");
             }
+            for cidr in &auth.trusted_proxies {
+                cidr.parse::<ipnet::IpNet>()
+                    .context("auth.trusted_proxies")?;
+            }
             if let Some(oidc) = &auth.oidc {
+                if oidc.groups_max_age_minutes < 5 {
+                    bail!("auth.oidc.groups_max_age_minutes must be at least 5");
+                }
+                for (role, realms) in oidc
+                    .role_mappings
+                    .iter()
+                    .map(|m| (m.role, &m.realms))
+                    .chain(oidc.default_role.iter().map(|g| (g.role, &g.realms)))
+                {
+                    if role == Role::Admin && realms.as_slice() != ["*"] {
+                        bail!("admin grants require all realms");
+                    }
+                }
                 if oidc.client_id.is_empty()
                     || oidc.client_secret_env.is_empty()
                     || url::Url::parse(&oidc.issuer).is_err()
@@ -176,6 +193,8 @@ impl HeimdallConfig {
 pub struct AuthConfig {
     pub public_url: String,
     #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    #[serde(default)]
     pub session: SessionConfig,
     #[serde(default)]
     pub local: LocalConfig,
@@ -216,12 +235,31 @@ pub struct OidcConfig {
     pub client_id: String,
     pub client_secret_env: String,
     #[serde(default)]
-    pub scopes: Vec<String>,
+    pub scopes: Option<Vec<String>>,
+    #[serde(default = "groups_max_age_minutes")]
+    pub groups_max_age_minutes: u32,
+    #[serde(default)]
+    pub admin_match_username: bool,
     #[serde(default)]
     pub groups_claim: Option<String>,
     #[serde(default)]
     pub role_mappings: Vec<RoleMapping>,
     pub default_role: Option<GrantConfig>,
+}
+fn groups_max_age_minutes() -> u32 {
+    60
+}
+
+impl OidcConfig {
+    pub fn effective_scopes(&self) -> Vec<String> {
+        self.scopes.clone().unwrap_or_else(|| {
+            let mut scopes = vec!["openid".into(), "profile".into(), "email".into()];
+            if self.groups_claim.is_some() {
+                scopes.push("groups".into());
+            }
+            scopes
+        })
+    }
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -816,6 +854,39 @@ fn default_outbox_days() -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn oidc_security_config_defaults_and_validation() {
+        let base = "realms: [prod]\nauth:\n  public_url: http://localhost\n  oidc:\n    issuer: https://example.com\n    client_id: client\n    client_secret_env: SECRET\n";
+        let cfg = HeimdallConfig::from_yaml(base).unwrap();
+        let oidc = cfg.auth.unwrap().oidc.unwrap();
+        assert_eq!(oidc.effective_scopes(), ["openid", "profile", "email"]);
+        assert_eq!(oidc.groups_max_age_minutes, 60);
+        assert!(!oidc.admin_match_username);
+        let cfg = HeimdallConfig::from_yaml(&format!("{base}    groups_claim: groups\n")).unwrap();
+        assert_eq!(
+            cfg.auth.unwrap().oidc.unwrap().effective_scopes(),
+            ["openid", "profile", "email", "groups"]
+        );
+        let cfg = HeimdallConfig::from_yaml(&format!(
+            "{base}    groups_claim: groups\n    scopes: [custom]\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.auth.unwrap().oidc.unwrap().effective_scopes(),
+            ["custom"]
+        );
+        assert!(
+            HeimdallConfig::from_yaml(&format!("{base}    groups_max_age_minutes: 4\n")).is_err()
+        );
+        assert!(HeimdallConfig::from_yaml(&format!(
+            "{base}    role_mappings: [{{group: x, role: admin, realms: [prod]}}]\n"
+        ))
+        .is_err());
+        assert!(HeimdallConfig::from_yaml(
+            "realms: [prod]\nauth: {public_url: http://localhost, trusted_proxies: [bad]}"
+        )
+        .is_err());
+    }
     #[test]
     fn auth_config_validates() {
         let yaml = "realms: [prod]\nauth:\n  public_url: https://example.com\n  local: {enabled: true}\n  oidc:\n    issuer: https://example.com/issuer\n    client_id: heimdall\n    client_secret_env: SECRET\n    scopes: [openid, profile]\n    groups_claim: groups\n    role_mappings:\n      - {group: team, role: editor, realms: [prod]}\n    default_role: {role: viewer, realms: ['*']}\n";

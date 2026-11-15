@@ -1,7 +1,7 @@
 //! OpenID Connect authorization-code login.
 use crate::{
     error::ApiError,
-    local_auth::{hash, random_token},
+    local_auth::{client_ip, hash, random_token},
     AppState,
 };
 use axum::{
@@ -48,7 +48,36 @@ async fn metadata(state: &AppState, refresh: bool) -> anyhow::Result<CoreProvide
     Ok(m)
 }
 
-async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {
+fn rate_limit(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<&axum::extract::ConnectInfo<std::net::SocketAddr>>,
+) -> Result<String, ApiError> {
+    let proxies = state
+        .cfg
+        .auth
+        .as_ref()
+        .map(|a| a.trusted_proxies.as_slice())
+        .unwrap_or(&[]);
+    let ip = client_ip(peer, headers, proxies);
+    let mut entries = state.oidc_rate.lock().unwrap();
+    entries.retain(|_, times| {
+        times.retain(|t| t.elapsed() < std::time::Duration::from_secs(60));
+        !times.is_empty()
+    });
+    let times = entries.entry(ip.clone()).or_default();
+    if times.len() >= 30 {
+        return Err(ApiError::TooManyRequests);
+    }
+    times.push(std::time::Instant::now());
+    Ok(ip)
+}
+async fn start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Result<Response, ApiError> {
+    rate_limit(&state, &headers, peer.as_ref().map(|v| &v.0))?;
     let auth = state.cfg.auth.as_ref().ok_or(ApiError::Unauthorized)?;
     let cfg = auth.oidc.as_ref().ok_or(ApiError::Unauthorized)?;
     let m = metadata(&state, false).await.map_err(ApiError::Internal)?;
@@ -61,6 +90,7 @@ async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {
             .map_err(|e| ApiError::Internal(e.into()))?,
         );
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let client = client.disable_openid_scope();
     let mut request = client
         .authorize_url(
             AuthenticationFlow::<CoreResponseType>::AuthorizationCode,
@@ -68,21 +98,31 @@ async fn start(State(state): State<AppState>) -> Result<Response, ApiError> {
             Nonce::new_random,
         )
         .set_pkce_challenge(challenge);
-    for scope in &cfg.scopes {
-        if scope != "openid" {
-            request = request.add_scope(Scope::new(scope.clone()));
-        }
+    for scope in &cfg.effective_scopes() {
+        request = request.add_scope(Scope::new(scope.clone()));
     }
     let (url, csrf, nonce) = request.url();
-    sqlx::query("DELETE FROM oidc_pending WHERE expires_at <= now()")
-        .execute(&state.pool)
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('oidc-pending', 0))")
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM oidc_pending WHERE expires_at <= now()")
+        .execute(&mut *tx)
+        .await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM oidc_pending")
+        .fetch_one(&mut *tx)
+        .await?;
+    if count >= 1000 {
+        tx.commit().await?;
+        return Err(ApiError::TooManyRequests);
+    }
     sqlx::query("INSERT INTO oidc_pending(state_hash,nonce,verifier) VALUES ($1,$2,$3)")
         .bind(hash(csrf.secret()))
         .bind(nonce.secret())
         .bind(verifier.secret())
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     let secure = if auth.public_url.starts_with("http://localhost") {
         ""
     } else {
@@ -107,20 +147,51 @@ async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
-    Query(query): Query<Callback>,
+    query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, ApiError> {
-    let ip = peer.as_ref().map(|v| v.0 .0.ip().to_string());
-    let result = finish(&state, &headers, query, ip.as_deref()).await;
+    let ip = rate_limit(&state, &headers, peer.as_ref().map(|v| &v.0));
+    let result = match ip.as_ref() {
+        Ok(ip) => match query {
+            Ok(Query(query)) => finish(&state, &headers, query, Some(ip)).await,
+            Err(_) => Err(anyhow::anyhow!("invalid callback query")),
+        },
+        Err(_) => {
+            let mut response = ApiError::TooManyRequests.into_response();
+            clear_state_cookie(&mut response, &state);
+            return Ok(response);
+        }
+    };
     if let Err(ref e) = result {
         let _ = sqlx::query(
             "INSERT INTO audit_log(action,method,detail,ip) VALUES ('login_failure','oidc',$1,$2)",
         )
         .bind(serde_json::json!({"reason": e.to_string()}))
-        .bind(&ip)
+        .bind(ip.ok())
         .execute(&state.pool)
         .await;
     }
-    result.map_err(|_| ApiError::Unauthorized)
+    let mut response = result.unwrap_or_else(|_| ApiError::Unauthorized.into_response());
+    clear_state_cookie(&mut response, &state);
+    Ok(response)
+}
+fn clear_state_cookie(response: &mut Response, state: &AppState) {
+    let secure = if state
+        .cfg
+        .auth
+        .as_ref()
+        .is_some_and(|a| a.public_url.starts_with("http://localhost"))
+    {
+        ""
+    } else {
+        "; Secure"
+    };
+    let value = format!(
+        "heimdall_oidc_state=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/auth/oidc/callback{secure}"
+    );
+    response.headers_mut().append(
+        "set-cookie",
+        HeaderValue::from_str(&value).expect("valid cookie"),
+    );
 }
 
 async fn finish(
@@ -214,6 +285,7 @@ async fn finish(
         .ok_or_else(|| anyhow::anyhow!("missing subject"))?;
     let email = claims["email"].as_str();
     let preferred = claims["preferred_username"].as_str();
+    let email_verified = claims["email_verified"].as_bool().unwrap_or(false);
     let name = preferred.or(email).unwrap_or(sub);
     let display = claims["name"].as_str().or(preferred);
     let groups: Vec<String> = claims
@@ -226,12 +298,12 @@ async fn finish(
         })
         .unwrap_or_default();
     let mut tx = state.pool.begin().await?;
-    let user: (i64,bool) = sqlx::query_as("INSERT INTO users(kind,username,oidc_issuer,oidc_subject,email,display_name,preferred_username,last_login_at) VALUES ('oidc',$1,$2,$3,$4,$5,$6,now()) ON CONFLICT (oidc_issuer,oidc_subject) WHERE kind='oidc' DO UPDATE SET username=excluded.username,email=excluded.email,display_name=excluded.display_name,preferred_username=excluded.preferred_username,last_login_at=now() RETURNING id,disabled")
-        .bind(name).bind(&cfg.issuer).bind(sub).bind(email).bind(display).bind(preferred).fetch_one(&mut *tx).await?;
+    let user: (i64,bool) = sqlx::query_as("INSERT INTO users(kind,username,oidc_issuer,oidc_subject,email,display_name,preferred_username,email_verified,last_login_at) VALUES ('oidc',$1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT (oidc_issuer,oidc_subject) WHERE kind='oidc' DO UPDATE SET username=excluded.username,email=excluded.email,display_name=excluded.display_name,preferred_username=excluded.preferred_username,email_verified=excluded.email_verified,last_login_at=now() RETURNING id,disabled")
+        .bind(name).bind(&cfg.issuer).bind(sub).bind(email).bind(display).bind(preferred).bind(email_verified).fetch_one(&mut *tx).await?;
     anyhow::ensure!(!user.1, "user disabled");
     let session = random_token();
     let csrf = random_token();
-    sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,groups,expires_at) VALUES ($1,$2,$3,$4,now()+($5 * interval '1 day'))").bind(hash(&session)).bind(user.0).bind(csrf).bind(groups).bind(i64::from(auth.session.absolute_days)).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,groups,groups_refreshed_at,expires_at) VALUES ($1,$2,$3,$4,now(),now()+($5 * interval '1 day'))").bind(hash(&session)).bind(user.0).bind(csrf).bind(groups).bind(i64::from(auth.session.absolute_days)).execute(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO audit_log(action,method,username,ip) VALUES ('login_success','oidc',$1,$2)",
     )

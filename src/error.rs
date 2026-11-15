@@ -9,6 +9,8 @@ use axum::Json;
 pub enum ApiError {
     BadRequest(String),
     Unauthorized,
+    Reauth,
+    TooManyRequests,
     Forbidden,
     NoAccess,
     NotFound,
@@ -21,6 +23,11 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            ApiError::Reauth => (StatusCode::UNAUTHORIZED, "reauth".to_string()),
+            ApiError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_requests".to_string(),
+            ),
             ApiError::NoAccess => (StatusCode::FORBIDDEN, "no_access".to_string()),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),

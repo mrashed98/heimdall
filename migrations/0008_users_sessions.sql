@@ -5,6 +5,7 @@ CREATE TABLE users (
     oidc_issuer TEXT,
     oidc_subject TEXT,
     email TEXT,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
     display_name TEXT,
     preferred_username TEXT,
     password_hash TEXT,
@@ -26,6 +27,7 @@ CREATE TABLE sessions (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     csrf_token TEXT NOT NULL,
     groups TEXT[] NOT NULL DEFAULT '{}',
+    groups_refreshed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL

@@ -175,22 +175,31 @@ async fn replace_grants(
 ) -> Result<Json<Vec<Grant>>, ApiError> {
     require_admin(&p)?;
     let mut tx = s.pool.begin().await?;
-    let identity: Option<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT username, email, kind, preferred_username FROM users WHERE id=$1 FOR UPDATE",
+    type Identity = (String, Option<String>, String, Option<String>, bool);
+    let identity: Option<Identity> = sqlx::query_as(
+        "SELECT username, email, kind, preferred_username, email_verified FROM users WHERE id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let (name, email, kind, preferred) = identity.ok_or(ApiError::NotFound)?;
+    let (name, email, kind, preferred, email_verified) = identity.ok_or(ApiError::NotFound)?;
     let admin_allowed = if kind == "oidc" {
-        preferred.as_ref().is_some_and(|n| s.cfg.admins.contains(n))
-            || email.as_ref().is_some_and(|e| s.cfg.admins.contains(e))
+        (s.cfg
+            .auth
+            .as_ref()
+            .and_then(|a| a.oidc.as_ref())
+            .is_some_and(|o| o.admin_match_username)
+            && preferred.as_ref().is_some_and(|n| s.cfg.admins.contains(n)))
+            || (email_verified && email.as_ref().is_some_and(|e| s.cfg.admins.contains(e)))
     } else {
         s.cfg.admins.contains(&name)
     };
     for g in &new {
         if !["viewer", "editor", "admin"].contains(&g.role.as_str()) {
             return Err(ApiError::BadRequest("invalid_role".into()));
+        }
+        if g.role == "admin" && g.realm != "*" {
+            return Err(ApiError::BadRequest("admin_requires_all_realms".into()));
         }
         if g.realm != "*" && !s.cfg.realms.contains(&g.realm) {
             return Err(ApiError::BadRequest("invalid_realm".into()));
