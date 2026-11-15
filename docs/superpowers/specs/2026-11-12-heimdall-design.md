@@ -417,7 +417,11 @@ These override earlier sections where they conflict. Terms are defined in
       Retry-After clamp and exactly-once delivery. Secrets are read at send
       time and never stored.
     - A realm is covered if any channel covers it; the digest and first-run
-      summary go to every covering channel.
+      summary go to every covering channel with `digest` on (default off for
+      pagerduty and alertmanager). Only links Heimdall makes are clickable;
+      upstream text is rendered as plain text. Webhook signatures cover
+      `"{timestamp}.{body}"` (`X-Heimdall-Timestamp`). SMTP login failures
+      hold the channel instead of discarding mail.
     - Alertmanager: one alert per finding; Heimdall does not track findings
       after announcing them, so no resolution is sent: `endsAt` = delivery +
       `expire_after_hours` (default 24). PagerDuty: `trigger` only,

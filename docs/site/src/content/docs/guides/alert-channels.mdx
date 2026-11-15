@@ -53,7 +53,16 @@ it sends, never stores them in the database, and keeps them out of its logs.
   an uncovered realm stay pending (one warning in the logs) and go out once a
   channel covers the realm.
 - **The weekly digest and the first-run summary** go to every channel covering
-  the realm, whatever its `min_severity`.
+  the realm whose `digest` is on, whatever its `min_severity`. `digest`
+  defaults to `true`, except for the paging types (`pagerduty`,
+  `alertmanager`), where a weekly summary would page someone; set
+  `digest: true` there to opt in, or `digest: false` on any channel to opt out.
+  Medium and low findings of a realm that no digest channel covers stay
+  pending until one does.
+- **Links:** only links Heimdall makes itself (the advisory, the release notes)
+  are clickable. Text that comes from upstream, such as release-note lines in
+  the digest, is always shown as escaped plain text, so a Markdown link in it
+  never becomes a link in any channel.
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
@@ -63,7 +72,7 @@ it sends, never stores them in the database, and keeps them out of its logs.
   Renaming a channel to another `type` leaves messages queued for the old type
   where they are, rather than sending them in the wrong format.
 
-Every type accepts `name`, `type`, `realms` and `min_severity`. Unknown keys are
+Every type accepts `name`, `type`, `realms`, `min_severity` and `digest`. Unknown keys are
 an error, so a key of another type (say `chat_id` on Slack) is caught at
 startup.
 
@@ -132,7 +141,7 @@ silence on its labels:
 
 | Label | Value |
 |---|---|
-| `alertname` | `Heimdall` + kind: `HeimdallVuln`, `HeimdallFixAvailable`, `HeimdallMajorRelease`, `HeimdallOathExpired`, `HeimdallEol`, `HeimdallK8sCve`, `HeimdallReleaseNoteCve` (and `HeimdallFirstRun`, `HeimdallDigest`) |
+| `alertname` | `Heimdall` + kind: `HeimdallVuln`, `HeimdallFixAvailable`, `HeimdallMajorRelease`, `HeimdallOathExpired`, `HeimdallEol`, `HeimdallK8sCve`, `HeimdallReleaseNoteCve` (and `HeimdallFirstRun`, `HeimdallDigest` when the channel sets `digest: true`) |
 | `realm` | The finding's realm |
 | `service` | The service, when the finding has one |
 | `kind` | `vuln`, `fixavailable`, `majorrelease`, ... |
@@ -190,15 +199,28 @@ The body is the neutral alert model as JSON:
 }
 ```
 
-`kind` is a finding kind, `firstrun` or `digest`. With `secret_env`, every
-request carries `X-Heimdall-Signature: sha256=<hex>`: the HMAC-SHA256 of the
-raw request body keyed with the secret. Verify it over the bytes you received,
-before parsing, with a constant-time comparison:
+`kind` is a finding kind, `firstrun` or `digest`. Each section line is
+`{"link": {"title", "url"} | null, "text": "..."}`: `link` is a link Heimdall
+made (a release's notes), `text` may come from upstream and should be shown as
+plain text.
+
+Every request carries `X-Heimdall-Timestamp` (Unix seconds, the send time).
+With `secret_env`, it also carries `X-Heimdall-Signature: sha256=<hex>`: the
+HMAC-SHA256, keyed with the secret, of the timestamp, a dot and the raw request
+body (`"{timestamp}.{body}"`). Verify it over the bytes you received, before
+parsing, with a constant-time comparison, and reject requests whose timestamp
+is more than 5 minutes off, so a captured request cannot be replayed later:
 
 ```python
-import hashlib, hmac
-expected = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
-ok = hmac.compare_digest(expected, request.headers["X-Heimdall-Signature"])
+import hashlib, hmac, time
+
+def verify(secret: bytes, headers, body: bytes, tolerance: int = 300) -> bool:
+    ts = headers.get("X-Heimdall-Timestamp", "")
+    if not ts.isdigit() or abs(time.time() - int(ts)) > tolerance:
+        return False
+    signed = ts.encode() + b"." + body
+    expected = "sha256=" + hmac.new(secret, signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, headers.get("X-Heimdall-Signature", ""))
 ```
 
 A message may be delivered again only if your endpoint answered with an error;
@@ -213,7 +235,7 @@ use `alert.key` to drop duplicates.
 | `host` | SMTP server. |
 | `port` | Default by `security`: 587, 465 or 25. |
 | `security` | `starttls` (default; STARTTLS is required, never opportunistic), `tls` (implicit TLS) or `none` (only for a relay on a trusted network). |
-| `username_env`, `password_env` | Variables holding the SMTP login (set both or neither). |
+| `username_env`, `password_env` | Variables holding the SMTP login (set both or neither). Not allowed with `security: none`, which would send the password in clear text. |
 | `from` | Sender, `Name <address>` or `address`. |
 | `to` | Recipients (at least one). |
 
@@ -230,7 +252,10 @@ use `alert.key` to drop duplicates.
 ```
 
 A temporary failure (a 4xx reply, a network or TLS error) is retried; a
-permanent one (a 5xx reply such as an unknown recipient) is not.
+permanent one (a 5xx reply such as an unknown recipient) is not. A failed login
+(530, 534, 535) is a problem with the channel, not the message: the whole
+channel's queue waits and retries with the usual backoff, so a wrong password
+delays mail but never discards it. Fix the credentials and the backlog goes out.
 
 ## Troubleshooting
 
@@ -238,3 +263,23 @@ Watch `heimdall_outbox_pending` (messages waiting) and
 `heimdall_notify_failures_total{channel_type}` (messages a channel rejected).
 The logs name the channel and its type for every failed send, and warn once
 when a channel's variable is not set. See [Metrics](/heimdall/reference/metrics/).
+
+### Orphaned messages
+
+Queued messages belong to a channel name and type. If you remove a channel,
+rename it, or change its `type`, its unsent messages are never sent, and
+Heimdall logs one warning per name and type naming them ("outbox has unsent
+… alerts for channel `X`, which is no longer configured"). Either restore the
+channel, or clear them in the database:
+
+```sql
+-- See what is stuck.
+SELECT route, channel_type, count(*) FROM outbox
+WHERE sent_at IS NULL GROUP BY 1, 2;
+
+-- Drop the unsent messages of a channel that is gone.
+DELETE FROM outbox
+WHERE sent_at IS NULL AND route = 'old-name' AND channel_type = 'slack';
+```
+
+Sent rows are removed after `retention.outbox_days` as usual.

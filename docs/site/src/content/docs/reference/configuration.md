@@ -125,6 +125,7 @@ Every channel has:
 | `name` | string | Channel name, unique across `teams` and `channels`. **Required.** |
 | `realms` | list of strings | Realms this channel covers. Empty means all. Default `[]`. |
 | `min_severity` | `critical`, `high`, `medium`, `low`, `unknown` | Lowest severity the channel receives. **Required.** |
+| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty` and `alertmanager`. Also accepted on `teams` routes. |
 
 And, by type (keys of other types are rejected):
 
@@ -145,7 +146,7 @@ And, by type (keys of other types are rejected):
 | `email` | `host` | string | SMTP server. **Required.** |
 | `email` | `port` | integer | Default 587 (`starttls`), 465 (`tls`) or 25 (`none`). |
 | `email` | `security` | `starttls`, `tls`, `none` | Default `starttls`. |
-| `email` | `username_env`, `password_env` | string | Variables holding the SMTP login (both or neither). |
+| `email` | `username_env`, `password_env` | string | Variables holding the SMTP login (both or neither; not with `security: none`). |
 | `email` | `from` | string | Sender address. **Required.** |
 | `email` | `to` | list of strings | Recipients, at least one. **Required.** |
 

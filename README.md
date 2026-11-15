@@ -76,7 +76,8 @@ channels:
 Also `discord` (`webhook_env`) and `telegram` (`bot_token_env`, `chat_id`).
 Each channel gets its own queued copy with the same pacing, retries and
 exactly-once delivery; the weekly digest goes to every channel covering the
-realm. Alertmanager alerts are sent once with `endsAt` = delivery +
+realm (paging channels, PagerDuty and Alertmanager, only with `digest: true`).
+Alertmanager alerts are sent once with `endsAt` = delivery +
 `expire_after_hours` (default 24). Details:
 [alert channels](https://mrashed98.github.io/heimdall/guides/alert-channels/).
 
