@@ -118,7 +118,6 @@ pub struct Principal {
     pub grants: Vec<Grant>,
     pub groups: Vec<String>,
     pub csrf_token: Option<String>,
-    pub(crate) session_hash: Option<Vec<u8>>,
     pub scope: Option<Scope>,
     pub admin_allowed: bool,
 }
@@ -261,7 +260,6 @@ impl FromRequestParts<AppState> for Principal {
                 },
                 groups: vec![],
                 csrf_token: None,
-                session_hash: None,
                 scope: Some(key.scope),
                 admin_allowed: true,
             });
@@ -321,7 +319,6 @@ impl FromRequestParts<AppState> for Principal {
             grants,
             groups,
             csrf_token: Some(csrf),
-            session_hash: Some(id),
             scope: None,
             admin_allowed,
         };
@@ -376,7 +373,22 @@ pub(crate) fn client_ip(
             if !trusted(address) {
                 break;
             }
-            match value.trim().parse() {
+            let value = value.trim();
+            let parsed = value
+                .parse::<std::net::IpAddr>()
+                .or_else(|_| {
+                    value
+                        .parse::<std::net::SocketAddr>()
+                        .map(|socket| socket.ip())
+                })
+                .or_else(|_| {
+                    value
+                        .strip_prefix('[')
+                        .and_then(|v| v.strip_suffix(']'))
+                        .unwrap_or("")
+                        .parse()
+                });
+            match parsed {
                 Ok(ip) => address = ip,
                 Err(_) => break,
             }
@@ -474,11 +486,37 @@ async fn me(p: Principal) -> Json<serde_json::Value> {
 }
 async fn logout(
     State(state): State<AppState>,
-    p: Principal,
     peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    request: axum::extract::Request,
 ) -> Result<Response, ApiError> {
-    if let Some(id) = p.session_hash {
+    let (mut parts, _) = request.into_parts();
+    if parts.headers.contains_key("authorization") {
+        // Preserve bearer-key authentication and its existing logout response.
+        Principal::from_request_parts(&mut parts, &state).await?;
+    } else {
+        let cookie = parts
+            .headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.split(';')
+                    .map(str::trim)
+                    .find_map(|v| v.strip_prefix("heimdall_session="))
+            })
+            .ok_or(ApiError::Unauthorized)?;
+        let id = hash(cookie);
         let mut tx = state.pool.begin().await?;
+        let row: Option<(String, String)> = sqlx::query_as("SELECT u.username,s.csrf_token FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=$1 FOR UPDATE OF s")
+            .bind(&id).fetch_optional(&mut *tx).await?;
+        let (name, csrf) = row.ok_or(ApiError::Unauthorized)?;
+        let provided = parts
+            .headers
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !bool::from(csrf.as_bytes().ct_eq(provided.as_bytes())) {
+            return Err(ApiError::Forbidden);
+        }
         sqlx::query("DELETE FROM sessions WHERE id_hash=$1")
             .bind(id)
             .execute(&mut *tx)
@@ -486,7 +524,7 @@ async fn logout(
         sqlx::query(
             "INSERT INTO audit_log(action,method,username,ip) VALUES ('logout','local',$1,$2)",
         )
-        .bind(p.name)
+        .bind(name)
         .bind(peer.as_ref().map(|v| ip(&v.0)))
         .execute(&mut *tx)
         .await?;
@@ -561,6 +599,61 @@ mod tests {
             client_ip(Some(&peer), &headers, &["10.0.0.0/8".into()]),
             "203.0.113.4"
         );
+    }
+    #[test]
+    fn forwarded_for_accepts_ports_and_bracketed_ipv6() {
+        let peer = axum::extract::ConnectInfo("10.0.0.1:1234".parse().unwrap());
+        let mut headers = HeaderMap::new();
+        for (value, expected) in [
+            ("1.2.3.4:5678", "1.2.3.4"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("1.2.3.4:5678, 10.0.0.2:80", "1.2.3.4"),
+            ("1.2.3.4, invalid", "10.0.0.1"),
+        ] {
+            headers.insert("x-forwarded-for", value.parse().unwrap());
+            assert_eq!(
+                client_ip(Some(&peer), &headers, &["10.0.0.0/8".into()]),
+                expected
+            );
+        }
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn stale_oidc_session_can_logout_only_with_csrf(pool: PgPool) {
+        let cfg = crate::config::HeimdallConfig::from_yaml("realms: [prod]\nauth:\n  public_url: http://localhost\n  oidc: {issuer: 'https://example.com', client_id: x, client_secret_env: SECRET}\n").unwrap();
+        let id: i64 = sqlx::query_scalar("INSERT INTO users(kind,username,oidc_issuer,oidc_subject) VALUES ('oidc','alice','issuer','sub') RETURNING id").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,groups_refreshed_at,expires_at) VALUES ($1,$2,'secret',now()-interval '2 hours',now()+interval '1 day')").bind(hash("token")).bind(id).execute(&pool).await.unwrap();
+        let app = crate::server::router(AppState::new(
+            pool.clone(),
+            Arc::new(cfg),
+            reqwest::Client::new(),
+        ));
+        let cookie = Some("heimdall_session=token");
+        assert_eq!(
+            call(&app, "GET", "/auth/me", cookie, None, "").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, "POST", "/auth/logout", cookie, None, "").await.0,
+            StatusCode::FORBIDDEN
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let (status, headers, _) =
+            call(&app, "POST", "/auth/logout", cookie, Some("secret"), "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("heimdall_session=; Max-Age=0"));
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
     #[sqlx::test(migrations = "./migrations")]
     async fn oidc_freshness_and_admin_claims(pool: PgPool) {
@@ -669,7 +762,6 @@ mod tests {
             grants: vec![],
             groups: vec!["team".into(), "admins".into()],
             csrf_token: None,
-            session_hash: None,
             scope: None,
             admin_allowed: false,
         };

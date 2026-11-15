@@ -18,7 +18,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     if (response.status === 401) {
       const body = await response.clone().json().catch(() => null);
-      if (body?.error === 'reauth') window.location.assign('/auth/oidc/start');
+      if (body?.error === 'reauth' && path !== '/auth/logout') window.location.assign('/auth/oidc/start');
       else listener('signin');
     }
     else if (response.status === 403) {

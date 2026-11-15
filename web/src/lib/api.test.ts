@@ -14,6 +14,13 @@ describe('API', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({error:'reauth'}), {status:401})));
     await expect(api('/test')).rejects.toThrow(); expect(assign).toHaveBeenCalledWith('/auth/oidc/start');
   });
+  it('does not redirect when logout returns reauth', async () => {
+    const assign = vi.fn(); vi.stubGlobal('window', { location: { assign } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({error:'reauth'}), {status:401})));
+    const listener = vi.fn(); onAuthState(listener);
+    await expect(api('/auth/logout', { method: 'POST' })).rejects.toThrow();
+    expect(assign).not.toHaveBeenCalled(); expect(listener).toHaveBeenCalledWith('signin');
+  });
   it('preserves structured errors for inline grant validation', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'admin_not_allowed' }), { status: 400 })));
     await expect(api('/test')).rejects.toMatchObject({ status: 400, code: 'admin_not_allowed' } satisfies Partial<ApiError>);
