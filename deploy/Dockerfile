@@ -1,6 +1,9 @@
 # Heimdall server image (also holds the CLI).
 # Build from the repo root:  docker build -f deploy/Dockerfile -t heimdall .
 # Multi-arch: docker buildx build --platform linux/amd64,linux/arm64 ...
+# Release CI passes --build-arg BIN_SOURCE=prebuilt with dist/heimdall-<arch>
+# (built natively by the binaries job), so nothing compiles under emulation.
+ARG BIN_SOURCE=build
 
 FROM node:22-alpine AS web
 WORKDIR /src/web
@@ -21,9 +24,16 @@ COPY src ./src
 COPY migrations ./migrations
 RUN cargo build --release --locked --bin heimdall
 
+# --- prebuilt: the release binary for this platform; unused stages are skipped ---
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY dist/heimdall-${TARGETARCH} /src/target/release/heimdall
+
+FROM ${BIN_SOURCE} AS bin
+
 # --- runtime: no shell, no package manager; includes CA certificates ---
 FROM gcr.io/distroless/static:nonroot
-COPY --from=build /src/target/release/heimdall /usr/local/bin/heimdall
+COPY --from=bin /src/target/release/heimdall /usr/local/bin/heimdall
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/heimdall"]
