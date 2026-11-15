@@ -108,6 +108,7 @@ pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
     }
     // Kept until serve returns; dropping it flushes buffered spans.
     let _telemetry = telemetry::init("heimdall")?;
+    log_auth_configuration(&cfg);
     let metrics = meters::install()?;
 
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
@@ -142,6 +143,73 @@ pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
     loops.abort();
     tracing::info!("stopped");
     served.context("http server")
+}
+
+fn log_auth_configuration(cfg: &HeimdallConfig) {
+    if let Some(auth) = &cfg.auth {
+        if (auth.local.enabled || auth.oidc.is_some()) && auth.trusted_proxies.is_empty() {
+            tracing::warn!("auth.trusted_proxies is empty: behind an ingress or other proxy, all clients share the proxy IP for throttling and rate limits; set auth.trusted_proxies to trusted proxy CIDRs");
+        }
+        if auth
+            .oidc
+            .as_ref()
+            .and_then(|oidc| oidc.scopes.as_ref())
+            .is_some_and(|scopes| !scopes.iter().any(|scope| scope == "openid"))
+        {
+            tracing::info!("auth.oidc.scopes omits openid; adding it automatically");
+        }
+    }
+}
+
+#[cfg(test)]
+mod auth_startup_log_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone)]
+    struct Writer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn logs(yaml: &str) -> String {
+        let cfg = HeimdallConfig::from_yaml(yaml).unwrap();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(output.clone());
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .without_time()
+                .with_writer(move || writer.clone()),
+        );
+        tracing::subscriber::with_default(subscriber, || log_auth_configuration(&cfg));
+        let bytes = output.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+    #[test]
+    fn warns_once_for_enabled_signin_without_trusted_proxies() {
+        let local =
+            "realms: [prod]\nauth: {public_url: 'http://localhost', local: {enabled: true}}";
+        let output = logs(local);
+        assert_eq!(output.matches("WARN").count(), 1);
+        assert!(
+            output.contains("throttling and rate limits")
+                && output.contains("auth.trusted_proxies")
+        );
+        let oidc = "realms: [prod]\nauth:\n  public_url: http://localhost\n  oidc: {issuer: 'https://example.com', client_id: x, client_secret_env: SECRET, scopes: [profile]}\n";
+        let output = logs(oidc);
+        assert_eq!(output.matches("WARN").count(), 1);
+        assert_eq!(output.matches("adding it automatically").count(), 1);
+        assert!(!logs("realms: [prod]\n").contains("WARN"));
+        assert!(!logs("realms: [prod]\nauth: {public_url: 'http://localhost'}\n").contains("WARN"));
+        assert!(!logs("realms: [prod]\nauth: {public_url: 'http://localhost', local: {enabled: true}, trusted_proxies: ['10.0.0.0/8']}\n").contains("WARN"));
+    }
 }
 
 /// SIGTERM (Kubernetes) or Ctrl-C. Heimdall only runs on Unix.

@@ -252,13 +252,17 @@ fn groups_max_age_minutes() -> u32 {
 
 impl OidcConfig {
     pub fn effective_scopes(&self) -> Vec<String> {
-        self.scopes.clone().unwrap_or_else(|| {
+        let mut scopes = self.scopes.clone().unwrap_or_else(|| {
             let mut scopes = vec!["openid".into(), "profile".into(), "email".into()];
             if self.groups_claim.is_some() {
                 scopes.push("groups".into());
             }
             scopes
-        })
+        });
+        if !scopes.iter().any(|scope| scope == "openid") {
+            scopes.insert(0, "openid".into());
+        }
+        scopes
     }
 }
 #[derive(Debug, Clone, Deserialize)]
@@ -873,7 +877,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             cfg.auth.unwrap().oidc.unwrap().effective_scopes(),
-            ["custom"]
+            ["openid", "custom"]
+        );
+        let cfg =
+            HeimdallConfig::from_yaml(&format!("{base}    scopes: [openid, custom]\n")).unwrap();
+        assert_eq!(
+            cfg.auth.unwrap().oidc.unwrap().effective_scopes(),
+            ["openid", "custom"]
         );
         assert!(
             HeimdallConfig::from_yaml(&format!("{base}    groups_max_age_minutes: 4\n")).is_err()
