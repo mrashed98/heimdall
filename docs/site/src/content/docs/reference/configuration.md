@@ -288,16 +288,19 @@ pool holds 10 connections.
 | Key | Default | Meaning |
 |---|---|---|
 | `auth.public_url` | required when auth is present | External HTTPS URL, or HTTP localhost. |
+| `auth.trusted_proxies` | `[]` | CIDRs allowed to supply X-Forwarded-For; configure the ingress controller pod CIDR when using ingress. |
 | `auth.session.idle_hours` | `12` | Idle session timeout; positive integer. |
 | `auth.session.absolute_days` | `7` | Maximum session lifetime; positive integer. |
 | `auth.local.enabled` | `false` | Enable local password sign-in. |
 | `auth.oidc.issuer` | required for OIDC | Provider issuer URL. |
 | `auth.oidc.client_id` | required for OIDC | Client identifier. |
 | `auth.oidc.client_secret_env` | required for OIDC | Name of the environment variable containing the secret. |
-| `auth.oidc.scopes` | `[]` | Additional requested scopes. |
+| `auth.oidc.scopes` | `[openid, profile, email]` | Requested scopes; `groups` is also included by default when `groups_claim` is set. An explicit list overrides the defaults. |
 | `auth.oidc.groups_claim` | unset | Name of the ID-token groups claim. |
+| `auth.oidc.groups_max_age_minutes` | `60` | OIDC sessions require reauthentication after this many minutes; minimum 5. |
+| `auth.oidc.admin_match_username` | `false` | Allow preferred_username to match admins. Email must be verified to match. |
 | `auth.oidc.role_mappings` | `[]` | List of `group`, `role`, `realms` mappings. |
 | `auth.oidc.default_role` | unset | Optional `role` and `realms` grant. |
 | `retention.audit_days` | `365` | Audit log retention in days. |
 
-Roles are `viewer`, `editor`, or `admin`; realms must be configured names or `*`. Admin users must also be listed in top-level `admins`. Unknown configuration fields are rejected.
+Roles are `viewer`, `editor`, or `admin`; realms must be configured names or `*`. Admin grants must use only `realms: ["*"]` and users must also be listed in top-level `admins`. Unknown configuration fields are rejected.

@@ -16,7 +16,11 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrf) headers.set('X-CSRF-Token', csrf);
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   if (!response.ok) {
-    if (response.status === 401) listener('signin');
+    if (response.status === 401) {
+      const body = await response.clone().json().catch(() => null);
+      if (body?.error === 'reauth') window.location.assign('/auth/oidc/start');
+      else listener('signin');
+    }
     else if (response.status === 403) {
       const body = await response.clone().json().catch(() => null);
       if (body?.error === 'no_access') listener('noaccess');

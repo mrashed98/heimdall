@@ -66,10 +66,14 @@ The command prompts for a password; add `emergency-admin` to `admins` first. Use
 | editor | Viewer access plus create, extend and revoke oaths in granted realms. |
 | admin | Global administration, including users, grants, keys and audit. |
 
-Grants apply to named realms or `*`. Admin access is global and also requires the user's local username or OIDC preferred username or email to appear in the top-level `admins` list. API-key admin rules remain in force.
+Grants apply to named realms or `*`. Admin grants must use only `*` and also require the local username or verified OIDC email to appear in the top-level `admins` list. OIDC `preferred_username` may match only when `auth.oidc.admin_match_username: true`. API-key admin rules remain in force.
 
 ## Sessions, CSRF and audit
 
-Sessions are stored in Postgres. Defaults are 12 hours idle and seven days absolute; configure `auth.session.idle_hours` and `absolute_days`. The session cookie is HttpOnly and SameSite=Lax, and Secure except for HTTP localhost. Logout removes the session; disabling a user takes effect on the next request. Browser session mutations require the `X-CSRF-Token` returned by `GET /auth/me`; bearer-key requests are exempt. Local login failures are throttled per username and IP.
+Sessions are stored in Postgres. Defaults are 12 hours idle and seven days absolute; configure `auth.session.idle_hours` and `absolute_days`. The session cookie is HttpOnly and SameSite=Lax, and Secure except for HTTP localhost. Logout removes the session; disabling a user takes effect on the next request. Browser session mutations require the `X-CSRF-Token` returned by `GET /auth/me`; bearer-key requests are exempt. OIDC group claims expire after `auth.oidc.groups_max_age_minutes` (default 60, minimum 5); the browser returns to the identity provider to refresh them. Local sessions are unaffected. OIDC scopes default to `openid`, `profile`, and `email`, plus `groups` when `groups_claim` is configured; an explicit `scopes` list overrides the defaults.
+
+Local login is limited to five failures per username and client IP, and 20 per client IP, over 15 minutes. Already throttled attempts do not add failures. Usernames longer than 128 characters are rejected without audit. OIDC start and callback share a limit of 30 requests per IP per minute; at most 1,000 live login requests can be pending. Limit rejections are not audited.
+
+Client IP defaults to the TCP peer. Set `auth.trusted_proxies` to the ingress controller pod CIDR(s) when ingress is enabled; only those peers can supply `X-Forwarded-For`. Heimdall walks that chain from the right to find the first untrusted address. Only list proxies you control.
 
 Administrators can inspect the audit log in Access or via `/api/v1/audit`. It records sign-ins, sign-outs, user and grant changes, key changes and oath actions. `retention.audit_days` controls audit retention (default 365 days).

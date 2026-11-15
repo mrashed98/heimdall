@@ -44,7 +44,7 @@ Anti-goals (a failure even if it works)
 Roles, each granted for a list of realms or `*`:
 - `viewer`: read findings, services, components, releases, oaths.
 - `editor`: viewer + create/extend/revoke oaths in those realms.
-- `admin`: everything, including users, role grants, API keys, audit log. **Admin is global and still requires the name to be in config `admins`** (Phase 1 rule, spec §12 decision 6). For OIDC users the match is on `preferred_username` or `email`; for local users on the username. A grant of admin to someone not listed is refused, as for keys today.
+- `admin`: everything, including users, role grants, API keys, audit log. **Admin is global and still requires the name to be in config `admins`** (Phase 1 rule, spec §12 decision 6). For OIDC users the match is on verified `email`, or `preferred_username` when `auth.oidc.admin_match_username` is enabled; for local users on the username. A grant of admin to someone not listed is refused, as for keys today.
 
 Grants come from two places, unioned:
 1. **Config mappings** (GitOps-friendly), from an OIDC groups claim:
@@ -76,13 +76,14 @@ A user with no grants can sign in but sees a friendly "no access yet, ask an adm
 - Server-side sessions in Postgres (`sessions` table: random 256-bit id stored as SHA-256 hash, principal, created_at, last_seen_at, expires_at). Cookie `heimdall_session`: `HttpOnly; Secure; SameSite=Lax; Path=/` (`Secure` dropped only when `public_url` is `http://localhost...`).
 - Idle timeout 12 h, absolute 7 days (config). Logout deletes the row. Disabling a user or removing a grant takes effect on the next request (grants re-read per request, cached ≤ 30 s).
 - CSRF: cookie-authenticated `POST/PUT/PATCH/DELETE` must send header `X-CSRF-Token` matching the session's token (returned by `GET /auth/me`). Bearer-key requests are exempt.
-- Local login: constant-time compare, generic error message, throttle 5 failures per username per 15 min and per IP, logged to audit.
+- Local login: constant-time compare, generic error message, throttle 5 failures per username and client IP and 20 per client IP per 15 min, logged to audit.
 - OIDC: validate `state`, `nonce`, PKCE; ID-token signature and audience via discovery/JWKS (cached); no tokens stored beyond what is needed (store none after login).
 
 ### 4.5 Routes (new)
 - `GET /auth/login` (lists enabled methods), `POST /auth/local`, `GET /auth/oidc/start`, `GET /auth/oidc/callback`, `POST /auth/logout`, `GET /auth/me` (user, roles, realms, csrf token).
-- `GET/POST /api/v1/users`, `PATCH /api/v1/users/{id}` (disable/enable), `GET/PUT /api/v1/users/{id}/grants`, `GET /api/v1/audit` (admin, paginated).
-- Migration `0006_users_sessions.sql`: `users`, `user_grants`, `sessions`, `audit_log`, `login_failures`. Retention job prunes expired sessions and login failures; audit log kept 365 days (config `retention.audit_days`).
+- `GET /api/v1/users`, `PATCH /api/v1/users/{id}` (disable/enable), `GET/PUT /api/v1/users/{id}/grants`, `GET /api/v1/audit` (admin, paginated).
+- Local users are created by the CLI only; there is no `POST /api/v1/users`.
+- Migration `0008_users_sessions.sql`: `users`, `user_grants`, `sessions`, `audit_log`, `login_failures`. Retention job prunes expired sessions and login failures; audit log kept 365 days (config `retention.audit_days`).
 
 ### 4.6 Audit log
 Records: login success/failure (method, user, IP), logout, user created/disabled, grant changes, API key created/revoked, oath created/extended/revoked (oath events already exist; link them). Admins view it in the UI with filters.
