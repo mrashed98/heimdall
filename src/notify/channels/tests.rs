@@ -154,7 +154,7 @@ fn snapshot(name: &str, got: &Value) {
 }
 
 fn ch(yaml: &str) -> ChannelConfig {
-    serde_yaml::from_str(yaml).unwrap()
+    serde_saphyr::from_str(yaml).unwrap()
 }
 
 // ---- formatters ----
