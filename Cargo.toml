@@ -63,7 +63,7 @@ comfy-table = "8.0.1"
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }
 rand08 = { package = "rand", version = "0.8" }
-jsonwebtoken = "10.3"
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
