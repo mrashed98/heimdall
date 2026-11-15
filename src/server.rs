@@ -518,26 +518,72 @@ async fn findings_handler(
         "desc" => "DESC",
         _ => return Err(ApiError::BadRequest("unknown sort order".into())),
     };
+    if authed.kind == "key"
+        && q.offset.is_none()
+        && q.realms.is_none()
+        && q.view_status.is_none()
+        && q.severity.is_none()
+        && q.service.is_none()
+        && q.search.is_none()
+        && q.has_fix.is_none()
+        && q.sort.is_none()
+        && q.order.is_none()
+    {
+        let rows: Vec<FindingRow> = sqlx::query_as(
+            "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
+                f.severity, f.status, f.opened_at, f.resolved_at, f.details \
+         FROM findings f \
+         LEFT JOIN services s ON s.id = f.service_id \
+         LEFT JOIN components c ON c.id = f.component_id \
+         WHERE f.status = $1 \
+           AND ($2::text IS NULL OR f.realm = $2) \
+           AND ($3::text IS NULL OR f.kind = $3) \
+           AND f.severity = ANY($4) \
+         ORDER BY f.opened_at DESC, f.id DESC \
+         LIMIT $5",
+        )
+        .bind(status)
+        .bind(realm)
+        .bind(kind)
+        .bind(&severities)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?;
+        return Ok(Json(rows));
+    }
     // Only allowlisted SQL fragments are interpolated; all data is bound below.
+    let joins = if view_status.is_some() || given(&q.search).is_some() {
+        "LEFT JOIN advisories a ON a.id = f.ref_id LEFT JOIN LATERAL (SELECT o.kind FROM oaths o WHERE (o.advisory_id = f.ref_id OR o.advisory_id = ANY(a.aliases) OR EXISTS (SELECT 1 FROM advisories oa WHERE oa.id = o.advisory_id AND f.ref_id = ANY(oa.aliases))) AND o.name_key = c.name_key AND o.service_name = s.name AND (o.realm IS NULL OR o.realm = f.realm) AND o.status = 'active' AND COALESCE(o.expires_at, o.review_at) > now() ORDER BY o.id LIMIT 1) active_oath ON true"
+    } else {
+        ""
+    };
+    let view_filter = if view_status.is_some() {
+        "AND ($14::text = 'resolved' OR CASE WHEN $14 = 'open' THEN active_oath.kind IS NULL ELSE active_oath.kind = CASE $14 WHEN 'snoozed' THEN 'snooze' ELSE 'ignore' END END)"
+    } else {
+        ""
+    };
+    let search_filter = if given(&q.search).is_some() {
+        "AND (f.ref_id ILIKE '%' || $11 || '%' OR c.purl ILIKE '%' || $11 || '%' OR EXISTS (SELECT 1 FROM unnest(a.aliases) alias WHERE alias ILIKE '%' || $11 || '%'))"
+    } else {
+        "AND $11::text IS NULL"
+    };
     let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
                 f.severity, f.status, f.opened_at, f.resolved_at, f.details \
          FROM findings f \
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
-         LEFT JOIN advisories a ON a.id = f.ref_id \
-         LEFT JOIN LATERAL (SELECT o.kind FROM oaths o WHERE (o.advisory_id = f.ref_id OR o.advisory_id = ANY(a.aliases) OR EXISTS (SELECT 1 FROM advisories oa WHERE oa.id = o.advisory_id AND f.ref_id = ANY(oa.aliases))) AND o.name_key = c.name_key AND o.service_name = s.name AND (o.realm IS NULL OR o.realm = f.realm) AND o.status = 'active' AND COALESCE(o.expires_at, o.review_at) > now() ORDER BY o.id LIMIT 1) active_oath ON true \
+         {joins} \
          WHERE f.status = CASE WHEN $14::text = 'resolved' THEN 'resolved' WHEN $14::text IS NOT NULL THEN 'open' ELSE $1 END \
            AND ($13::text[] IS NULL OR f.realm = ANY($13)) \
-           AND ($14::text IS NULL OR $14 = 'resolved' OR \
-                CASE WHEN $14 = 'open' THEN active_oath.kind IS NULL ELSE active_oath.kind = CASE $14 WHEN 'snoozed' THEN 'snooze' ELSE 'ignore' END END) \
+           {view_filter} \
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
            AND ($7 OR f.realm = ANY($8)) \
            AND ($9::text IS NULL OR f.severity = $9) \
            AND ($10::text IS NULL OR s.name = $10) \
-           AND ($11::text IS NULL OR f.ref_id ILIKE '%' || $11 || '%' OR c.purl ILIKE '%' || $11 || '%' OR EXISTS (SELECT 1 FROM unnest(a.aliases) alias WHERE alias ILIKE '%' || $11 || '%')) \
+           {search_filter} \
            AND ($12::bool IS NULL OR (f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb) = $12) \
          ORDER BY {sort} {direction} NULLS LAST, f.id DESC \
          LIMIT $5 OFFSET $6"
@@ -1167,6 +1213,11 @@ mod tests {
         let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
         let app = router(state(pool));
         let (_, first) = get(&app, "/api/v1/findings?limit=2", Some(&key)).await;
+        let (_, equivalent) = get(&app, "/api/v1/findings?limit=2&offset=0", Some(&key)).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&first).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&equivalent).unwrap()
+        );
         let (_, second) = get(&app, "/api/v1/findings?limit=2&offset=2", Some(&key)).await;
         let first: Vec<FindingRow> = serde_json::from_str(&first).unwrap();
         let second: Vec<FindingRow> = serde_json::from_str(&second).unwrap();
