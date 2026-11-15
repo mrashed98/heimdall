@@ -22,11 +22,13 @@ async fn setup(pool: &PgPool) -> Router {
     ))
 }
 async fn user(pool: &PgPool, name: &str, grants: &[(&str, &str)]) -> (i64, String) {
-    let id: i64 = sqlx::query_scalar("INSERT INTO users(username) VALUES ($1) RETURNING id")
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO users(username,password_hash) VALUES ($1,'test') RETURNING id",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .unwrap();
     for (role, realm) in grants {
         sqlx::query("INSERT INTO user_grants VALUES ($1,$2,$3)")
             .bind(id)

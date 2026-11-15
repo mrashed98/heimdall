@@ -194,19 +194,18 @@ impl FromRequestParts<AppState> for Authed {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         if !parts.headers.contains_key("authorization") {
             let principal = crate::local_auth::Principal::from_request_parts(parts, state).await?;
-            let scope = if principal.grants.iter().any(|g| g.role == "admin")
-                && state.cfg.admins.contains(&principal.name)
-            {
-                Scope::Admin
-            } else if principal
-                .grants
-                .iter()
-                .any(|g| (g.role == "viewer" || g.role == "editor") && g.realm == "*")
-            {
-                Scope::Read
-            } else {
-                return Err(ApiError::Forbidden);
-            };
+            let scope =
+                if principal.grants.iter().any(|g| g.role == "admin") && principal.admin_allowed {
+                    Scope::Admin
+                } else if principal
+                    .grants
+                    .iter()
+                    .any(|g| (g.role == "viewer" || g.role == "editor") && g.realm == "*")
+                {
+                    Scope::Read
+                } else {
+                    return Err(ApiError::Forbidden);
+                };
             return Ok(Authed {
                 name: principal.name,
                 scope,

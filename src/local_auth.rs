@@ -27,12 +27,12 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::fill(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
-fn hash(s: &str) -> Vec<u8> {
+pub(crate) fn hash(s: &str) -> Vec<u8> {
     Sha256::digest(s.as_bytes()).to_vec()
 }
 pub fn password_hash(password: &str) -> anyhow::Result<String> {
@@ -92,12 +92,13 @@ pub async fn set_password(pool: &PgPool, name: &str, password: &str) -> anyhow::
     anyhow::ensure!(!password.is_empty(), "password cannot be empty");
     let hash = password_hash(password)?;
     let mut tx = pool.begin().await?;
-    let id: i64 =
-        sqlx::query_scalar("UPDATE users SET password_hash=$2 WHERE username=$1 RETURNING id")
-            .bind(name)
-            .bind(hash)
-            .fetch_one(&mut *tx)
-            .await?;
+    let id: i64 = sqlx::query_scalar(
+        "UPDATE users SET password_hash=$2 WHERE username=$1 AND kind='local' RETURNING id",
+    )
+    .bind(name)
+    .bind(hash)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query("DELETE FROM sessions WHERE user_id=$1")
         .bind(id)
         .execute(&mut *tx)
@@ -119,7 +120,17 @@ pub struct Principal {
     pub csrf_token: Option<String>,
     pub(crate) session_hash: Option<Vec<u8>>,
     pub scope: Option<Scope>,
+    pub admin_allowed: bool,
 }
+type SessionRow = (
+    i64,
+    String,
+    String,
+    Vec<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
 type CacheEntries = HashMap<i64, (Instant, Option<Vec<Grant>>)>;
 pub struct GrantCache {
     ttl: Duration,
@@ -198,7 +209,7 @@ impl Principal {
     fn add_config_grants(&mut self, cfg: &HeimdallConfig) {
         if let Some(oidc) = cfg.auth.as_ref().and_then(|a| a.oidc.as_ref()) {
             let mut add = |role: Role, realms: &[String]| {
-                if role == Role::Admin && !cfg.admins.contains(&self.name) {
+                if role == Role::Admin && !self.admin_allowed {
                     return;
                 }
                 let role = match role {
@@ -250,6 +261,7 @@ impl FromRequestParts<AppState> for Principal {
                 csrf_token: None,
                 session_hash: None,
                 scope: Some(key.scope),
+                admin_allowed: true,
             });
         }
         let cfg = state.cfg.auth.as_ref().ok_or(ApiError::Unauthorized)?;
@@ -264,9 +276,18 @@ impl FromRequestParts<AppState> for Principal {
             })
             .ok_or(ApiError::Unauthorized)?;
         let id = hash(cookie);
-        let row: Option<(i64, String, String)> = sqlx::query_as("UPDATE sessions s SET last_seen_at=now() FROM users u WHERE s.id_hash=$1 AND s.user_id=u.id AND NOT u.disabled AND s.expires_at>now() AND s.last_seen_at > now() - ($2 * interval '1 hour') RETURNING u.id,u.username,s.csrf_token")
+        let row: Option<SessionRow> = sqlx::query_as("UPDATE sessions s SET last_seen_at=now() FROM users u WHERE s.id_hash=$1 AND s.user_id=u.id AND NOT u.disabled AND s.expires_at>now() AND s.last_seen_at > now() - ($2 * interval '1 hour') RETURNING u.id,u.username,s.csrf_token,s.groups,u.email,u.kind,u.preferred_username")
             .bind(&id).bind(i64::from(cfg.session.idle_hours)).fetch_optional(&state.pool).await?;
-        let (user_id, name, csrf) = row.ok_or(ApiError::Unauthorized)?;
+        let (user_id, name, csrf, groups, email, user_kind, preferred) =
+            row.ok_or(ApiError::Unauthorized)?;
+        let admin_allowed = if user_kind == "oidc" {
+            preferred
+                .as_ref()
+                .is_some_and(|n| state.cfg.admins.contains(n))
+                || email.as_ref().is_some_and(|e| state.cfg.admins.contains(e))
+        } else {
+            state.cfg.admins.contains(&name)
+        };
         if matches!(
             parts.method,
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -281,19 +302,23 @@ impl FromRequestParts<AppState> for Principal {
             }
         }
         let mut grants = state.grants_cache.get(&state.pool, user_id).await?;
-        if !state.cfg.admins.contains(&name) {
+        if !admin_allowed {
             grants.retain(|g| g.role != "admin");
         }
         let mut principal = Self {
             kind: "user",
             name,
             grants,
-            groups: vec![],
+            groups,
             csrf_token: Some(csrf),
             session_hash: Some(id),
             scope: None,
+            admin_allowed,
         };
-        principal.add_config_grants(&state.cfg);
+        if user_kind == "oidc" {
+            principal.add_config_grants(&state.cfg);
+        }
+
         Ok(principal)
     }
 }
@@ -311,7 +336,7 @@ pub fn routes() -> Router<AppState> {
 }
 async fn methods(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"local":state.cfg.auth.as_ref().is_some_and(|a| a.local.enabled),"oidc":false}),
+        serde_json::json!({"local":state.cfg.auth.as_ref().is_some_and(|a| a.local.enabled),"oidc":state.cfg.auth.as_ref().and_then(|a| a.oidc.as_ref()).map(|_| "OpenID Connect")}),
     )
 }
 fn ip(parts: &axum::extract::ConnectInfo<std::net::SocketAddr>) -> String {
@@ -343,11 +368,12 @@ async fn login(
         .execute(&mut *tx)
         .await?;
     let failures: (i64,i64) = sqlx::query_as("SELECT count(*) FILTER (WHERE username=$1), count(*) FILTER (WHERE ip=$2) FROM login_failures WHERE occurred_at > now()-interval '15 minutes'").bind(&req.username).bind(&address).fetch_one(&mut *tx).await?;
-    let user: Option<(i64, Option<String>, bool)> =
-        sqlx::query_as("SELECT id,password_hash,disabled FROM users WHERE username=$1")
-            .bind(&req.username)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let user: Option<(i64, Option<String>, bool)> = sqlx::query_as(
+        "SELECT id,password_hash,disabled FROM users WHERE username=$1 AND kind='local'",
+    )
+    .bind(&req.username)
+    .fetch_optional(&mut *tx)
+    .await?;
     // Always perform a password verification, even when the account is absent.
     const DUMMY: &str = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHRzb21lc2FsdA$RMqS6ZUJXUbFDSJ6E1ZMsypGWkVA+RW6tpfnjkXFHnU";
     let encoded = user.as_ref().and_then(|u| u.1.as_deref()).unwrap_or(DUMMY);
@@ -487,6 +513,7 @@ mod tests {
             csrf_token: None,
             session_hash: None,
             scope: None,
+            admin_allowed: false,
         };
         p.add_config_grants(&cfg);
         p.add_config_grants(&cfg);
@@ -496,17 +523,19 @@ mod tests {
         assert_eq!(p.readable_realms(&cfg.realms), cfg.realms);
         let mut allowed = cfg.clone();
         allowed.admins.push("alice".into());
+        p.admin_allowed = true;
         p.add_config_grants(&allowed);
         assert!(p.can("admin", "b"));
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn grant_cache_honors_ttl_and_zero_ttl(pool: PgPool) {
-        let user: i64 =
-            sqlx::query_scalar("INSERT INTO users(username) VALUES ('cached') RETURNING id")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users(username,password_hash) VALUES ('cached','test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO user_grants(user_id, role, realm) VALUES ($1,'viewer','a')")
             .bind(user)
             .execute(&pool)

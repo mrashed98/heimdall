@@ -15,6 +15,7 @@ pub mod meters;
 pub mod model;
 pub mod notify;
 pub mod oath;
+pub mod oidc;
 pub mod purl;
 pub mod retention;
 pub mod scan_images;
@@ -41,6 +42,7 @@ pub struct AppState {
     /// it works. Shared by every clone of the state.
     pub uploads: Arc<tokio::sync::Semaphore>,
     pub grants_cache: Arc<local_auth::GrantCache>,
+    pub oidc_metadata: Arc<tokio::sync::RwLock<Option<openidconnect::core::CoreProviderMetadata>>>,
 }
 
 impl AppState {
@@ -64,6 +66,7 @@ impl AppState {
             http,
             uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
             grants_cache: Arc::new(local_auth::GrantCache::new(ttl)),
+            oidc_metadata: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 }

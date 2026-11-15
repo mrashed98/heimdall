@@ -32,6 +32,7 @@ cvss = "3.0.0"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
+openidconnect = { version = "4.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
@@ -57,6 +58,9 @@ walkdir = "2.5.0"
 comfy-table = "8.0.1"
 
 [dev-dependencies]
+rsa = { version = "0.9", features = ["pem"] }
+rand08 = { package = "rand", version = "0.8" }
+jsonwebtoken = "9.3"
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::routes())
         .merge(crate::admin::routes())
         .merge(crate::local_auth::routes())
+        .merge(crate::oidc::routes())
         .merge(ingest::api::routes())
         .merge(gate::routes())
         .merge(oath::routes())
@@ -55,6 +56,14 @@ pub fn app(state: AppState, metrics: PrometheusHandle) -> Router {
 /// Ctrl-C once in-flight requests are done.
 pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
     let cfg = HeimdallConfig::load(cfg_path)?;
+    if let Some(oidc) = cfg.auth.as_ref().and_then(|a| a.oidc.as_ref()) {
+        std::env::var(&oidc.client_secret_env).with_context(|| {
+            format!(
+                "missing OIDC client secret environment variable {}",
+                oidc.client_secret_env
+            )
+        })?;
+    }
     // Kept until serve returns; dropping it flushes buffered spans.
     let _telemetry = telemetry::init("heimdall")?;
     let metrics = meters::install()?;
@@ -512,11 +521,12 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let user: i64 =
-            sqlx::query_scalar("INSERT INTO users(username) VALUES ('alice') RETURNING id")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let user: i64 = sqlx::query_scalar(
+            "INSERT INTO users(username,password_hash) VALUES ('alice','test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,expires_at) VALUES ($1,$2,'csrf',now()+interval '1 day')")
             .bind(Sha256::digest(b"test-session").to_vec()).bind(user).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_grants(user_id,role,realm) VALUES ($1,'viewer','a')")

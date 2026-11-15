@@ -33,12 +33,10 @@ pub(crate) async fn record(
     action: &str,
     detail: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
-    // 0008 is already deployed. Store structured details in the otherwise unused
-    // method field for these events, with a marker that keeps login methods intact.
-    sqlx::query("INSERT INTO audit_log (username, action, method) VALUES ($1,$2,$3)")
+    sqlx::query("INSERT INTO audit_log (username, action, detail) VALUES ($1,$2,$3)")
         .bind(actor)
         .bind(action)
-        .bind(format!("detail:{detail}"))
+        .bind(detail)
         .execute(conn)
         .await?;
     Ok(())
@@ -62,7 +60,11 @@ struct User {
 }
 async fn users(State(s): State<AppState>, p: Principal) -> Result<Json<Vec<User>>, ApiError> {
     require_admin(&p)?;
-    let mut users: Vec<User> = sqlx::query_as("SELECT id, 'local'::text AS kind, username AS name, NULL::text AS email, disabled, last_login_at FROM users ORDER BY id").fetch_all(&s.pool).await?;
+    let mut users: Vec<User> = sqlx::query_as(
+        "SELECT id, kind, username AS name, email, disabled, last_login_at FROM users ORDER BY id",
+    )
+    .fetch_all(&s.pool)
+    .await?;
     for u in &mut users {
         u.grants = db_grants(&s.pool, u.id).await?;
     }
@@ -131,12 +133,19 @@ async fn replace_grants(
 ) -> Result<Json<Vec<Grant>>, ApiError> {
     require_admin(&p)?;
     let mut tx = s.pool.begin().await?;
-    let name: Option<String> =
-        sqlx::query_scalar("SELECT username FROM users WHERE id=$1 FOR UPDATE")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let name = name.ok_or(ApiError::NotFound)?;
+    let identity: Option<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT username, email, kind, preferred_username FROM users WHERE id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (name, email, kind, preferred) = identity.ok_or(ApiError::NotFound)?;
+    let admin_allowed = if kind == "oidc" {
+        preferred.as_ref().is_some_and(|n| s.cfg.admins.contains(n))
+            || email.as_ref().is_some_and(|e| s.cfg.admins.contains(e))
+    } else {
+        s.cfg.admins.contains(&name)
+    };
     for g in &new {
         if !["viewer", "editor", "admin"].contains(&g.role.as_str()) {
             return Err(ApiError::BadRequest("invalid_role".into()));
@@ -144,7 +153,7 @@ async fn replace_grants(
         if g.realm != "*" && !s.cfg.realms.contains(&g.realm) {
             return Err(ApiError::BadRequest("invalid_realm".into()));
         }
-        if g.role == "admin" && !s.cfg.admins.contains(&name) {
+        if g.role == "admin" && !admin_allowed {
             return Err(ApiError::BadRequest("admin_not_allowed".into()));
         }
     }
@@ -205,7 +214,7 @@ async fn audit(
     require_admin(&p)?;
     let limit = q.limit.unwrap_or(100).clamp(0, 500);
     let offset = q.offset.unwrap_or(0).max(0);
-    let rows = sqlx::query_as("SELECT id,occurred_at,action,username AS actor,CASE WHEN method LIKE 'detail:%' THEN NULL ELSE method END AS method,ip,CASE WHEN method LIKE 'detail:%' THEN substring(method FROM 8)::jsonb ELSE NULL END AS detail FROM audit_log WHERE ($1::text IS NULL OR username=$1) AND ($2::text IS NULL OR action=$2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4) ORDER BY occurred_at DESC,id DESC LIMIT $5 OFFSET $6")
+    let rows = sqlx::query_as("SELECT id,occurred_at,action,username AS actor,method,ip,detail FROM audit_log WHERE ($1::text IS NULL OR username=$1) AND ($2::text IS NULL OR action=$2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4) ORDER BY occurred_at DESC,id DESC LIMIT $5 OFFSET $6")
         .bind(q.actor).bind(q.action).bind(q.since).bind(q.until).bind(limit).bind(offset).fetch_all(&s.pool).await?;
     Ok(Json(rows))
 }

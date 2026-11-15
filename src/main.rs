@@ -193,11 +193,12 @@ async fn user(action: UserAction, config: PathBuf) -> anyhow::Result<()> {
         }
         UserAction::Disable { name } => {
             let mut tx = pool.begin().await?;
-            let id: i64 =
-                sqlx::query_scalar("UPDATE users SET disabled=true WHERE username=$1 RETURNING id")
-                    .bind(&name)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let id: i64 = sqlx::query_scalar(
+                "UPDATE users SET disabled=true WHERE username=$1 AND kind='local' RETURNING id",
+            )
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await?;
             sqlx::query("DELETE FROM sessions WHERE user_id=$1")
                 .bind(id)
                 .execute(&mut *tx)
