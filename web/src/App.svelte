@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Overview from './lib/Overview.svelte';
   import logo from './lib/assets/logo.svg';
   import SignInHero from './lib/illustrations/SignInHero.svelte';
   import NoAccess from './lib/illustrations/NoAccess.svelte';
@@ -76,7 +77,7 @@
       {#if identity}<details class="dropdown"><summary>{identity.name}</summary><div class="popover"><strong>{identity.name}</strong><p>{[...new Set(identity.grants.map(g => g.role))].join(', ') || 'No roles'}</p><button onclick={signOut}>Sign out</button></div></details>{/if}
     </div>
   </header>
-  {#if authState === 'ready'}<div class="layout"><nav aria-label="Main navigation"><button class="mobile-menu" onclick={() => menu = !menu} aria-expanded={menu}>Menu ☰</button><div class:open={menu} class="navlinks">{#each pages.filter(p => p.path !== '/access' || admin) as item}<a href={item.path + location.search} title={item.description} aria-current={path === item.path ? 'page' : undefined} onclick={(e) => { e.preventDefault(); navigate(item.path); }}>{item.label}</a>{/each}</div></nav><main class="content">{#if page}<p class="eyebrow">YOUR REALMS / {page.label.toUpperCase()}</p><h1>{page.label}</h1><p class="description">{page.description.split(': ')[1]}</p><div class="placeholder"><span class="marker"></span><p>Coming in the next step</p></div>{:else}<NotFound /><a href="/" onclick={(e) => { e.preventDefault(); navigate('/'); }}>Return to overview</a>{/if}</main></div>
+  {#if authState === 'ready'}<div class="layout"><nav aria-label="Main navigation"><button class="mobile-menu" onclick={() => menu = !menu} aria-expanded={menu}>Menu ☰</button><div class:open={menu} class="navlinks">{#each pages.filter(p => p.path !== '/access' || admin) as item}<a href={item.path + location.search} title={item.description} aria-current={path === item.path ? 'page' : undefined} onclick={(e) => { e.preventDefault(); navigate(item.path); }}>{item.label}</a>{/each}</div></nav><main class="content">{#if page}<p class="eyebrow">YOUR REALMS / {page.label.toUpperCase()}</p><h1>{page.label}</h1><p class="description">{page.description.split(': ')[1]}</p>{#if path === '/'}<Overview realms={selected} />{:else}<div class="placeholder"><span class="marker"></span><p>Coming in the next step</p></div>{/if}{:else}<NotFound /><a href="/" onclick={(e) => { e.preventDefault(); navigate('/'); }}>Return to overview</a>{/if}</main></div>
   {:else}<main class="authState-page">{#if authState === 'noaccess'}<NoAccess /><button onclick={signOut}>Sign out</button>{:else}<ErrorState /><button onclick={() => location.reload()}>Try again</button>{/if}</main>{/if}
 {/if}
 <style>
