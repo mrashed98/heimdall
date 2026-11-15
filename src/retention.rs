@@ -107,7 +107,7 @@ mod tests {
     use super::*;
 
     async fn count(pool: &PgPool, table: &str) -> i64 {
-        sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(pool)
             .await
             .unwrap()

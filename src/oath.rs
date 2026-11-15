@@ -254,7 +254,7 @@ pub async fn active_for(
            AND COALESCE(expires_at, review_at) > $5 \
          ORDER BY id LIMIT 1"
     );
-    let found = sqlx::query_as::<_, Oath>(&sql)
+    let found = sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(advisory_id)
         .bind(name_key)
         .bind(service_name)
@@ -287,7 +287,7 @@ pub async fn process_expiries(
          ) \
          SELECT {COLUMNS} FROM due ORDER BY id"
     );
-    let due = sqlx::query_as::<_, Oath>(&sql)
+    let due = sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(now)
         .fetch_all(conn)
         .await?;
@@ -302,7 +302,7 @@ pub async fn revoke(pool: &PgPool, id: i64, by: &str) -> anyhow::Result<Option<O
         "UPDATE oaths SET status = 'revoked' WHERE id = $1 AND status <> 'revoked' \
          RETURNING {COLUMNS}"
     );
-    let updated = sqlx::query_as::<_, Oath>(&sql)
+    let updated = sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -319,7 +319,7 @@ pub async fn revoke(pool: &PgPool, id: i64, by: &str) -> anyhow::Result<Option<O
 
 async fn fetch(tx: &mut sqlx::PgConnection, id: i64) -> anyhow::Result<Option<Oath>> {
     let sql = format!("SELECT {COLUMNS} FROM oaths WHERE id = $1");
-    Ok(sqlx::query_as::<_, Oath>(&sql)
+    Ok(sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(tx)
         .await?)
@@ -355,7 +355,7 @@ pub async fn extend(
              review_at = CASE WHEN kind = 'ignore' THEN $2 ELSE review_at END \
          WHERE id = $1 RETURNING {COLUMNS}"
     );
-    let oath = sqlx::query_as::<_, Oath>(&sql)
+    let oath = sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .bind(at)
         .fetch_one(&mut *tx)
@@ -382,7 +382,7 @@ pub async fn list(pool: &PgPool, status: Option<&str>) -> anyhow::Result<Vec<Oat
     let sql = format!(
         "SELECT {COLUMNS} FROM oaths WHERE ($1::text IS NULL OR status = $1) ORDER BY id DESC"
     );
-    Ok(sqlx::query_as::<_, Oath>(&sql)
+    Ok(sqlx::query_as::<_, Oath>(sqlx::AssertSqlSafe(sql))
         .bind(status)
         .fetch_all(pool)
         .await?)

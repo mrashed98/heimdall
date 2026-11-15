@@ -238,7 +238,9 @@ async fn quiet_fixes(tx: &mut PgConnection) -> anyhow::Result<Vec<(i64, String)>
          ORDER BY f.id \
          FOR UPDATE OF f"
     );
-    Ok(sqlx::query_as(&sql).fetch_all(&mut *tx).await?)
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .fetch_all(&mut *tx)
+        .await?)
 }
 
 #[derive(FromRow)]
