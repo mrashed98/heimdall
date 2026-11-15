@@ -8,6 +8,7 @@ pub mod error;
 pub mod gate;
 pub mod ingest;
 pub mod inventory;
+pub mod local_auth;
 pub mod matcher;
 pub mod meters;
 pub mod model;

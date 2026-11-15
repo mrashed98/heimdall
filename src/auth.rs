@@ -180,26 +180,53 @@ impl FromRequestParts<AppState> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let key = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or(ApiError::Unauthorized)?;
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT name, scope FROM api_keys WHERE sha256 = $1")
-                .bind(hash(key))
-                .fetch_optional(&state.pool)
-                .await?;
-        let (name, scope) = row.ok_or(ApiError::Unauthorized)?;
-        let scope = scope.parse::<Scope>()?;
-        // Checked on every request so removing a name from `admins` takes
-        // effect without revoking its key.
-        if scope == Scope::Admin && !admin_allowed(&state.cfg.admins, &name) {
-            return Err(ApiError::Forbidden);
+        if !parts.headers.contains_key("authorization") {
+            let principal = crate::local_auth::Principal::from_request_parts(parts, state).await?;
+            let scope = if principal
+                .grants
+                .iter()
+                .any(|g| g.role == "admin" && g.realm == "*")
+                && state.cfg.admins.contains(&principal.name)
+            {
+                Scope::Admin
+            } else if principal
+                .grants
+                .iter()
+                .any(|g| (g.role == "viewer" || g.role == "editor") && g.realm == "*")
+            {
+                Scope::Read
+            } else {
+                return Err(ApiError::Forbidden);
+            };
+            return Ok(Authed {
+                name: principal.name,
+                scope,
+            });
         }
-        Ok(Authed { name, scope })
+        authenticate_key(parts, state).await
     }
+}
+
+pub(crate) async fn authenticate_key(parts: &Parts, state: &AppState) -> Result<Authed, ApiError> {
+    let key = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT name, scope FROM api_keys WHERE sha256 = $1")
+            .bind(hash(key))
+            .fetch_optional(&state.pool)
+            .await?;
+    let (name, scope) = row.ok_or(ApiError::Unauthorized)?;
+    let scope = scope.parse::<Scope>()?;
+    // Checked on every request so removing a name from `admins` takes
+    // effect without revoking its key.
+    if scope == Scope::Admin && !admin_allowed(&state.cfg.admins, &name) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Authed { name, scope })
 }
 
 #[derive(Serialize, Deserialize)]

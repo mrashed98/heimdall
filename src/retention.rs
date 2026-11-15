@@ -54,6 +54,16 @@ pub async fn cleanup(
     .execute(pool)
     .await?
     .rows_affected();
+    sqlx::query("DELETE FROM sessions WHERE expires_at <= $1 OR last_seen_at <= $1 - ($2 * interval '1 hour')")
+        .bind(now).bind(i64::from(cfg.auth.as_ref().map_or(12, |a| a.session.idle_hours))).execute(pool).await?;
+    sqlx::query("DELETE FROM login_failures WHERE occurred_at <= $1 - interval '15 minutes'")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM audit_log WHERE occurred_at < $1")
+        .bind(days(r.audit_days))
+        .execute(pool)
+        .await?;
     Ok(RetentionReport {
         findings,
         releases,

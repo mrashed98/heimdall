@@ -27,6 +27,7 @@ const LISTEN: &str = "0.0.0.0:8080";
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(auth::routes())
+        .merge(crate::local_auth::routes())
         .merge(ingest::api::routes())
         .merge(gate::routes())
         .merge(oath::routes())
@@ -80,9 +81,12 @@ pub async fn serve(cfg_path: &Path) -> anyhow::Result<()> {
     let loops = tokio::spawn(scheduler::run(state.clone()));
 
     // Stops accepting on the signal, then waits for in-flight requests.
-    let served = axum::serve(listener, app(state, metrics))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let served = axum::serve(
+        listener,
+        app(state, metrics).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
     loops.abort();
     tracing::info!("stopped");
     served.context("http server")
