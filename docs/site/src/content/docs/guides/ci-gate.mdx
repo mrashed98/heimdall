@@ -31,7 +31,7 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.2.1
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.0
         with:
           service: api
           realm: dev-k3s
@@ -50,10 +50,10 @@ jobs:
 | `heimdall-url` | required | For example `http://heimdall.heimdall.svc:8080`. |
 | `api-key` | required | An ingest-scope key. Store it as a GitHub secret. |
 | `repository` | the action's own repository | `owner/name` that publishes the release binaries. Set it when the action is used locally (`uses: ./...`), where the default is empty. |
-| `version` | `latest` | Release tag of the binary to download, such as `v0.2.1`. |
+| `version` | `latest` | Release tag of the binary to download, such as `v0.3.0`. |
 
 <Aside type="tip">
-Pin the action to a release tag (`@v0.2.1`) and keep the URL in a repository
+Pin the action to a release tag (`@v0.3.0`) and keep the URL in a repository
 variable (`vars.HEIMDALL_URL`) rather than a secret.
 </Aside>
 
@@ -62,14 +62,14 @@ variable (`vars.HEIMDALL_URL`) rather than a secret.
 Call the action once per service, each with its own `path`:
 
 ```yaml
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.2.1
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.0
         with:
           service: api
           realm: dev-k3s
           path: services/api
           heimdall-url: ${{ vars.HEIMDALL_URL }}
           api-key: ${{ secrets.HEIMDALL_API_KEY }}
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.2.1
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.0
         with:
           service: web
           realm: dev-k3s
