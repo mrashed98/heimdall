@@ -8,6 +8,7 @@ let listener: (state: AuthState) => void = () => {};
 export function onAuthState(fn: (state: AuthState) => void) { listener = fn; }
 export function setKey(key: string | null) { token = key; }
 export function setCsrf(value: string | null) { csrf = value; }
+export class ApiError extends Error { constructor(public status: number, public code: string) { super(`Request failed (${status})`); } }
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = (init.method ?? 'GET').toUpperCase();
   const headers = new Headers(init.headers);
@@ -20,7 +21,8 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       const body = await response.clone().json().catch(() => null);
       if (body?.error === 'no_access') listener('noaccess');
     }
-    throw new Error(`Request failed (${response.status})`);
+    const body = await response.json().catch(() => null);
+    throw new ApiError(response.status, typeof body?.error === 'string' ? body.error : '');
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
