@@ -26,6 +26,7 @@ fn ui_realms(state: &AppState, p: &Principal, q: &UiQuery) -> Result<Vec<String>
         }
     }
 }
+// Sort expressions and directions come only from fixed caller-provided allowlists.
 fn ui_sort<'a>(q: &UiQuery, fields: &'a [(&str, &str)], default: &'a str) -> Result<(&'a str, &'static str), ApiError> {
     let field = match given(&q.sort) { None => default, Some(s) => fields.iter().find(|(name, _)| *name == s).map(|(_, sql)| *sql).ok_or_else(|| ApiError::BadRequest("unknown sort field".into()))? };
     let order = match given(&q.order).unwrap_or("asc") { "asc" => "ASC", "desc" => "DESC", _ => return Err(ApiError::BadRequest("unknown sort order".into())) };
@@ -35,7 +36,7 @@ async fn ui_services(State(state): State<AppState>, p: Principal, Query(q): Quer
     let realms = ui_realms(&state, &p, &q)?;
     let (sort, order) = ui_sort(&q, &[("name","name"),("realm","realm"),("critical","critical"),("high","high"),("medium","medium"),("low","low"),("unknown","unknown")], "realm")?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT s.id,s.name,s.realm, count(f.id) FILTER (WHERE f.severity='critical') AS critical, count(f.id) FILTER (WHERE f.severity='high') AS high, count(f.id) FILTER (WHERE f.severity='medium') AS medium, count(f.id) FILTER (WHERE f.severity='low') AS low, count(f.id) FILTER (WHERE f.severity='unknown') AS unknown FROM services s LEFT JOIN findings f ON f.service_id=s.id AND f.realm=s.realm AND f.status='open' WHERE s.realm=ANY($1) GROUP BY s.id ORDER BY {sort} {order}, s.id LIMIT $2 OFFSET $3) t");
-    Ok(Json(sqlx::query_scalar(&sql).bind(realms).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
 }
 async fn ui_service_section(State(state): State<AppState>, p: Principal, UrlPath((id, section)): UrlPath<(i64,String)>, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let realms = ui_realms(&state, &p, &q)?;
@@ -52,7 +53,7 @@ async fn ui_service_section(State(state): State<AppState>, p: Principal, UrlPath
     let (sort, order) = ui_sort(&q, &fields, default)?;
     let sort = if section == "images" { if sort == "i.image_ref" { "image" } else { "digest" } } else { sort };
     let sql = format!("SELECT row_to_json(t) FROM ({select} ORDER BY {sort} {order} NULLS LAST LIMIT $2 OFFSET $3) t");
-    Ok(Json(sqlx::query_scalar(&sql).bind(id).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(id).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
 }
 async fn ui_releases(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let realms = ui_realms(&state, &p, &q)?;
@@ -60,7 +61,7 @@ async fn ui_releases(State(state): State<AppState>, p: Principal, Query(q): Quer
     if kind.is_some_and(|k| !["majorrelease","eol","releasenotecve"].contains(&k)) { return Err(ApiError::BadRequest("unknown release kind".into())); }
     let (sort, order) = ui_sort(&q, &[("target","f.details->>'target'"),("kind","f.kind"),("realm","f.realm"),("date","f.opened_at")], "f.opened_at")?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT f.id,f.kind,f.realm,f.ref_id,f.details,f.opened_at,r.notes_class,r.notes_url FROM findings f LEFT JOIN releases r ON r.target=f.details->>'target' AND r.version=f.details->>'version' WHERE f.realm=ANY($1) AND f.status='open' AND f.kind IN ('majorrelease','eol','releasenotecve') AND ($2::text IS NULL OR f.kind=$2) ORDER BY {sort} {order} NULLS LAST, f.id DESC LIMIT $3 OFFSET $4) t");
-    Ok(Json(sqlx::query_scalar(&sql).bind(realms).bind(kind).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(kind).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
 }
 async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let realms = ui_realms(&state, &p, &q)?;
@@ -68,5 +69,5 @@ async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<U
     if !["active","expiring","past"].contains(&tab) { return Err(ApiError::BadRequest("unknown oath tab".into())); }
     let (sort, order) = ui_sort(&q, &[("advisory","advisory_id"),("service","service_name"),("realm","realm"),("kind","kind"),("date","COALESCE(expires_at,review_at)"),("status","status")], "id")?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT id,advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,expires_at,review_at,created_by,created_at,status FROM oaths WHERE (realm=ANY($1) OR (realm IS NULL AND cardinality($1::text[])>0)) AND CASE $2 WHEN 'active' THEN status='active' AND (COALESCE(expires_at,review_at) IS NULL OR COALESCE(expires_at,review_at)>now()) WHEN 'expiring' THEN status='active' AND COALESCE(expires_at,review_at)>now() AND COALESCE(expires_at,review_at)<=now()+interval '7 days' ELSE status IN ('expired','revoked') OR (status='active' AND COALESCE(expires_at,review_at)<=now()) END ORDER BY {sort} {order} NULLS LAST, id DESC LIMIT $3 OFFSET $4) t");
-    Ok(Json(sqlx::query_scalar(&sql).bind(realms).bind(tab).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(tab).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
 }

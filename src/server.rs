@@ -518,6 +518,7 @@ async fn findings_handler(
         "desc" => "DESC",
         _ => return Err(ApiError::BadRequest("unknown sort order".into())),
     };
+    // Only allowlisted SQL fragments are interpolated; all data is bound below.
     let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
                 f.severity, f.status, f.opened_at, f.resolved_at, f.details \
@@ -541,7 +542,7 @@ async fn findings_handler(
          ORDER BY {sort} {direction} NULLS LAST, f.id DESC \
          LIMIT $5 OFFSET $6"
     );
-    let rows: Vec<FindingRow> = sqlx::query_as(&sql)
+    let rows: Vec<FindingRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(status)
         .bind(realm)
         .bind(kind)
@@ -1031,9 +1032,13 @@ mod tests {
             "CVE-2"
         );
         assert_eq!(
-            get(&app, "/api/v1/ui/oaths?sort=invalid", Some(&key))
-                .await
-                .0,
+            get(
+                &app,
+                "/api/v1/ui/oaths?sort=invalid%3BSELECT%201",
+                Some(&key)
+            )
+            .await
+            .0,
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -1203,6 +1208,7 @@ mod tests {
         }
         for path in [
             "/api/v1/findings?sort=bogus",
+            "/api/v1/findings?sort=severity%3BSELECT%201",
             "/api/v1/findings?order=bogus",
         ] {
             assert_eq!(get(&app, path, Some(&key)).await.0, StatusCode::BAD_REQUEST);

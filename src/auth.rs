@@ -321,7 +321,7 @@ async fn list_keys(
         "created_at",
     );
     let sql = format!("SELECT name, scope, created_at FROM api_keys ORDER BY {field} {order}, name ASC LIMIT $1 OFFSET $2");
-    let keys = sqlx::query_as::<_, KeyInfo>(&sql)
+    let keys = sqlx::query_as::<_, KeyInfo>(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(q.limit.map(|n| n.clamp(0, 500)))
         .bind(q.offset.unwrap_or(0).max(0))
         .fetch_all(&state.pool)

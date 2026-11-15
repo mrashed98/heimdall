@@ -65,6 +65,7 @@ pub(crate) struct ListQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
 }
+// Only fixed caller-provided columns and fixed directions enter SQL strings.
 pub(crate) fn list_order<'a>(
     q: &ListQuery,
     fields: &'a [(&str, &str)],
@@ -101,7 +102,7 @@ async fn users(
         "id",
     );
     let sql = format!("SELECT id, kind, username AS name, email, disabled, last_login_at FROM users ORDER BY {field} {order} NULLS LAST, id ASC LIMIT $1 OFFSET $2");
-    let mut users: Vec<User> = sqlx::query_as(&sql)
+    let mut users: Vec<User> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(q.limit.map(|n| n.clamp(0, 500)))
         .bind(q.offset.unwrap_or(0).max(0))
         .fetch_all(&s.pool)
@@ -275,7 +276,7 @@ async fn audit(
         ("occurred_at", "DESC")
     };
     let sql = format!("SELECT id,occurred_at,action,username AS actor,method,ip,detail FROM audit_log WHERE ($1::text IS NULL OR username=$1) AND ($2::text IS NULL OR action=$2) AND ($3::timestamptz IS NULL OR occurred_at >= $3) AND ($4::timestamptz IS NULL OR occurred_at <= $4) ORDER BY {field} {order} NULLS LAST,id DESC LIMIT $5 OFFSET $6");
-    let rows = sqlx::query_as(&sql)
+    let rows = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(q.actor)
         .bind(q.action)
         .bind(q.since)
