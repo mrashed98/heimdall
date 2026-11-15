@@ -13,6 +13,7 @@ use sqlx::PgPool;
 
 use crate::auth::{require, Authed, Scope};
 use crate::error::ApiError;
+use crate::local_auth::Principal;
 use crate::model::OathKind;
 use crate::vuln::collapse::{canonical, AliasInfo};
 use crate::AppState;
@@ -462,13 +463,16 @@ async fn create_handler(
 
 async fn list_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<Oath>>, ApiError> {
-    require(&authed, Scope::Read)?;
-    let oaths = list(&state.pool, q.status.as_deref())
+    authed.require_read()?;
+    let mut oaths = list(&state.pool, q.status.as_deref())
         .await
         .map_err(api_error)?;
+    if authed.kind != "key" {
+        oaths.retain(|o| o.realm.as_ref().is_none_or(|r| authed.can("viewer", r)));
+    }
     Ok(Json(oaths))
 }
 

@@ -39,6 +39,7 @@ pub struct AppState {
     /// `MAX_CONCURRENT_UPLOADS` permits; an upload handler holds one while
     /// it works. Shared by every clone of the state.
     pub uploads: Arc<tokio::sync::Semaphore>,
+    pub grants_cache: Arc<local_auth::GrantCache>,
 }
 
 impl AppState {
@@ -47,11 +48,21 @@ impl AppState {
         cfg: Arc<config::HeimdallConfig>,
         http: reqwest::Client,
     ) -> AppState {
+        Self::with_grant_cache_ttl(pool, cfg, http, std::time::Duration::from_secs(30))
+    }
+
+    pub fn with_grant_cache_ttl(
+        pool: sqlx::PgPool,
+        cfg: Arc<config::HeimdallConfig>,
+        http: reqwest::Client,
+        ttl: std::time::Duration,
+    ) -> AppState {
         AppState {
             pool,
             cfg,
             http,
             uploads: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            grants_cache: Arc::new(local_auth::GrantCache::new(ttl)),
         }
     }
 }

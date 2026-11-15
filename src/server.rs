@@ -15,9 +15,9 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::auth::{require, Authed, Scope};
 use crate::config::HeimdallConfig;
 use crate::error::ApiError;
+use crate::local_auth::Principal;
 use crate::model::{FindingKind, Severity};
 use crate::{auth, db, gate, ingest, meters, oath, scheduler, telemetry, AppState};
 
@@ -263,9 +263,9 @@ fn severity_text(s: Severity) -> &'static str {
 
 async fn realms_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
 ) -> Result<Json<Vec<RealmRow>>, ApiError> {
-    require(&authed, Scope::Read)?;
+    authed.require_read()?;
     let rows: Vec<RealmRow> = sqlx::query_as(
         "SELECT r.name, \
                 (SELECT count(*) FROM services s WHERE s.realm = r.name) AS services, \
@@ -273,7 +273,7 @@ async fn realms_handler(
                     AS open_findings \
          FROM unnest($1::text[]) AS r(name)",
     )
-    .bind(&state.cfg.realms)
+    .bind(authed.readable_realms(&state.cfg.realms))
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -281,10 +281,10 @@ async fn realms_handler(
 
 async fn findings_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Query(q): Query<FindingsQuery>,
 ) -> Result<Json<Vec<FindingRow>>, ApiError> {
-    require(&authed, Scope::Read)?;
+    authed.require_read()?;
     let realm = given(&q.realm);
     check_realm(&state.cfg, realm)?;
     let limit = parse_limit(&q.limit)?;
@@ -328,6 +328,7 @@ async fn findings_handler(
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
+           AND ($7 OR f.realm = ANY($8)) \
          ORDER BY f.opened_at DESC, f.id DESC \
          LIMIT $5 OFFSET $6",
     )
@@ -337,6 +338,8 @@ async fn findings_handler(
     .bind(&severities)
     .bind(limit)
     .bind(offset)
+    .bind(authed.kind == "key")
+    .bind(authed.readable_realms(&state.cfg.realms))
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -344,19 +347,21 @@ async fn findings_handler(
 
 async fn services_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Query(q): Query<RealmQuery>,
 ) -> Result<Json<Vec<ServiceRow>>, ApiError> {
-    require(&authed, Scope::Read)?;
+    authed.require_read()?;
     let realm = given(&q.realm);
     check_realm(&state.cfg, realm)?;
     let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT s.id, s.realm, s.name, count(DISTINCT sc.component_id) AS components \
          FROM services s LEFT JOIN service_components sc ON sc.service_id = s.id \
-         WHERE ($1::text IS NULL OR s.realm = $1) \
+         WHERE ($1::text IS NULL OR s.realm = $1) AND ($2 OR s.realm = ANY($3)) \
          GROUP BY s.id ORDER BY s.realm, s.name",
     )
     .bind(realm)
+    .bind(authed.kind == "key")
+    .bind(authed.readable_realms(&state.cfg.realms))
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -364,14 +369,17 @@ async fn services_handler(
 
 async fn components_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     UrlPath(id): UrlPath<i64>,
 ) -> Result<Json<Vec<ComponentRow>>, ApiError> {
-    require(&authed, Scope::Read)?;
-    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM services WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
+    authed.require_read()?;
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM services WHERE id = $1 AND ($2 OR realm = ANY($3))")
+            .bind(id)
+            .bind(authed.kind == "key")
+            .bind(authed.readable_realms(&state.cfg.realms))
+            .fetch_optional(&state.pool)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound);
     }
@@ -399,10 +407,11 @@ fn parse_since(s: &str) -> Result<DateTime<Utc>, ApiError> {
 
 async fn releases_handler(
     State(state): State<AppState>,
-    authed: Authed,
+    authed: Principal,
     Query(q): Query<ReleasesQuery>,
 ) -> Result<Json<Vec<ReleaseRow>>, ApiError> {
-    require(&authed, Scope::Read)?;
+    authed.require_read()?;
+    // Watch targets are global, so any grant permits reading releases.
     let limit = parse_limit(&q.limit)?;
     let since = match given(&q.since) {
         Some(s) => Some(parse_since(s)?),
@@ -483,6 +492,138 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn session_read_access_is_realm_scoped(pool: PgPool) {
+        use sha2::{Digest, Sha256};
+        seed_finding(&pool, "a", "one", "finding-a", "high").await;
+        seed_finding(&pool, "b", "two", "finding-b", "high").await;
+        let service_b: i64 = sqlx::query_scalar("SELECT id FROM services WHERE realm='b'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for realm in [Some("a"), Some("b"), None] {
+            sqlx::query("INSERT INTO oaths(advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,created_by) VALUES ('CVE-test','pkg','one',$1,'ignore','test','1','alice')")
+                .bind(realm).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO releases(target,version) VALUES ('global','1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let user: i64 =
+            sqlx::query_scalar("INSERT INTO users(username) VALUES ('alice') RETURNING id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO sessions(id_hash,user_id,csrf_token,expires_at) VALUES ($1,$2,'csrf',now()+interval '1 day')")
+            .bind(Sha256::digest(b"test-session").to_vec()).bind(user).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_grants(user_id,role,realm) VALUES ($1,'viewer','a')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cfg = HeimdallConfig::from_yaml(
+            "realms: [a, b]\nauth: {public_url: 'http://localhost:8080'}",
+        )
+        .unwrap();
+        let app = router(AppState::with_grant_cache_ttl(
+            pool.clone(),
+            Arc::new(cfg),
+            reqwest::Client::new(),
+            Duration::ZERO,
+        ));
+        let get_session = |path: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(path)
+                            .header("cookie", "heimdall_session=test-session")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                (
+                    status,
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                )
+            }
+        };
+        for (path, count) in [
+            ("/api/v1/findings", 1),
+            ("/api/v1/services", 1),
+            ("/api/v1/realms", 1),
+            ("/api/v1/oaths", 2),
+            ("/api/v1/releases", 1),
+        ] {
+            let (status, body) = get_session(path.into()).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert_eq!(body.as_array().unwrap().len(), count, "{path}: {body}");
+            if path != "/api/v1/releases" {
+                assert!(
+                    !body.to_string().contains("finding-b") && !body.to_string().contains("\"b\""),
+                    "{path}: {body}"
+                );
+            }
+        }
+        assert_eq!(
+            get_session(format!("/api/v1/services/{service_b}/components"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_session("/api/v1/findings?realm=b".into())
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        sqlx::query("UPDATE user_grants SET realm='*' WHERE user_id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (path, count) in [
+            ("/api/v1/findings", 2),
+            ("/api/v1/services", 2),
+            ("/api/v1/realms", 2),
+            ("/api/v1/oaths", 3),
+        ] {
+            let (status, body) = get_session(path.into()).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.as_array().unwrap().len(), count, "{path}: {body}");
+        }
+        assert_eq!(
+            get_session(format!("/api/v1/services/{service_b}/components"))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        sqlx::query("DELETE FROM user_grants WHERE user_id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for path in [
+            "/api/v1/findings",
+            "/api/v1/services",
+            "/api/v1/realms",
+            "/api/v1/oaths",
+            "/api/v1/releases",
+            &format!("/api/v1/services/{service_b}/components"),
+        ] {
+            let (status, body) = get_session(path.into()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(body, serde_json::json!({"error":"no_access"}));
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

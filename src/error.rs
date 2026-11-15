@@ -10,6 +10,7 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized,
     Forbidden,
+    NoAccess,
     NotFound,
     PayloadTooLarge,
     Internal(anyhow::Error),
@@ -20,6 +21,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            ApiError::NoAccess => (StatusCode::FORBIDDEN, "no_access".to_string()),
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             ApiError::PayloadTooLarge => (

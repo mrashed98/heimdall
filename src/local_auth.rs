@@ -1,4 +1,5 @@
 //! Local identities and browser sessions.
+use crate::config::{HeimdallConfig, Role};
 use crate::{
     auth::{authenticate_key, Scope},
     error::ApiError,
@@ -19,6 +20,11 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use subtle::ConstantTimeEq;
 
 fn random_token() -> String {
@@ -99,7 +105,7 @@ pub async fn set_password(pool: &PgPool, name: &str, password: &str) -> anyhow::
     tx.commit().await?;
     Ok(())
 }
-#[derive(Clone, Debug, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct Grant {
     pub role: String,
     pub realm: String,
@@ -109,9 +115,110 @@ pub struct Principal {
     pub kind: &'static str,
     pub name: String,
     pub grants: Vec<Grant>,
+    pub groups: Vec<String>,
     pub csrf_token: Option<String>,
     pub(crate) session_hash: Option<Vec<u8>>,
     pub scope: Option<Scope>,
+}
+pub struct GrantCache {
+    ttl: Duration,
+    entries: Mutex<HashMap<i64, (Instant, Vec<Grant>)>>,
+}
+impl GrantCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+    async fn get(&self, pool: &PgPool, user_id: i64) -> Result<Vec<Grant>, sqlx::Error> {
+        if let Some((at, grants)) = self.entries.lock().unwrap().get(&user_id) {
+            if at.elapsed() < self.ttl {
+                return Ok(grants.clone());
+            }
+        }
+        let fetched_at = Instant::now();
+        let grants = sqlx::query_as::<_, Grant>(
+            "SELECT role, realm FROM user_grants WHERE user_id=$1 ORDER BY role,realm",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+        let mut entries = self.entries.lock().unwrap();
+        if entries
+            .get(&user_id)
+            .is_none_or(|(at, _)| *at <= fetched_at)
+        {
+            entries.insert(user_id, (fetched_at, grants.clone()));
+        }
+        Ok(grants)
+    }
+}
+impl Principal {
+    pub fn can(&self, role: &str, realm: &str) -> bool {
+        fn rank(role: &str) -> u8 {
+            match role {
+                "viewer" => 1,
+                "editor" => 2,
+                "admin" => 3,
+                _ => 0,
+            }
+        }
+        let needed = rank(role);
+        needed > 0
+            && self
+                .grants
+                .iter()
+                .any(|g| (g.realm == "*" || g.realm == realm) && rank(&g.role) >= needed)
+    }
+    pub fn readable_realms(&self, all: &[String]) -> Vec<String> {
+        all.iter()
+            .filter(|r| self.can("viewer", r))
+            .cloned()
+            .collect()
+    }
+    pub fn require_read(&self) -> Result<(), ApiError> {
+        if self.grants.is_empty() {
+            if self.kind == "key" {
+                Err(ApiError::Forbidden)
+            } else {
+                Err(ApiError::NoAccess)
+            }
+        } else {
+            Ok(())
+        }
+    }
+    fn add_config_grants(&mut self, cfg: &HeimdallConfig) {
+        if let Some(oidc) = cfg.auth.as_ref().and_then(|a| a.oidc.as_ref()) {
+            let mut add = |role: Role, realms: &[String]| {
+                if role == Role::Admin && !cfg.admins.contains(&self.name) {
+                    return;
+                }
+                let role = match role {
+                    Role::Viewer => "viewer",
+                    Role::Editor => "editor",
+                    Role::Admin => "admin",
+                };
+                for realm in realms {
+                    let grant = Grant {
+                        role: role.into(),
+                        realm: realm.clone(),
+                    };
+                    if !self.grants.contains(&grant) {
+                        self.grants.push(grant);
+                    }
+                }
+            };
+            for mapping in &oidc.role_mappings {
+                if self.groups.contains(&mapping.group) {
+                    add(mapping.role, &mapping.realms);
+                }
+            }
+            if let Some(default) = &oidc.default_role {
+                add(default.role, &default.realms);
+            }
+        }
+    }
 }
 impl FromRequestParts<AppState> for Principal {
     type Rejection = ApiError;
@@ -132,6 +239,7 @@ impl FromRequestParts<AppState> for Principal {
                     }],
                     Scope::Ingest => vec![],
                 },
+                groups: vec![],
                 csrf_token: None,
                 session_hash: None,
                 scope: Some(key.scope),
@@ -165,20 +273,21 @@ impl FromRequestParts<AppState> for Principal {
                 return Err(ApiError::Forbidden);
             }
         }
-        let grants = sqlx::query_as::<_, Grant>(
-            "SELECT role, realm FROM user_grants WHERE user_id=$1 ORDER BY role,realm",
-        )
-        .bind(user_id)
-        .fetch_all(&state.pool)
-        .await?;
-        Ok(Self {
+        let mut grants = state.grants_cache.get(&state.pool, user_id).await?;
+        if !state.cfg.admins.contains(&name) {
+            grants.retain(|g| g.role != "admin");
+        }
+        let mut principal = Self {
             kind: "user",
             name,
             grants,
+            groups: vec![],
             csrf_token: Some(csrf),
             session_hash: Some(id),
             scope: None,
-        })
+        };
+        principal.add_config_grants(&state.cfg);
+        Ok(principal)
     }
 }
 #[derive(Deserialize)]
@@ -325,7 +434,12 @@ mod tests {
 
     fn app(pool: PgPool) -> Router {
         let cfg = crate::config::HeimdallConfig::from_yaml("realms: [prod]\nauth:\n  public_url: http://localhost:8080\n  local: { enabled: true }\n").unwrap();
-        crate::server::router(AppState::new(pool, Arc::new(cfg), reqwest::Client::new()))
+        crate::server::router(AppState::with_grant_cache_ttl(
+            pool,
+            Arc::new(cfg),
+            reqwest::Client::new(),
+            Duration::ZERO,
+        ))
     }
     async fn call(
         app: &Router,
@@ -355,6 +469,63 @@ mod tests {
         let bytes = res.into_body().collect().await.unwrap().to_bytes();
         (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
     }
+    #[test]
+    fn effective_config_grants_respect_groups_roles_and_admin_list() {
+        let cfg = crate::config::HeimdallConfig::from_yaml("realms: [a, b]\nauth:\n  public_url: http://localhost\n  oidc:\n    issuer: https://example.com\n    client_id: client\n    client_secret_env: SECRET\n    role_mappings:\n      - {group: team, role: editor, realms: [a]}\n      - {group: admins, role: admin, realms: ['*']}\n    default_role: {role: viewer, realms: [b]}\n").unwrap();
+        let mut p = Principal {
+            kind: "user",
+            name: "alice".into(),
+            grants: vec![],
+            groups: vec!["team".into(), "admins".into()],
+            csrf_token: None,
+            session_hash: None,
+            scope: None,
+        };
+        p.add_config_grants(&cfg);
+        p.add_config_grants(&cfg);
+        assert_eq!(p.grants.len(), 2);
+        assert!(p.can("viewer", "a") && p.can("editor", "a") && p.can("viewer", "b"));
+        assert!(!p.can("admin", "a") && !p.can("editor", "b"));
+        assert_eq!(p.readable_realms(&cfg.realms), cfg.realms);
+        let mut allowed = cfg.clone();
+        allowed.admins.push("alice".into());
+        p.add_config_grants(&allowed);
+        assert!(p.can("admin", "b"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn grant_cache_honors_ttl_and_zero_ttl(pool: PgPool) {
+        let user: i64 =
+            sqlx::query_scalar("INSERT INTO users(username) VALUES ('cached') RETURNING id")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO user_grants(user_id, role, realm) VALUES ($1,'viewer','a')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cache = GrantCache::new(Duration::from_secs(30));
+        assert_eq!(cache.get(&pool, user).await.unwrap().len(), 1);
+        sqlx::query("DELETE FROM user_grants WHERE user_id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cache.get(&pool, user).await.unwrap().len(), 1);
+        cache.entries.lock().unwrap().get_mut(&user).unwrap().0 =
+            Instant::now() - Duration::from_secs(31);
+        assert!(cache.get(&pool, user).await.unwrap().is_empty());
+        let uncached = GrantCache::new(Duration::ZERO);
+        assert!(uncached.get(&pool, user).await.unwrap().is_empty());
+        sqlx::query("INSERT INTO user_grants(user_id, role, realm) VALUES ($1,'viewer','b')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(uncached.get(&pool, user).await.unwrap()[0].realm, "b");
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn login_csrf_logout_and_expiry(pool: PgPool) {
         create_user(&pool, &[], "alice", "correct", Some("viewer"))
