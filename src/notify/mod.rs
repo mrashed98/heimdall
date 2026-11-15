@@ -254,7 +254,9 @@ async fn pending(tx: &mut PgConnection) -> anyhow::Result<Vec<(String, AlertItem
          ORDER BY f.id \
          FOR UPDATE OF f"
     );
-    let rows: Vec<Pending> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
+    let rows: Vec<Pending> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .fetch_all(&mut *tx)
+        .await?;
     Ok(rows
         .into_iter()
         .map(|p| (p.ref_id.unwrap_or_default(), p.item))

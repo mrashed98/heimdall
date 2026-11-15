@@ -458,19 +458,19 @@ async fn write_matches(
     let stale = "not exists (select 1 from unnest($2::bigint[], $3::text[]) as t(c, a) \
                  where t.c = component_advisories.component_id \
                    and t.a = component_advisories.advisory_id)";
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "delete from component_advisories where advisory_id = any($1) \
          and match_source = 'nvd' and {stale}"
-    ))
+    )))
     .bind(&touched)
     .bind(&pair_c)
     .bind(&pair_a)
     .execute(&mut **tx)
     .await?;
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "update component_advisories set match_source = 'osv' where advisory_id = any($1) \
          and match_source = 'both' and {stale}"
-    ))
+    )))
     .bind(&touched)
     .bind(&pair_c)
     .bind(&pair_a)
