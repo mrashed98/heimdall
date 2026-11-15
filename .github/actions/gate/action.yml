@@ -23,7 +23,7 @@ inputs:
     description: GitHub repository (owner/name) that publishes the heimdall release binaries.
     default: ${{ github.action_repository }}
   version:
-    description: Heimdall release to download (a tag such as v0.2.0, or latest).
+    description: Heimdall release to download (a tag such as v0.2.1, or latest).
     default: latest
 runs:
   using: composite
