@@ -180,6 +180,7 @@ fn read_routes() -> Router<AppState> {
         .route("/api/v1/realms", get(realms_handler))
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/findings", get(findings_handler))
+        .route("/api/v1/findings/{id}", get(finding_detail_handler))
         .route("/api/v1/services", get(services_handler))
         .route("/api/v1/services/{id}/components", get(components_handler))
         .route("/api/v1/releases", get(releases_handler))
@@ -242,6 +243,8 @@ pub struct ReleaseRow {
 #[derive(Deserialize)]
 struct FindingsQuery {
     realm: Option<String>,
+    realms: Option<String>,
+    view_status: Option<String>,
     status: Option<String>,
     kind: Option<String>,
     min_severity: Option<String>,
@@ -452,6 +455,23 @@ async fn findings_handler(
             "unknown status {status:?} (use open or resolved)"
         )));
     }
+    let selected = match given(&q.realms) {
+        Some(value) => {
+            let mut realms = Vec::new();
+            for name in value.split(',') {
+                check_realm(&state.cfg, Some(name))?;
+                if authed.can("viewer", name) {
+                    realms.push(name.to_owned());
+                }
+            }
+            Some(realms)
+        }
+        None => None,
+    };
+    let view_status = given(&q.view_status);
+    if view_status.is_some_and(|s| !["open", "snoozed", "ignored", "resolved"].contains(&s)) {
+        return Err(ApiError::BadRequest("unknown view status".into()));
+    }
     let kind: Option<FindingKind> = match given(&q.kind) {
         Some(k) => Some(
             serde_json::from_value(serde_json::Value::String(k.to_string()))
@@ -502,7 +522,11 @@ async fn findings_handler(
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
          LEFT JOIN advisories a ON a.id = f.ref_id \
-         WHERE f.status = $1 \
+         LEFT JOIN LATERAL (SELECT o.kind FROM oaths o WHERE (o.advisory_id = f.ref_id OR o.advisory_id = ANY(a.aliases) OR EXISTS (SELECT 1 FROM advisories oa WHERE oa.id = o.advisory_id AND f.ref_id = ANY(oa.aliases))) AND o.name_key = c.name_key AND o.service_name = s.name AND (o.realm IS NULL OR o.realm = f.realm) AND o.status = 'active' AND COALESCE(o.expires_at, o.review_at) > now() ORDER BY o.id LIMIT 1) active_oath ON true \
+         WHERE f.status = CASE WHEN $14::text = 'resolved' THEN 'resolved' WHEN $14::text IS NOT NULL THEN 'open' ELSE $1 END \
+           AND ($13::text[] IS NULL OR f.realm = ANY($13)) \
+           AND ($14::text IS NULL OR $14 = 'resolved' OR \
+                CASE WHEN $14 = 'open' THEN active_oath.kind IS NULL ELSE active_oath.kind = CASE $14 WHEN 'snoozed' THEN 'snooze' ELSE 'ignore' END END) \
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
@@ -527,9 +551,66 @@ async fn findings_handler(
         .bind(given(&q.service))
         .bind(given(&q.search))
         .bind(q.has_fix)
+        .bind(selected)
+        .bind(view_status)
         .fetch_all(&state.pool)
         .await?;
     Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct FindingDetailQuery {
+    affected_offset: Option<String>,
+    oaths_offset: Option<String>,
+}
+
+#[derive(FromRow)]
+struct FindingDetailRow {
+    realm: String,
+    service: Option<String>,
+    purl: Option<String>,
+    version: Option<String>,
+    name_key: Option<String>,
+    summary: Option<String>,
+    fixed: Option<serde_json::Value>,
+    scores: Option<serde_json::Value>,
+    aliases: Option<Vec<String>>,
+}
+
+async fn finding_detail_handler(
+    State(state): State<AppState>,
+    authed: Principal,
+    UrlPath(id): UrlPath<i64>,
+    Query(q): Query<FindingDetailQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authed.require_read()?;
+    let affected_offset = parse_offset(&q.affected_offset)?;
+    let oaths_offset = parse_offset(&q.oaths_offset)?;
+    let row: Option<FindingDetailRow> = sqlx::query_as(
+        "SELECT f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
+    ).bind(id).bind(authed.kind == "key").bind(authed.readable_realms(&state.cfg.realms)).fetch_optional(&state.pool).await?;
+    let FindingDetailRow {
+        realm,
+        service,
+        purl,
+        version,
+        name_key,
+        summary,
+        fixed,
+        scores,
+        aliases,
+    } = row.ok_or(ApiError::NotFound)?;
+    let ref_id: Option<String> = sqlx::query_scalar("SELECT ref_id FROM findings WHERE id=$1")
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+    let affected: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as("SELECT DISTINCT s.name, sc.via_image_digest, i.image_ref FROM service_components sc JOIN services s ON s.id=sc.service_id JOIN components c ON c.id=sc.component_id LEFT JOIN image_sboms i ON i.digest=sc.via_image_digest WHERE s.realm=$1 AND c.purl=$2 ORDER BY s.name, sc.via_image_digest, i.image_ref LIMIT 25 OFFSET $3")
+        .bind(&realm).bind(&purl).bind(affected_offset).fetch_all(&state.pool).await?;
+    let history: Vec<oath::Oath> = sqlx::query_as("SELECT id, advisory_id, name_key, service_name, realm, kind, reason, version_at_creation, expires_at, review_at, created_by, created_at, status FROM oaths WHERE (advisory_id=$1 OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id=$1) OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id=oaths.advisory_id)) AND name_key=$2 AND service_name=$3 AND (realm=$4 OR realm IS NULL) ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $5")
+        .bind(&ref_id).bind(&name_key).bind(&service).bind(&realm).bind(oaths_offset).fetch_all(&state.pool).await?;
+    Ok(Json(
+        serde_json::json!({"summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
+    ))
 }
 
 async fn services_handler(
@@ -788,6 +869,22 @@ mod tests {
                 .len(),
             0
         );
+        let finding_b: i64 = sqlx::query_scalar("SELECT id FROM findings WHERE realm='b'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_session(format!("/api/v1/findings/{finding_b}")).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert!(
+            get_session("/api/v1/findings?realms=b&view_status=open".into())
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         sqlx::query("UPDATE user_grants SET realm='*' WHERE user_id=$1")
             .bind(user)
             .execute(&pool)
@@ -994,6 +1091,46 @@ mod tests {
         ] {
             assert_eq!(get(&app, path, Some(&key)).await.0, StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn finding_detail_and_oath_status_filters(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "one", "high").await;
+        sqlx::query("INSERT INTO components (purl,name_key,ecosystem,version) VALUES ('pkg:generic/foo@1','pkg:generic/foo','generic','1')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO advisories (id,aliases,severity,summary,source,scores,fixed) VALUES ('GHSA-test',ARRAY['CVE-2026-1234'],'high','Example','osv','{\"osv\":7.5}','{\"pkg:generic/foo\":[\"2\"]}')").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET ref_id='GHSA-test', component_id=(SELECT id FROM components LIMIT 1) WHERE key='one'").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO service_components (service_id,component_id,source) SELECT s.id,c.id,'git' FROM services s,components c").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO oaths(advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,created_by,expires_at) VALUES ('CVE-2026-1234','pkg:generic/foo','api','prod','snooze','later','1','alice',now()+interval '1 day')").execute(&pool).await.unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM findings WHERE key='one'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        for (status, count) in [("snoozed", 1), ("open", 0), ("ignored", 0), ("resolved", 0)] {
+            let (code, body) = get(
+                &app,
+                &format!("/api/v1/findings?realms=prod&view_status={status}"),
+                Some(&key),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{body}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                count
+            );
+        }
+        let (code, body) = get(&app, &format!("/api/v1/findings/{id}"), Some(&key)).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["summary"], "Example");
+        assert_eq!(detail["fixed"]["pkg:generic/foo"][0], "2");
+        assert_eq!(detail["affected"][0]["service"], "api");
+        assert_eq!(detail["oaths"][0]["reason"], "later");
     }
 
     #[sqlx::test(migrations = "./migrations")]
