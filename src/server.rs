@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -35,7 +36,48 @@ pub fn router(state: AppState) -> Router {
         .merge(oath::routes())
         .merge(read_routes())
         .route("/healthz", get(healthz))
+        .fallback(ui_fallback)
         .with_state(state)
+}
+
+include!(concat!(env!("OUT_DIR"), "/ui_embed.rs"));
+
+async fn ui_fallback(method: Method, uri: Uri) -> Response {
+    let path = uri.path();
+    // Reserved server namespaces must never turn missing routes into HTML.
+    if ["/api", "/auth", "/healthz", "/readyz", "/metrics"]
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        return crate::error::ApiError::NotFound.into_response();
+    }
+    if method != Method::GET {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let requested = path.trim_start_matches('/');
+    let (name, asset) = UiAssets::get(requested)
+        .map(|asset| (requested, asset))
+        .or_else(|| UiAssets::get("index.html").map(|asset| ("index.html", asset)))
+        .expect("build script always provides index.html");
+    let cache = if name.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    let mime = mime_guess::from_path(name).first_or_octet_stream();
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            (header::CACHE_CONTROL, cache),
+        ],
+        asset.data.into_owned(),
+    )
+        .into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_SECURITY_POLICY, "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'".parse().unwrap());
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
+    headers.insert(header::REFERRER_POLICY, "same-origin".parse().unwrap());
+    response
 }
 
 /// `router` plus `/metrics` (no auth: cluster-internal), rendered from
@@ -793,6 +835,70 @@ mod tests {
                 let (status, _) = get(&app, &format!("{path}?limit={bad}"), Some(&key)).await;
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{path} limit={bad}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn fallback_serves_html_with_security_headers_and_preserves_api_404() {
+        let app = Router::new().fallback(ui_fallback);
+        for path in ["/", "/findings"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(response.headers()[header::CONTENT_SECURITY_POLICY], "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
+            assert_eq!(
+                response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+                "nosniff"
+            );
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
+            assert!(!response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty());
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    }
+
+    #[tokio::test]
+    async fn embedded_assets_have_immutable_cache_headers() {
+        if let Some(name) = UiAssets::iter().find(|name| name.starts_with("assets/")) {
+            let response = ui_fallback(Method::GET, format!("/{name}").parse().unwrap()).await;
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+        } else {
+            let html = UiAssets::get("index.html").unwrap();
+            assert!(std::str::from_utf8(&html.data)
+                .unwrap()
+                .contains("UI not built; run npm run build in web/"));
         }
     }
 }
