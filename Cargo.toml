@@ -20,6 +20,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
+rpassword = "7"
+subtle = "2"
 axum = "0.8"
 base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }

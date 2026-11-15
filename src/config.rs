@@ -40,6 +40,7 @@ pub struct HeimdallConfig {
     pub retention: Retention,
     #[serde(default)]
     pub sight: SightConfig,
+    pub auth: Option<AuthConfig>,
 }
 
 impl HeimdallConfig {
@@ -74,6 +75,40 @@ impl HeimdallConfig {
         ] {
             if v == 0 {
                 bail!("{key} must be greater than 0");
+            }
+        }
+        if let Some(auth) = &self.auth {
+            let url = url::Url::parse(&auth.public_url).context("auth.public_url")?;
+            if url.host_str().is_none()
+                || !(url.scheme() == "https"
+                    || (url.scheme() == "http" && url.host_str() == Some("localhost")))
+                || url.username() != ""
+                || url.password().is_some()
+            {
+                bail!("auth.public_url must be HTTPS or HTTP localhost");
+            }
+            if auth.session.idle_hours == 0 || auth.session.absolute_days == 0 {
+                bail!("auth.session timeouts must be positive");
+            }
+            if let Some(oidc) = &auth.oidc {
+                if oidc.client_id.is_empty()
+                    || oidc.client_secret_env.is_empty()
+                    || url::Url::parse(&oidc.issuer).is_err()
+                {
+                    bail!("auth.oidc requires a valid issuer, client_id and client_secret_env");
+                }
+                for grant in oidc
+                    .role_mappings
+                    .iter()
+                    .map(|m| &m.realms)
+                    .chain(oidc.default_role.iter().map(|g| &g.realms))
+                {
+                    if grant.is_empty()
+                        || grant.iter().any(|r| r != "*" && !self.realms.contains(r))
+                    {
+                        bail!("auth.oidc mapping has unknown or empty realms");
+                    }
+                }
             }
         }
         let known = |r: &str| self.realms.iter().any(|k| k == r);
@@ -134,6 +169,79 @@ impl HeimdallConfig {
             .as_deref()
             .or(self.realms.first().map(|r| r.as_str()))
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    pub public_url: String,
+    #[serde(default)]
+    pub session: SessionConfig,
+    #[serde(default)]
+    pub local: LocalConfig,
+    pub oidc: Option<OidcConfig>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfig {
+    #[serde(default = "idle_hours")]
+    pub idle_hours: u32,
+    #[serde(default = "absolute_days")]
+    pub absolute_days: u32,
+}
+fn idle_hours() -> u32 {
+    12
+}
+fn absolute_days() -> u32 {
+    7
+}
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            idle_hours: idle_hours(),
+            absolute_days: absolute_days(),
+        }
+    }
+}
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret_env: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub groups_claim: Option<String>,
+    #[serde(default)]
+    pub role_mappings: Vec<RoleMapping>,
+    pub default_role: Option<GrantConfig>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleMapping {
+    pub group: String,
+    pub role: Role,
+    pub realms: Vec<String>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantConfig {
+    pub role: Role,
+    pub realms: Vec<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Viewer,
+    Editor,
+    Admin,
 }
 
 /// In-process Sight (`heimdall serve` scanning the cluster it runs in).
@@ -679,6 +787,8 @@ pub struct Retention {
     pub releases_days: u32,
     #[serde(default = "default_outbox_days")]
     pub outbox_days: u32,
+    #[serde(default = "default_findings_days")]
+    pub audit_days: u32,
 }
 
 impl Default for Retention {
@@ -687,6 +797,7 @@ impl Default for Retention {
             findings_days: default_findings_days(),
             releases_days: default_releases_days(),
             outbox_days: default_outbox_days(),
+            audit_days: default_findings_days(),
         }
     }
 }
@@ -704,6 +815,26 @@ fn default_outbox_days() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_config_validates() {
+        let yaml = "realms: [prod]\nauth:\n  public_url: https://example.com\n  local: {enabled: true}\n  oidc:\n    issuer: https://example.com/issuer\n    client_id: heimdall\n    client_secret_env: SECRET\n    scopes: [openid, profile]\n    groups_claim: groups\n    role_mappings:\n      - {group: team, role: editor, realms: [prod]}\n    default_role: {role: viewer, realms: ['*']}\n";
+        let cfg = HeimdallConfig::from_yaml(yaml).unwrap();
+        assert_eq!(cfg.auth.unwrap().session.idle_hours, 12);
+        assert!(HeimdallConfig::from_yaml(
+            "realms: [prod]\nauth: {public_url: 'http://example.com'}"
+        )
+        .is_err());
+        assert!(HeimdallConfig::from_yaml(
+            "realms: [prod]\nauth: {public_url: 'http://localhost', session: {idle_hours: 0}}"
+        )
+        .is_err());
+        assert!(HeimdallConfig::from_yaml("realms: [prod]\nauth: {public_url: 'https://example.com', local: {enabled: true, typo: true}}").is_err());
+        assert!(
+            HeimdallConfig::from_yaml(&yaml.replace("realms: [prod]}", "realms: [missing]}"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn example_config_parses_with_defaults() {
