@@ -278,6 +278,12 @@ pub struct FindingRow {
     pub opened_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub details: serde_json::Value,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_name: Option<String>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -327,6 +333,7 @@ struct FindingsQuery {
     has_fix: Option<bool>,
     sort: Option<String>,
     order: Option<String>,
+    ui: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +603,7 @@ async fn findings_handler(
         && q.has_fix.is_none()
         && q.sort.is_none()
         && q.order.is_none()
+        && !q.ui.unwrap_or(false)
     {
         let rows: Vec<FindingRow> = sqlx::query_as(
             "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
@@ -635,9 +643,15 @@ async fn findings_handler(
     } else {
         "AND $11::text IS NULL"
     };
+    let secondary = if q.ui.unwrap_or(false) {
+        "f.opened_at DESC, "
+    } else {
+        ""
+    };
     let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
-                f.severity, f.status, f.opened_at, f.resolved_at, f.details \
+                f.severity, f.status, f.opened_at, f.resolved_at, f.details, \
+                CASE WHEN $15 THEN c.version END AS component_version \
          FROM findings f \
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
@@ -653,10 +667,10 @@ async fn findings_handler(
            AND ($10::text IS NULL OR s.name = $10) \
            {search_filter} \
            AND ($12::bool IS NULL OR (f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb) = $12) \
-         ORDER BY {sort} {direction} NULLS LAST, f.id DESC \
+         ORDER BY {sort} {direction} NULLS LAST, {secondary}f.id DESC \
          LIMIT $5 OFFSET $6"
     );
-    let rows: Vec<FindingRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+    let mut rows: Vec<FindingRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(status)
         .bind(realm)
         .bind(kind)
@@ -671,8 +685,21 @@ async fn findings_handler(
         .bind(q.has_fix)
         .bind(selected)
         .bind(view_status)
+        .bind(q.ui.unwrap_or(false))
         .fetch_all(&state.pool)
         .await?;
+    if q.ui.unwrap_or(false) {
+        for row in &mut rows {
+            row.component_name = row.purl.as_deref().and_then(|purl| {
+                purl.parse::<packageurl::PackageUrl>().ok().map(|package| {
+                    match package.namespace() {
+                        Some(namespace) => format!("{namespace}/{}", package.name()),
+                        None => package.name().to_owned(),
+                    }
+                })
+            });
+        }
+    }
     Ok(Json(rows))
 }
 
@@ -1301,6 +1328,69 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_ui_package_and_severity_order_preserve_legacy_shape(pool: PgPool) {
+        for (name, severity) in [
+            ("old-critical", "critical"),
+            ("new-critical", "critical"),
+            ("new-high", "high"),
+        ] {
+            seed_finding(&pool, "prod", "api", name, severity).await;
+        }
+        sqlx::query("INSERT INTO components (purl,name_key,ecosystem,version) VALUES ('pkg:pypi/django@3.2.0','pkg:pypi/django','pypi','3.2.0')").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET component_id=(SELECT id FROM components LIMIT 1), opened_at=CASE key WHEN 'old-critical' THEN '2024-01-01'::timestamptz WHEN 'new-critical' THEN '2025-01-01'::timestamptz ELSE '2026-01-01'::timestamptz END").execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        for path in [
+            "/api/v1/findings",
+            "/api/v1/findings?offset=0&sort=severity",
+        ] {
+            let (status, body) = get(&app, path, Some(&key)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+            let mut fields: Vec<_> = rows[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            fields.sort_unstable();
+            assert_eq!(
+                fields,
+                vec![
+                    "details",
+                    "id",
+                    "key",
+                    "kind",
+                    "opened_at",
+                    "purl",
+                    "realm",
+                    "ref_id",
+                    "resolved_at",
+                    "service",
+                    "severity",
+                    "status"
+                ]
+            );
+        }
+        let (status, body) = get(
+            &app,
+            "/api/v1/findings?ui=true&sort=severity&order=desc",
+            Some(&key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["key"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["new-critical", "old-critical", "new-high"]
+        );
+        assert_eq!(rows[0]["component_name"], "django");
+        assert_eq!(rows[0]["component_version"], "3.2.0");
     }
 
     #[sqlx::test(migrations = "./migrations")]

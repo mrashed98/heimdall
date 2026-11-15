@@ -1,16 +1,22 @@
 <script lang="ts">
+ import { onMount } from 'svelte';
  import { api, type Grant } from './api';
- import { findingsUrl, validateOath, canEdit, advisoryLinks, type Filters } from './findings';
+ import { findingsUrl, validateOath, canEdit, advisoryLinks, defaultFilters, sortFromSearch, sortUrl, type Filters } from './findings';
  import SeverityBadge from './components/SeverityBadge.svelte';
  import Table from './components/Table.svelte';
  import Skeleton from './components/Skeleton.svelte';
  import RetryState from './components/RetryState.svelte';
  import EmptyState from './components/EmptyState.svelte';
  let { realms, grants }: { realms:string[]; grants:Grant[] } = $props();
- type Finding = { id:number; kind:string; realm:string; service:string|null; purl:string|null; ref_id:string|null; severity:string; status:string; opened_at:string; details:Record<string, unknown> };
+ type Finding = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; ref_id:string|null; severity:string; status:string; opened_at:string; details:Record<string, unknown> };
  type Oath = { id:number; kind:string; reason:string; status:string; created_by:string; created_at:string; expires_at:string|null; review_at:string|null };
  type Detail = { summary:string|null; aliases:string[]; scores:Record<string, number>|null; fixed:Record<string,string[]>|null; name_key:string|null; version:string|null; affected:{service:string; digest:string|null; image:string|null}[]; oaths:Oath[] };
- let filters = $state<Filters>({severity:'',kind:'',service:'',has_fix:'',view_status:'open',search:'',sort:'opened_at',order:'desc',offset:0});
+ let filters = $state<Filters>({...defaultFilters, ...sortFromSearch(location.search)});
+ onMount(() => {
+  history.replaceState({}, '', sortUrl(location.href, filters.sort, filters.order));
+  const syncSort = () => { Object.assign(filters, sortFromSearch(location.search)); filters.offset=0; };
+  window.addEventListener('popstate', syncSort); return () => window.removeEventListener('popstate', syncSort);
+ });
  let rows = $state<Finding[]>([]); let selected = $state<Finding|null>(null); let detail = $state<Detail|null>(null);
  let loading=$state(true), failed=$state(false), detailLoading=$state(false), detailFailed=$state(false), revision=$state(0), detailRevision=$state(0);
  let affectedOffset=$state(0), oathsOffset=$state(0);
@@ -20,7 +26,7 @@
  $effect(() => { const target=url; revision; let active=true; loading=true; failed=false; api<Finding[]>(target).then(data=>{if(active){rows=data;loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}}); return ()=>{active=false}; });
  $effect(() => { const id=selected?.id; const ao=affectedOffset, oo=oathsOffset; detailRevision; if(!id){detail=null;return;} let active=true; detailLoading=true;detailFailed=false; detail=null; api<Detail>(`/api/v1/findings/${id}?affected_offset=${ao}&oaths_offset=${oo}`).then(data=>{if(active){detail=data;detailLoading=false;}}).catch(()=>{if(active){detailFailed=true;detailLoading=false;}}); return ()=>{active=false}; });
  function changeFilter(){filters.offset=0; selected=null;}
- function sort(field:string){if(filters.sort===field) filters.order=filters.order==='asc'?'desc':'asc'; else {filters.sort=field;filters.order='asc';} filters.offset=0;}
+ function sort(field:string){if(filters.sort===field) filters.order=filters.order==='asc'?'desc':'asc'; else {filters.sort=field;filters.order='asc';} filters.offset=0; history.pushState({}, '', sortUrl(location.href, filters.sort, filters.order));}
  function sortState(field:string): 'ascending'|'descending'|'none' {return filters.sort===field ? (filters.order==='asc'?'ascending':'descending') : 'none';}
  async function submit(e:SubmitEvent){e.preventDefault(); if(!selected) return; error=validateOath(kind,until,reason,allRealms,grants); if(error)return; busy=true; try {const result=await api<{warning:string|null}>('/api/v1/oaths',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({advisory_id:selected.ref_id,purl:selected.purl,service:selected.service,realm:allRealms?'':selected.realm,all_realms:allRealms,kind,reason,until:until||null})}); reason='';until='';allRealms=false;error=result.warning ?? '';revision++;detailRevision++;} catch {error='Could not take this oath. Check the details and try again.';} finally {busy=false;} }
 </script>
@@ -36,7 +42,7 @@
  <p class="hint">Use the Realms switcher above to filter by realm.</p>
  <div class:with-detail={selected} class="workspace"><section aria-label="Findings list">
  {#if loading}<Skeleton />{:else if failed}<RetryState retry={() => revision++} />{:else if !rows.length}<EmptyState message="No findings match these filters." />{:else}
- <Table label="Findings"><thead><tr>{#each [['advisory','Advisory'],['severity','Severity'],['kind','Kind'],['realm','Realm'],['service','Service'],['opened_at','Opened']] as [field,label]}<th aria-sort={sortState(field)}><button onclick={() => sort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions --><tr onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}}><td><button class="row-link" onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}} aria-label={`View ${row.ref_id ?? row.kind} in ${row.realm}`}>{row.ref_id ?? 'View finding'}</button></td><td><SeverityBadge severity={row.severity}/></td><td>{row.kind}</td><td>{row.realm}</td><td>{row.service ?? '—'}</td><td>{row.opened_at.slice(0,10)}</td></tr>{/each}</tbody></Table>{/if}
+ <Table label="Findings"><thead><tr>{#each [['advisory','Advisory'],['severity','Severity'],['kind','Kind'],['realm','Realm'],['service','Service'],['opened_at','Opened']] as [field,label]}{#if field==='severity'}<th>Package</th>{/if}<th aria-sort={sortState(field)}><button onclick={() => sort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions --><tr onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}}><td><button class="row-link" onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}} aria-label={`View ${row.ref_id ?? row.kind} in ${row.realm}`}>{row.ref_id ?? 'View finding'}</button></td><td class="mono">{row.component_name ? [row.component_name, row.component_version].filter(Boolean).join(' ') : '—'}</td><td><SeverityBadge severity={row.severity}/></td><td>{row.kind}</td><td>{row.realm}</td><td>{row.service ?? '—'}</td><td>{row.opened_at.slice(0,10)}</td></tr>{/each}</tbody></Table>{/if}
  <div class="pagination"><button disabled={filters.offset===0 || loading} onclick={() => {filters.offset=Math.max(0,filters.offset-25);selected=null;}}>Previous</button><span>Rows {filters.offset+1}–{filters.offset+rows.length}</span><button disabled={rows.length<25 || loading} onclick={() => {filters.offset+=25;selected=null;}}>Next</button></div>
  </section>
  {#if selected}<aside aria-label="Finding detail"><div class="panel-head"><div><p class="kicker">FINDING / {selected.realm}</p><h2>{selected.ref_id ?? selected.kind}</h2></div><button aria-label="Close detail" onclick={() => selected=null}>×</button></div>

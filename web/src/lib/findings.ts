@@ -1,7 +1,18 @@
 import type { Grant } from './api';
 export type Filters = { severity:string; kind:string; service:string; has_fix:string; view_status:string; search:string; sort:string; order:string; offset:number };
+export const defaultFilters: Filters = {severity:'',kind:'',service:'',has_fix:'',view_status:'open',search:'',sort:'severity',order:'desc',offset:0};
+const sortFields = ['advisory', 'severity', 'kind', 'realm', 'service', 'opened_at'];
+export function sortFromSearch(search: string): {sort:string; order:string} {
+  const params = new URLSearchParams(search);
+  const sort = params.get('sort'); const order = params.get('order');
+  return {sort: sort && sortFields.includes(sort) ? sort : 'severity', order: order === 'asc' || order === 'desc' ? order : 'desc'};
+}
+export function sortUrl(url: string, sort: string, order: string): string {
+  const next = new URL(url); next.searchParams.set('sort', sort); next.searchParams.set('order', order);
+  return next.pathname + next.search + next.hash;
+}
 export function findingsUrl(filters: Filters, realms: string[]): string {
-  const q = new URLSearchParams({ limit: '25', offset: String(filters.offset), sort: filters.sort, order: filters.order, view_status: filters.view_status });
+  const q = new URLSearchParams({ ui: 'true', limit: '25', offset: String(filters.offset), sort: filters.sort, order: filters.order, view_status: filters.view_status });
   for (const key of ['severity', 'kind', 'service', 'has_fix', 'search'] as const) if (filters[key]) q.set(key, filters[key]);
   if (realms.length) q.set('realms', realms.join(','));
   return `/api/v1/findings?${q}`;
