@@ -213,11 +213,18 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
                     return Ok(());
                 }
             };
+            let mut success = true;
             for realm in &st.cfg.realms {
                 match k8s_feed::run(&st.pool, realm, &cves, now).await {
                     Ok(ids) => tracing::info!(realm = %realm, opened = ids.len(), "k8s feed ran"),
-                    Err(e) => tracing::error!(realm = %realm, "k8s feed failed: {e:#}"),
+                    Err(e) => {
+                        success = false;
+                        tracing::error!(realm = %realm, "k8s feed failed: {e:#}");
+                    }
                 }
+            }
+            if success {
+                record_sync(st, "k8s").await?;
             }
             announce(st, &st.cfg.realms).await
         }
@@ -289,6 +296,13 @@ async fn sight_once(st: &AppState, realm: &str) -> anyhow::Result<()> {
         removed = out.removed,
         "sight ran"
     );
+    record_sync(st, "sight").await?;
+    Ok(())
+}
+
+async fn record_sync(st: &AppState, feed: &str) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO kv (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(format!("sync|{feed}")).bind(Utc::now().to_rfc3339()).execute(&st.pool).await?;
     Ok(())
 }
 
@@ -310,6 +324,7 @@ async fn osv_refresh(st: &AppState) -> anyhow::Result<()> {
         fetched = r.fetched,
         "osv refresh ran"
     );
+    record_sync(st, "osv").await?;
     Ok(())
 }
 
@@ -325,6 +340,7 @@ async fn nvd_refresh(st: &AppState) -> anyhow::Result<()> {
         uncomparable = r.uncomparable,
         "nvd refresh ran"
     );
+    record_sync(st, "nvd").await?;
     Ok(())
 }
 

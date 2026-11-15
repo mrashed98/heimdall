@@ -178,6 +178,7 @@ async fn healthz(State(state): State<AppState>) -> (StatusCode, &'static str) {
 fn read_routes() -> Router<AppState> {
     Router::new()
         .route("/api/v1/realms", get(realms_handler))
+        .route("/api/v1/status", get(status_handler))
         .route("/api/v1/findings", get(findings_handler))
         .route("/api/v1/services", get(services_handler))
         .route("/api/v1/services/{id}/components", get(components_handler))
@@ -320,6 +321,101 @@ fn severity_text(s: Severity) -> &'static str {
         Severity::Low => "low",
         Severity::Unknown => "unknown",
     }
+}
+
+#[derive(Deserialize)]
+struct StatusQuery {
+    realms: Option<String>,
+}
+
+#[derive(Serialize, FromRow)]
+struct SeverityCount {
+    realm: String,
+    severity: String,
+    count: i64,
+}
+#[derive(Serialize, FromRow)]
+struct RiskRow {
+    realm: String,
+    service: String,
+    critical: i64,
+    high: i64,
+    medium: i64,
+    risk: i64,
+}
+#[derive(Serialize, FromRow)]
+struct EolRow {
+    realm: String,
+    service: Option<String>,
+    ref_id: Option<String>,
+    details: serde_json::Value,
+}
+#[derive(Serialize)]
+struct OverviewStatus {
+    severity: Vec<SeverityCount>,
+    fix_available: i64,
+    services: Vec<RiskRow>,
+    eol: Vec<EolRow>,
+    sync: std::collections::BTreeMap<String, Option<String>>,
+}
+
+async fn status_handler(
+    State(state): State<AppState>,
+    authed: Principal,
+    Query(q): Query<StatusQuery>,
+) -> Result<Json<OverviewStatus>, ApiError> {
+    authed.require_read()?;
+    let allowed = authed.readable_realms(&state.cfg.realms);
+    let selected: Vec<String> = match given(&q.realms) {
+        Some(value) => {
+            let mut selected = Vec::new();
+            for realm in value.split(',') {
+                check_realm(&state.cfg, Some(realm))?;
+                if allowed.iter().any(|r| r == realm) && !selected.iter().any(|r| r == realm) {
+                    selected.push(realm.to_string());
+                }
+            }
+            selected
+        }
+        None => allowed,
+    };
+    let severity = sqlx::query_as::<_, SeverityCount>("SELECT r.realm, v.severity, count(f.id) AS count FROM unnest($1::text[]) AS r(realm) CROSS JOIN unnest(ARRAY['critical','high','medium','low','unknown']) AS v(severity) LEFT JOIN findings f ON f.realm=r.realm AND f.severity=v.severity AND f.status='open' GROUP BY r.realm, v.severity ORDER BY r.realm, v.severity")
+        .bind(&selected).fetch_all(&state.pool).await?;
+    let fix_available = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM findings WHERE status='open' AND realm = ANY($1) AND (kind='fixavailable' OR (details->'advice' IS NOT NULL AND details->'advice' <> 'null'::jsonb))")
+        .bind(&selected).fetch_one(&state.pool).await?;
+    let services = sqlx::query_as::<_, RiskRow>("SELECT f.realm, s.name AS service, count(*) FILTER (WHERE f.severity='critical') AS critical, count(*) FILTER (WHERE f.severity='high') AS high, count(*) FILTER (WHERE f.severity='medium') AS medium, (count(*) FILTER (WHERE f.severity='critical') * 10 + count(*) FILTER (WHERE f.severity='high') * 3 + count(*) FILTER (WHERE f.severity='medium')) AS risk FROM findings f JOIN services s ON s.id=f.service_id WHERE f.status='open' AND f.realm = ANY($1) GROUP BY f.realm, s.id ORDER BY risk DESC, f.realm, s.name LIMIT 10")
+        .bind(&selected).fetch_all(&state.pool).await?;
+    let eol = sqlx::query_as::<_, EolRow>("SELECT f.realm, s.name AS service, f.ref_id, f.details FROM findings f LEFT JOIN services s ON s.id=f.service_id WHERE f.status='open' AND f.kind='eol' AND f.realm = ANY($1) ORDER BY f.opened_at DESC, f.id DESC LIMIT 10")
+        .bind(&selected).fetch_all(&state.pool).await?;
+    let entries: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM kv WHERE key = ANY($1)")
+            .bind(["sync|osv", "sync|nvd", "sync|k8s", "sync|sight"])
+            .fetch_all(&state.pool)
+            .await?;
+    let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
+    let mut sync = std::collections::BTreeMap::new();
+    for feed in ["osv", "nvd", "k8s", "sight"] {
+        let visible = feed != "sight"
+            || state
+                .cfg
+                .sight_realm()
+                .is_some_and(|r| selected.iter().any(|s| s == r));
+        sync.insert(
+            feed.to_string(),
+            if visible {
+                entries.get(&format!("sync|{feed}")).cloned()
+            } else {
+                None
+            },
+        );
+    }
+    Ok(Json(OverviewStatus {
+        severity,
+        fix_available,
+        services,
+        eol,
+        sync,
+    }))
 }
 
 async fn realms_handler(
@@ -669,6 +765,14 @@ mod tests {
                 );
             }
         }
+        let (status, overview) = get_session("/api/v1/status".into()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(overview["severity"].as_array().unwrap().len(), 5);
+        assert_eq!(overview["severity"][0]["realm"], "a");
+        assert_eq!(overview["services"][0]["risk"], 3);
+        let (_, filtered) = get_session("/api/v1/status?realms=b".into()).await;
+        assert!(filtered["severity"].as_array().unwrap().is_empty());
+        assert!(filtered["services"].as_array().unwrap().is_empty());
         assert_eq!(
             get_session(format!("/api/v1/services/{service_b}/components"))
                 .await
@@ -716,12 +820,50 @@ mod tests {
             "/api/v1/realms",
             "/api/v1/oaths",
             "/api/v1/releases",
+            "/api/v1/status",
             &format!("/api/v1/services/{service_b}/components"),
         ] {
             let (status, body) = get_session(path.into()).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
             assert_eq!(body, serde_json::json!({"error":"no_access"}));
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn overview_counts_ranks_and_exposes_recorded_sync(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "crit", "critical").await;
+        seed_finding(&pool, "prod", "api", "high", "high").await;
+        seed_finding(&pool, "prod", "worker", "medium", "medium").await;
+        sqlx::query(
+            "UPDATE findings SET details='{\"advice\":{\"recommended\":\"2\"}}' WHERE key='crit'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO kv(key,value) VALUES ('sync|nvd','2026-11-15T00:00:00Z')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let (status, body) = get(&app, "/api/v1/status?realms=prod", Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["fix_available"], 1);
+        assert_eq!(value["services"][0]["service"], "api");
+        assert_eq!(value["services"][0]["risk"], 13);
+        assert_eq!(value["sync"]["nvd"], "2026-11-15T00:00:00Z");
+        assert!(value["sync"]["osv"].is_null());
+        assert_eq!(
+            get(&app, "/api/v1/status", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(&app, "/api/v1/status?realms=invalid", Some(&key))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
