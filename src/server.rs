@@ -246,11 +246,19 @@ struct FindingsQuery {
     min_severity: Option<String>,
     limit: Option<String>,
     offset: Option<String>,
+    severity: Option<String>,
+    service: Option<String>,
+    search: Option<String>,
+    has_fix: Option<bool>,
+    sort: Option<String>,
+    order: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RealmQuery {
     realm: Option<String>,
+    limit: Option<String>,
+    offset: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -258,6 +266,7 @@ struct ReleasesQuery {
     target: Option<String>,
     since: Option<String>,
     limit: Option<String>,
+    offset: Option<String>,
 }
 
 /// Empty query values count as absent (`?realm=`).
@@ -370,30 +379,60 @@ async fn findings_handler(
     .filter(|s| *s >= min)
     .map(severity_text)
     .collect();
-    let rows: Vec<FindingRow> = sqlx::query_as(
+    let severity = match given(&q.severity) {
+        Some(s) => Some(severity_text(
+            gate::parse_severity(s).map_err(ApiError::BadRequest)?,
+        )),
+        None => None,
+    };
+    let sort = match given(&q.sort).unwrap_or("opened_at") {
+        "opened_at" => "f.opened_at",
+        "severity" => "CASE f.severity WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END",
+        "kind" => "f.kind",
+        "realm" => "f.realm",
+        "service" => "s.name",
+        "advisory" => "f.ref_id",
+        _ => return Err(ApiError::BadRequest("unknown sort field".into())),
+    };
+    let direction = match given(&q.order).unwrap_or("desc") {
+        "asc" => "ASC",
+        "desc" => "DESC",
+        _ => return Err(ApiError::BadRequest("unknown sort order".into())),
+    };
+    let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
                 f.severity, f.status, f.opened_at, f.resolved_at, f.details \
          FROM findings f \
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
+         LEFT JOIN advisories a ON a.id = f.ref_id \
          WHERE f.status = $1 \
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
            AND ($7 OR f.realm = ANY($8)) \
-         ORDER BY f.opened_at DESC, f.id DESC \
-         LIMIT $5 OFFSET $6",
-    )
-    .bind(status)
-    .bind(realm)
-    .bind(kind)
-    .bind(&severities)
-    .bind(limit)
-    .bind(offset)
-    .bind(authed.kind == "key")
-    .bind(authed.readable_realms(&state.cfg.realms))
-    .fetch_all(&state.pool)
-    .await?;
+           AND ($9::text IS NULL OR f.severity = $9) \
+           AND ($10::text IS NULL OR s.name = $10) \
+           AND ($11::text IS NULL OR f.ref_id ILIKE '%' || $11 || '%' OR c.purl ILIKE '%' || $11 || '%' OR EXISTS (SELECT 1 FROM unnest(a.aliases) alias WHERE alias ILIKE '%' || $11 || '%')) \
+           AND ($12::bool IS NULL OR (f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb) = $12) \
+         ORDER BY {sort} {direction} NULLS LAST, f.id DESC \
+         LIMIT $5 OFFSET $6"
+    );
+    let rows: Vec<FindingRow> = sqlx::query_as(&sql)
+        .bind(status)
+        .bind(realm)
+        .bind(kind)
+        .bind(&severities)
+        .bind(limit)
+        .bind(offset)
+        .bind(authed.kind == "key")
+        .bind(authed.readable_realms(&state.cfg.realms))
+        .bind(severity)
+        .bind(given(&q.service))
+        .bind(given(&q.search))
+        .bind(q.has_fix)
+        .fetch_all(&state.pool)
+        .await?;
     Ok(Json(rows))
 }
 
@@ -409,11 +448,16 @@ async fn services_handler(
         "SELECT s.id, s.realm, s.name, count(DISTINCT sc.component_id) AS components \
          FROM services s LEFT JOIN service_components sc ON sc.service_id = s.id \
          WHERE ($1::text IS NULL OR s.realm = $1) AND ($2 OR s.realm = ANY($3)) \
-         GROUP BY s.id ORDER BY s.realm, s.name",
+         GROUP BY s.id ORDER BY s.realm, s.name, s.id LIMIT $4 OFFSET $5",
     )
     .bind(realm)
     .bind(authed.kind == "key")
     .bind(authed.readable_realms(&state.cfg.realms))
+    .bind(match given(&q.limit) {
+        Some(_) => Some(parse_limit(&q.limit)?),
+        None => None,
+    })
+    .bind(parse_offset(&q.offset)?)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -475,11 +519,12 @@ async fn releases_handler(
          WHERE ($1::text IS NULL OR target = $1) \
            AND ($2::timestamptz IS NULL OR published_at >= $2) \
          ORDER BY published_at DESC NULLS LAST, id DESC \
-         LIMIT $3",
+         LIMIT $3 OFFSET $4",
     )
     .bind(given(&q.target))
     .bind(since)
     .bind(limit)
+    .bind(parse_offset(&q.offset)?)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
@@ -776,6 +821,64 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_filters_and_sort_are_applied_before_paging(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "vuln|a", "high").await;
+        seed_finding(&pool, "prod", "api", "vuln|b", "critical").await;
+        seed_finding(&pool, "prod", "worker", "vuln|c", "low").await;
+        sqlx::query("UPDATE findings SET ref_id = 'CVE-2026-1234', details = '{\"advice\":{\"recommended\":\"2.0\"}}' WHERE key = 'vuln|b'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO advisories (id, aliases, severity, source) VALUES ('CVE-2026-1234', ARRAY['GHSA-test'], 'critical', 'osv')")
+            .execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        for path in [
+            "/api/v1/findings?severity=critical&service=api&search=2026&has_fix=true",
+            "/api/v1/findings?search=GHSA-test",
+            "/api/v1/findings?sort=severity&order=desc&limit=1",
+        ] {
+            let (status, body) = get(&app, path, Some(&key)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let rows: Vec<FindingRow> = serde_json::from_str(&body).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].key, "vuln|b");
+        }
+        for path in [
+            "/api/v1/findings?sort=bogus",
+            "/api/v1/findings?order=bogus",
+        ] {
+            assert_eq!(get(&app, path, Some(&key)).await.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn services_and_releases_can_be_paged(pool: PgPool) {
+        for name in ["a", "b", "c"] {
+            sqlx::query("INSERT INTO services (realm,name) VALUES ('prod',$1)")
+                .bind(name)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO releases (target,version) VALUES ('test',$1)")
+                .bind(name)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        for path in ["/api/v1/services", "/api/v1/releases"] {
+            let (status, first) = get(&app, &format!("{path}?limit=2"), Some(&key)).await;
+            assert_eq!(status, StatusCode::OK, "{first}");
+            let (status, second) = get(&app, &format!("{path}?limit=2&offset=2"), Some(&key)).await;
+            assert_eq!(status, StatusCode::OK, "{second}");
+            let first: Vec<serde_json::Value> = serde_json::from_str(&first).unwrap();
+            let second: Vec<serde_json::Value> = serde_json::from_str(&second).unwrap();
+            assert_eq!((first.len(), second.len()), (2, 1));
+            assert!(first.iter().all(|row| row["id"] != second[0]["id"]));
         }
     }
 
