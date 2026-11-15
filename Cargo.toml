@@ -47,7 +47,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 serde-saphyr = "2.1.1"
 sha2 = "0.11"
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "signal"] }
 url = "2.5.8"
 walkdir = "2.5.0"
