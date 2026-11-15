@@ -48,6 +48,8 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { slug: 'guides/web-ui' },
+            { slug: 'guides/sign-in-access-control' },
             { slug: 'guides/ci-gate' },
             { slug: 'guides/oaths' },
             { slug: 'guides/alert-channels' },

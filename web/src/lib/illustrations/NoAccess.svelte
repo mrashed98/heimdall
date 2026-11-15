@@ -1,0 +1,2 @@
+<figure><svg viewBox="0 0 240 175" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M25 145 Q120 15 215 145 M85 150 V105 A35 35 0 0 1 155 105 V150 Z M120 120 V135"/><circle cx="120" cy="117" r="3"/></svg><figcaption>No access yet. Ask an admin for access.</figcaption></figure>
+<style>figure { margin: 0; color: var(--accent-high); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>

@@ -11,3 +11,7 @@ docs/site/dist
 docs/site/.astro
 # Generated from docs/adr/ by docs/site/scripts/sync-adrs.mjs
 docs/site/src/content/docs/decisions/[0-9][0-9][0-9][0-9]-*.md
+
+# Web build outputs
+web/node_modules/
+web/dist/

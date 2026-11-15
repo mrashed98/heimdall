@@ -22,6 +22,7 @@ prints the version.
 | [`serve`](#heimdall-serve) | Run the server, or validate the config. | `DATABASE_URL` |
 | [`gate`](#heimdall-gate) | Hofund, the CI gate. | ingest key |
 | [`oath`](#heimdall-oath) | Snooze, ignore, list, extend, revoke oaths. | admin key (`list`: read) |
+| [`user`](#heimdall-user) | Manage local users directly. | `DATABASE_URL`, config |
 | [`keys`](#heimdall-keys) | Create, list, revoke API keys. | admin key |
 | [`sight`](#heimdall-sight) | Scan the cluster and ingest its inventory. | cluster access |
 | [`scan-images`](#heimdall-scan-images) | Generate SBOMs for images that have none. | ingest key, syft |
@@ -208,3 +209,7 @@ the watcher at the Bifröst · v0.1.0
 | `gate` | `0` pass, `1` vulnerabilities, `2` unverified or error. |
 | `scan-images` | `0` unless every attempted image failed, then `1`. |
 | everything else | `0` success, `1` error (message on stderr as `error: ...`). |
+
+## `heimdall user`
+
+`heimdall user [--config heimdall.yaml] create NAME [--role viewer|editor|admin]` creates a local user and prompts for a password. A role grants access to all realms; admin requires the name in `admins`. `heimdall user passwd NAME` changes a password, `heimdall user disable NAME` disables the user and revokes sessions, and `heimdall user list` lists users. These commands connect directly using `DATABASE_URL` and load the configuration; they do not use the HTTP API.

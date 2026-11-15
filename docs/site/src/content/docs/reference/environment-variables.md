@@ -9,6 +9,7 @@ description: Every environment variable Heimdall reads, and which command or com
 |---|---|---|
 | `DATABASE_URL` | yes | Postgres connection string, for example `postgres://heimdall:heimdall@localhost:5433/heimdall`. Also used by `heimdall sight` in in-process mode. |
 | `HEIMDALL_BOOTSTRAP_ADMIN_KEY` | no | The admin key named `bootstrap`. Must be `hd_` plus 43 base64url characters, or the server refuses to start. Changing it rotates the key. If unset or empty, the `bootstrap` key is deleted at startup (so removing the variable revokes it). |
+| `HEIMDALL_OIDC_CLIENT_SECRET` | when configured | OIDC client secret when named by `auth.oidc.client_secret_env`; the name is configurable. |
 | `GITHUB_TOKEN` | no | Raises the GitHub rate limit (5000 requests an hour instead of 60), fetches release notes, and enables the gate's GitHub Advisory Database fallback. |
 | `NVD_API_KEY` | no | NVD API key. The variable name is configurable with `nvd.api_key_env`. |
 | `TEAMS_WEBHOOK_*` | no | One variable per `teams[].webhook_env`, holding the webhook URL. The names are yours to choose. |

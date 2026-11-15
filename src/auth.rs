@@ -2,7 +2,7 @@
 //! and looked up by hash (see docs/adr/0004-sha256-api-keys.md).
 
 use anyhow::{bail, Context};
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -116,6 +116,18 @@ pub async fn create_key(
     name: &str,
     scope: Scope,
 ) -> anyhow::Result<String> {
+    let mut tx = pool.begin().await?;
+    let key = create_key_in(&mut tx, admins, name, scope).await?;
+    tx.commit().await?;
+    Ok(key)
+}
+
+async fn create_key_in(
+    conn: &mut sqlx::PgConnection,
+    admins: &[String],
+    name: &str,
+    scope: Scope,
+) -> anyhow::Result<String> {
     if let Err(m) = check_name(name) {
         bail!("invalid key name {name:?}: {m}");
     }
@@ -130,7 +142,7 @@ pub async fn create_key(
         .bind(name)
         .bind(hash(&key))
         .bind(scope.as_str())
-        .execute(pool)
+        .execute(conn)
         .await
         .with_context(|| format!("storing key {name:?} (name already in use?)"))?;
     Ok(key)
@@ -180,26 +192,49 @@ impl FromRequestParts<AppState> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let key = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or(ApiError::Unauthorized)?;
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT name, scope FROM api_keys WHERE sha256 = $1")
-                .bind(hash(key))
-                .fetch_optional(&state.pool)
-                .await?;
-        let (name, scope) = row.ok_or(ApiError::Unauthorized)?;
-        let scope = scope.parse::<Scope>()?;
-        // Checked on every request so removing a name from `admins` takes
-        // effect without revoking its key.
-        if scope == Scope::Admin && !admin_allowed(&state.cfg.admins, &name) {
-            return Err(ApiError::Forbidden);
+        if !parts.headers.contains_key("authorization") {
+            let principal = crate::local_auth::Principal::from_request_parts(parts, state).await?;
+            let scope =
+                if principal.grants.iter().any(|g| g.role == "admin") && principal.admin_allowed {
+                    Scope::Admin
+                } else if principal
+                    .grants
+                    .iter()
+                    .any(|g| (g.role == "viewer" || g.role == "editor") && g.realm == "*")
+                {
+                    Scope::Read
+                } else {
+                    return Err(ApiError::Forbidden);
+                };
+            return Ok(Authed {
+                name: principal.name,
+                scope,
+            });
         }
-        Ok(Authed { name, scope })
+        authenticate_key(parts, state).await
     }
+}
+
+pub(crate) async fn authenticate_key(parts: &Parts, state: &AppState) -> Result<Authed, ApiError> {
+    let key = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT name, scope FROM api_keys WHERE sha256 = $1")
+            .bind(hash(key))
+            .fetch_optional(&state.pool)
+            .await?;
+    let (name, scope) = row.ok_or(ApiError::Unauthorized)?;
+    let scope = scope.parse::<Scope>()?;
+    // Checked on every request so removing a name from `admins` takes
+    // effect without revoking its key.
+    if scope == Scope::Admin && !admin_allowed(&state.cfg.admins, &name) {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(Authed { name, scope })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,7 +288,16 @@ async fn create_key_handler(
             req.name
         )));
     }
-    let key = create_key(&state.pool, &state.cfg.admins, &req.name, req.scope).await?;
+    let mut tx = state.pool.begin().await?;
+    let key = create_key_in(&mut tx, &state.cfg.admins, &req.name, req.scope).await?;
+    crate::admin::record(
+        &mut tx,
+        &authed.name,
+        "api_key_created",
+        serde_json::json!({"name": req.name, "scope": req.scope}),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(Json(CreateKeyResponse {
         name: req.name,
         scope: req.scope,
@@ -264,13 +308,24 @@ async fn create_key_handler(
 async fn list_keys(
     State(state): State<AppState>,
     authed: Authed,
+    Query(q): Query<crate::admin::ListQuery>,
 ) -> Result<Json<Vec<KeyInfo>>, ApiError> {
     require(&authed, Scope::Admin)?;
-    let keys = sqlx::query_as::<_, KeyInfo>(
-        "SELECT name, scope, created_at FROM api_keys ORDER BY created_at, name",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+    let (field, order) = crate::admin::list_order(
+        &q,
+        &[
+            ("name", "name"),
+            ("scope", "scope"),
+            ("created", "created_at"),
+        ],
+        "created_at",
+    );
+    let sql = format!("SELECT name, scope, created_at FROM api_keys ORDER BY {field} {order}, name ASC LIMIT $1 OFFSET $2");
+    let keys = sqlx::query_as::<_, KeyInfo>(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(q.limit.map(|n| n.clamp(0, 500)))
+        .bind(q.offset.unwrap_or(0).max(0))
+        .fetch_all(&state.pool)
+        .await?;
     Ok(Json(keys))
 }
 
@@ -280,13 +335,22 @@ async fn revoke_key(
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require(&authed, Scope::Admin)?;
+    let mut tx = state.pool.begin().await?;
     let done = sqlx::query("DELETE FROM api_keys WHERE name = $1")
         .bind(&name)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     if done.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
+    crate::admin::record(
+        &mut tx,
+        &authed.name,
+        "api_key_revoked",
+        serde_json::json!({"name": name}),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(Json(serde_json::json!({ "revoked": name })))
 }
 

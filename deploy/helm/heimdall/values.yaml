@@ -46,12 +46,26 @@ config:
   #     from: Heimdall <heimdall@example.com>
   #     to: [security@example.com]
   #     min_severity: high
+  # Optional: set public_url and configure local and/or OIDC sign-in.
+  # auth:
+  #   public_url: https://heimdall.example.com
+  #   # With ingress, set the controller pod CIDR(s), or clients share the
+  #   # proxy IP for throttling and rate limits.
+  #   trusted_proxies: ["10.42.0.0/16"]
+  #   local: { enabled: true }
+  #   oidc:
+  #     issuer: https://id.example.com/realms/example
+  #     client_id: heimdall
+  #     client_secret_env: HEIMDALL_OIDC_CLIENT_SECRET
+  #     groups_claim: groups
+  #     role_mappings: []
   sight:
     realm: dev-k3s
 
 # An existing Secret (SOPS-managed outside the chart). Every key becomes an
 # environment variable. Expected keys:
 #   DATABASE_URL, GITHUB_TOKEN, NVD_API_KEY, HEIMDALL_BOOTSTRAP_ADMIN_KEY,
+#   HEIMDALL_OIDC_CLIENT_SECRET (or the name in auth.oidc.client_secret_env),
 #   one TEAMS_WEBHOOK_* per `teams[].webhook_env`,
 #   one key per `*_env` of each `config.channels[]` entry (webhook URLs, the
 #   Telegram bot token, the PagerDuty routing key, the webhook HMAC secret,
@@ -107,5 +121,6 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
-  host: heimdall.internal.example
+  host: heimdall.internal.example # legacy single-host default
+  hosts: [] # overrides host when non-empty
   tls: []

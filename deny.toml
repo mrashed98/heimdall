@@ -9,6 +9,9 @@ targets = [
 
 [advisories]
 version = 2
+# openidconnect uses rsa for public-key signature verification only; Heimdall
+# never exposes RSA private-key decryption. Test-only keys are ephemeral. Reviewed 2026-11-15.
+ignore = [{ id = "RUSTSEC-2023-0071", reason = "No RSA private-key decryption endpoint; OIDC only verifies public signatures" }]
 
 [licenses]
 version = 2

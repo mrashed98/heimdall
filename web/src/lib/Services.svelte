@@ -1,0 +1,24 @@
+<script lang="ts">
+ import { api } from './api'; import { dataUrl, nextSort } from './data-pages';
+ import Table from './components/Table.svelte'; import Pagination from './components/Pagination.svelte'; import Skeleton from './components/Skeleton.svelte'; import RetryState from './components/RetryState.svelte'; import EmptyState from './components/EmptyState.svelte'; import SeverityBadge from './components/SeverityBadge.svelte';
+ let { realms, serviceId }: {realms:string[], serviceId:number|null} = $props();
+ type Row = {id:number,name:string,realm:string,critical:number,high:number,medium:number,low:number,unknown:number};
+ type Detail = {purl?:string,version?:string,source?:string,digest?:string,image?:string,ref_id?:string,kind?:string,severity?:string,opened_at?:string};
+ let info=$state<{name:string,realm:string}|null>(null);
+ let rows=$state<Row[]>([]), items=$state<Detail[]>([]), offset=$state(0), sort=$state('realm'), order=$state('asc'), section=$state('components'), loading=$state(true), failed=$state(false), revision=$state(0);
+ let url=$derived(dataUrl(serviceId ? `/api/v1/ui/services/${serviceId}/${section}` : '/api/v1/ui/services',realms,offset,sort,order));
+ $effect(()=>{realms.join(','); serviceId; offset=0; section='components'; sort=serviceId?'purl':'realm'; order='asc';});
+ $effect(()=>{const id=serviceId; const rs=realms.join(','); info=null; if(!id)return; let active=true; api<{name:string,realm:string}[]>(dataUrl(`/api/v1/ui/services/${id}/info`,rs ? rs.split(',') : [],0,'name','asc')).then(data=>{if(active)info=data[0] ?? null;}).catch(()=>{}); return ()=>{active=false};});
+ $effect(()=>{const target=url; revision; let active=true;loading=true;failed=false;api<Row[]|Detail[]>(target).then(data=>{if(active){if(serviceId) items=data as Detail[];else rows=data as Row[];loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}});return ()=>{active=false};});
+ function changeSort(field:string){[sort,order]=nextSort(sort,order,field);offset=0;}
+ function sortState(field:string):'ascending'|'descending'|'none'{return sort===field?(order==='asc'?'ascending':'descending'):'none';}
+ function selectSection(value:string){section=value;offset=0;sort=value==='components'?'purl':value==='images'?'digest':'opened';order='asc';}
+</script>
+<div class="page">
+ {#if serviceId}<p><a href={'/services'+location.search}>← All services</a></p><h2>{info ? `${info.name} · ${info.realm}` : 'Service inventory'}</h2><div class="tabs" aria-label="Service inventory sections">{#each [['components','Components'],['images','Images'],['findings','Findings']] as [id,label]}<button aria-pressed={section===id} onclick={()=>selectSection(id)}>{label}</button>{/each}</div>{/if}
+ {#if loading}<Skeleton/>{:else if failed}<RetryState retry={()=>revision++}/>{:else if serviceId}
+  {#if !items.length}<EmptyState message={`No ${section} recorded for this service.`}/>{:else}<Table label={`Service ${section}`}><thead><tr>{#each (section==='components'?[['source','Source'],['purl','Purl'],['version','Version']]:section==='images'?[['image','Image'],['digest','Digest']]:[['advisory','Advisory'],['severity','Severity'],['kind','Kind'],['opened','Opened']]) as [field,label]}<th aria-sort={sortState(field)}><button onclick={()=>changeSort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each items as item}<tr>{#if section==='components'}<td>{item.source}</td><td class="mono">{item.purl}</td><td class="mono">{item.version}</td>{:else if section==='images'}<td class="mono">{item.image ?? 'Image reference unavailable'}</td><td class="mono">{item.digest}</td>{:else}<td class="mono">{item.ref_id ?? '—'}</td><td><SeverityBadge severity={item.severity ?? 'unknown'}/></td><td>{item.kind}</td><td>{item.opened_at?.slice(0,10)}</td>{/if}</tr>{/each}</tbody></Table>{/if}
+ {:else if !rows.length}<EmptyState message="No services in these realms yet."/>{:else}<Table label="Services"><thead><tr>{#each [['name','Service'],['realm','Realm'],['critical','Critical'],['high','High'],['medium','Medium'],['low','Low'],['unknown','Unknown']] as [field,label]}<th aria-sort={sortState(field)}><button onclick={()=>changeSort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<tr><td><a href={'/services/'+row.id+location.search}>{row.name}</a></td><td>{row.realm}</td>{#each ['critical','high','medium','low','unknown'] as severity}<td><SeverityBadge {severity}/> {row[severity as keyof Pick<Row,'critical'|'high'|'medium'|'low'|'unknown'>]}</td>{/each}</tr>{/each}</tbody></Table>{/if}
+ {#if !failed}<Pagination {offset} count={serviceId ? items.length : rows.length} {loading} change={(n)=>offset=n}/>{/if}
+</div>
+<style>.page{margin-top:2rem}.tabs{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}.tabs button[aria-pressed=true]{background:var(--accent-low);color:var(--accent-high)}.mono{font-family:var(--font-mono);overflow-wrap:anywhere;font-size:.85em}</style>

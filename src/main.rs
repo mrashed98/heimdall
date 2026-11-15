@@ -57,6 +57,13 @@ enum Command {
         #[command(subcommand)]
         action: OathAction,
     },
+    /// Manage local users directly in the database
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+        #[arg(long, default_value = "heimdall.yaml", global = true)]
+        config: PathBuf,
+    },
     /// API keys
     Keys {
         #[command(subcommand)]
@@ -137,6 +144,82 @@ struct SightArgs {
     /// Path to heimdall.yaml (in-process mode)
     #[arg(long, default_value = "heimdall.yaml")]
     config: PathBuf,
+}
+
+#[derive(Subcommand)]
+enum UserAction {
+    Create {
+        name: String,
+        #[arg(long)]
+        role: Option<String>,
+    },
+    Passwd {
+        name: String,
+    },
+    Disable {
+        name: String,
+    },
+    List,
+}
+
+async fn user(action: UserAction, config: PathBuf) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let cfg = HeimdallConfig::load(&config)?;
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = heimdall::db::connect(&url).await?;
+    fn password() -> anyhow::Result<String> {
+        use std::io::{BufRead, IsTerminal};
+        if std::io::stdin().is_terminal() {
+            Ok(rpassword::prompt_password("Password: ")?)
+        } else {
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line)?;
+            Ok(line.trim_end_matches(['\r', '\n']).to_owned())
+        }
+    }
+    match action {
+        UserAction::Create { name, role } => {
+            heimdall::local_auth::create_user(
+                &pool,
+                &cfg.admins,
+                &name,
+                &password()?,
+                role.as_deref(),
+            )
+            .await?
+        }
+        UserAction::Passwd { name } => {
+            heimdall::local_auth::set_password(&pool, &name, &password()?).await?
+        }
+        UserAction::Disable { name } => {
+            let mut tx = pool.begin().await?;
+            let id: i64 = sqlx::query_scalar(
+                "UPDATE users SET disabled=true WHERE username=$1 AND kind='local' RETURNING id",
+            )
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO audit_log(action,username) VALUES ('user_disabled',$1)")
+                .bind(name)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        UserAction::List => {
+            let rows: Vec<(String, bool)> =
+                sqlx::query_as("SELECT username,disabled FROM users ORDER BY username")
+                    .fetch_all(&pool)
+                    .await?;
+            for (name, disabled) in rows {
+                println!("{}\t{}", name, if disabled { "disabled" } else { "active" });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -478,6 +561,13 @@ async fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Command::User { action, config } => match user(action, config).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Keys { action } => match keys(action, &style).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -526,5 +616,30 @@ async fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod user_cli_tests {
+    use super::*;
+    #[test]
+    fn user_commands_never_accept_password_flags() {
+        for args in [
+            vec!["heimdall", "user", "create", "alice", "--role", "viewer"],
+            vec!["heimdall", "user", "passwd", "alice"],
+            vec!["heimdall", "user", "disable", "alice"],
+            vec!["heimdall", "user", "list"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "heimdall",
+            "user",
+            "create",
+            "alice",
+            "--password",
+            "secret"
+        ])
+        .is_err());
     }
 }
