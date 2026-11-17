@@ -11,7 +11,14 @@ targets = [
 version = 2
 # openidconnect uses rsa for public-key signature verification only; Heimdall
 # never exposes RSA private-key decryption. Test-only keys are ephemeral. Reviewed 2026-11-15.
-ignore = [{ id = "RUSTSEC-2023-0071", reason = "No RSA private-key decryption endpoint; OIDC only verifies public signatures" }]
+# chrono and chrono-tz are marked unmaintained (no vulnerability). sqlx, openidconnect and
+# chrono-tz all depend on it, so it cannot be dropped alone; revisit when they
+# move. Reviewed 2026-11-17.
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "No RSA private-key decryption endpoint; OIDC only verifies public signatures" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained notice, no vulnerability; required by sqlx/openidconnect" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained notice (same as chrono), no vulnerability" },
+]
 
 [licenses]
 version = 2
