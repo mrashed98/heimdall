@@ -1,5 +1,8 @@
 # Image SBOM scanner: runs `heimdall scan-images` (syft + upload) as a CronJob.
 # Build from the repo root:  docker build -f deploy/Dockerfile.scanner -t heimdall-scanner .
+# Release CI passes --build-arg BIN_SOURCE=prebuilt with dist/heimdall-<arch>
+# (built natively by the binaries job), so nothing compiles under emulation.
+ARG BIN_SOURCE=build
 
 # --- build: static musl binary (alpine's native target is musl) ---
 FROM rust:1-alpine AS build
@@ -9,6 +12,13 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 RUN cargo build --release --locked --bin heimdall
+
+# --- prebuilt: the release binary for this platform; unused stages are skipped ---
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY dist/heimdall-${TARGETARCH} /src/target/release/heimdall
+
+FROM ${BIN_SOURCE} AS bin
 
 # --- runtime: alpine + pinned syft + heimdall ---
 FROM alpine:3.24
@@ -29,7 +39,7 @@ RUN apk add --no-cache ca-certificates curl \
  && rm /tmp/syft.tgz \
  && apk del curl \
  && adduser -D -u 10001 scanner
-COPY --from=build /src/target/release/heimdall /usr/local/bin/heimdall
+COPY --from=bin /src/target/release/heimdall /usr/local/bin/heimdall
 USER scanner
 # Registry credentials: mount a docker config.json and set DOCKER_CONFIG to its dir.
 # Needs HEIMDALL_URL and HEIMDALL_API_KEY (ingest scope).
