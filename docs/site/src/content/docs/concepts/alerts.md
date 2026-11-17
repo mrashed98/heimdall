@@ -46,7 +46,10 @@ number counts as the major version.
   30 days away, it counts as new.
 - Alerts fire from the very first run, with no silent baseline. Heimdall first
   sends a short "Heimdall has opened his eyes" card per realm with counts by
-  severity.
+  severity. To start quietly instead, run
+  [`heimdall baseline`](/heimdall/reference/cli/#heimdall-baseline) for the
+  realm before adding the channel: the backlog stays visible in the UI, and
+  only new findings and state changes alert.
 - Cards go through a queue stored in the database, sent about one every 2
   seconds, so a big first run does not hit throttling. Failed sends retry
   with growing delays, and queued cards survive a restart.
