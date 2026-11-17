@@ -198,6 +198,40 @@ pub async fn enqueue_first_run_summary(
     Ok(true)
 }
 
+/// Baseline: mark every open, not yet announced finding of `realm` as
+/// announced without queuing anything, so a channel added to a realm with a
+/// backlog is not flooded. The findings stay open in the UI, API and counts;
+/// one-shot kinds resolve as if sent. Afterwards only new findings and state
+/// changes (a fix appears, an oath expires, severity rises) alert. Audited.
+/// Returns how many findings were marked.
+pub async fn baseline(pool: &PgPool, cfg: &HeimdallConfig, realm: &str) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        cfg.realms.iter().any(|r| r == realm),
+        "unknown realm {realm:?} (configured: {})",
+        cfg.realms.join(", ")
+    );
+    let mut tx = pool.begin().await?;
+    lock_realms(&mut tx, cfg).await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM findings WHERE realm = $1 AND status = 'open' \
+         AND notified_at IS NULL FOR UPDATE",
+    )
+    .bind(realm)
+    .fetch_all(&mut *tx)
+    .await?;
+    mark_notified(&mut tx, &ids).await?;
+    sqlx::query(
+        "INSERT INTO audit_log (action, method, detail) VALUES ('findings_baseline', 'cli', \
+         jsonb_build_object('realm', $1::text, 'findings', $2::bigint))",
+    )
+    .bind(realm)
+    .bind(ids.len() as i64)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(ids.len())
+}
+
 /// Take every realm's matcher lock (sorted, like the watchers), so no matcher
 /// run re-opens a finding between our read and our `notified_at` write.
 async fn lock_realms(tx: &mut PgConnection, cfg: &HeimdallConfig) -> anyhow::Result<()> {

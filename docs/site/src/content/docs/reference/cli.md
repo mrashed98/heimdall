@@ -28,6 +28,7 @@ prints the version.
 | [`scan-images`](#heimdall-scan-images) | Generate SBOMs for images that have none. | ingest key, syft |
 | [`findings`](#heimdall-findings) | List findings. | read key |
 | [`realms`](#heimdall-realms) | List realms with counts. | read key |
+| [`baseline`](#heimdall-baseline) | Mark a realm's backlog announced without alerting. | `DATABASE_URL`, config |
 
 ## Global flag
 
@@ -177,6 +178,10 @@ last try. Exits with failure only if every attempted image failed.
 ## `heimdall realms`
 
 Lists realms with their service and open-finding counts.
+
+## `heimdall baseline`
+
+`heimdall baseline --realm NAME [--config heimdall.yaml]` marks every open finding of the realm that was not announced yet as announced, without sending anything. Run it once before you add an alert channel to a realm with a large backlog, so the channel is not flooded. The findings stay open in the web UI, the API and the counts; one-shot kinds (`k8scve`, `releasenotecve`, `oathexpired`) resolve as if they had been sent. Afterwards new findings and state changes (a fix appears, an oath expires, a severity rises) alert as usual. The run is recorded in the audit log. Like `user`, it connects directly using `DATABASE_URL`.
 
 ## Banner and styled output
 

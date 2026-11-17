@@ -77,6 +77,15 @@ enum Command {
     Findings(FindingsArgs),
     /// Realms, with their service and open-finding counts
     Realms,
+    /// Mark a realm's open findings announced without alerting. Run once
+    /// before adding a channel to a realm with a backlog; new findings and
+    /// state changes still alert. Talks to the database directly.
+    Baseline {
+        #[arg(long)]
+        realm: String,
+        #[arg(long, default_value = "heimdall.yaml")]
+        config: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -160,6 +169,16 @@ enum UserAction {
         name: String,
     },
     List,
+}
+
+async fn baseline(realm: &str, config: PathBuf) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let cfg = HeimdallConfig::load(&config)?;
+    let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
+    let pool = heimdall::db::connect(&url).await?;
+    let n = heimdall::notify::baseline(&pool, &cfg, realm).await?;
+    println!("{n} open finding(s) in {realm} marked announced; they stay open and visible");
+    Ok(())
 }
 
 async fn user(action: UserAction, config: PathBuf) -> anyhow::Result<()> {
@@ -559,6 +578,13 @@ async fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("hofund: {e:#}");
                 ExitCode::from(2)
+            }
+        },
+        Command::Baseline { realm, config } => match baseline(&realm, config).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
             }
         },
         Command::User { action, config } => match user(action, config).await {
