@@ -313,19 +313,34 @@ pub async fn refresh(
         }
     }
 
-    // CVE id -> components it matches now.
+    // CVE id -> components it matches now. Candidates are indexed by
+    // (vendor, product), which cpe_matches requires equal: a full CVEs x
+    // candidates scan took minutes after a first backfill and, on a 1-CPU
+    // runtime, starved the health checks until the pod was killed.
+    let mut by_product: HashMap<(String, String), Vec<&Candidate>> = HashMap::new();
+    for c in &candidates {
+        if let Some(k) = cpe::match_key(&c.cpe) {
+            by_product.entry(k).or_default().push(c);
+        }
+    }
     let mut matches: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
-    for cve in cves.values() {
-        let hit: BTreeSet<i64> = candidates
-            .iter()
-            .filter(|c| {
-                cve.configs
-                    .iter()
-                    .any(|r| cpe_matches(r, &c.cpe, &c.version, &c.ecosystem))
-            })
-            .map(|c| c.component_id)
-            .collect();
+    for (i, cve) in cves.values().enumerate() {
+        let mut hit = BTreeSet::new();
+        for r in &cve.configs {
+            let Some(k) = cpe::match_key(&r.criteria) else {
+                continue;
+            };
+            for c in by_product.get(&k).into_iter().flatten() {
+                if cpe_matches(r, &c.cpe, &c.version, &c.ecosystem) {
+                    hit.insert(c.component_id);
+                }
+            }
+        }
         matches.insert(cve.id.as_str(), hit);
+        // Let the rest of the runtime (health checks, other loops) run.
+        if i % 256 == 255 {
+            tokio::task::yield_now().await;
+        }
     }
 
     let mut tx = pool.begin().await?;
@@ -818,6 +833,22 @@ mod tests {
         // Case does not matter.
         let upper = "cpe:2.3:a:PostgreSQL:PostgreSQL:16.4:*:*:*:*:*:*:*";
         assert!(cpe_matches(&r, upper, "16.4", "generic"));
+    }
+
+    #[test]
+    fn match_key_groups_what_cpe_matches_accepts() {
+        // The index must put every candidate cpe_matches would accept under
+        // the range's key: same vendor/product in any case.
+        let r = range(
+            "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*",
+            None,
+            None,
+        );
+        let upper = "cpe:2.3:a:PostgreSQL:PostgreSQL:16.4:*:*:*:*:*:*:*";
+        assert!(cpe_matches(&r, upper, "16.4", "generic"));
+        assert_eq!(cpe::match_key(&r.criteria), cpe::match_key(upper));
+        let other = "cpe:2.3:a:postgresql:postgres:16.4:*:*:*:*:*:*:*";
+        assert_ne!(cpe::match_key(&r.criteria), cpe::match_key(other));
     }
 
     #[test]
