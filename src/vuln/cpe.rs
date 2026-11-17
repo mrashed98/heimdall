@@ -88,6 +88,17 @@ pub fn vendor_product(cpe: &str) -> Option<String> {
     Some(format!("{}:{}", f[3].to_lowercase(), f[4].to_lowercase()))
 }
 
+/// `(vendor, product)` lowercased, unescaped: the part `cpe_matches` requires
+/// equal, so callers can index candidates by it.
+pub fn match_key(cpe: &str) -> Option<(String, String)> {
+    parse(cpe).map(|c| {
+        (
+            c.vendor.to_ascii_lowercase(),
+            c.product.to_ascii_lowercase(),
+        )
+    })
+}
+
 /// The concrete version inside a CPE, if it has one.
 pub fn concrete_version(cpe: &str) -> Option<String> {
     let c = parse(cpe)?;
