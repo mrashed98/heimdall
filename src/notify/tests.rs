@@ -1029,3 +1029,58 @@ async fn late_fix_still_alerts_after_a_flap(pool: PgPool) {
     );
     assert!(title(&outbox(&pool).await[0].card).starts_with("Fix available"));
 }
+
+// ---- baseline ----
+
+#[sqlx::test(migrations = "./migrations")]
+async fn baseline_marks_the_backlog_without_alerting(pool: PgPool) {
+    let high = vuln(&pool, "prod", "api", "high").await;
+    let fixed = fix(&pool, "prod", "api", "high").await;
+    let k8s = finding(
+        &pool,
+        "k8scve",
+        "prod",
+        None,
+        "CVE-2026-1",
+        "high",
+        json!({}),
+    )
+    .await;
+    let other_realm = vuln(&pool, "dev", "api", "high").await;
+    let cfg = one_route("NOTIFY_BASELINE");
+
+    assert!(baseline(&pool, &cfg, "nope").await.is_err());
+    assert_eq!(baseline(&pool, &cfg, "prod").await.unwrap(), 3);
+
+    assert_eq!(notified_status(&pool, high).await, (true, "open".into()));
+    assert_eq!(notified_status(&pool, fixed).await, (true, "open".into()));
+    // One-shot kinds resolve as if they had been sent.
+    assert_eq!(notified_status(&pool, k8s).await, (true, "resolved".into()));
+    assert_eq!(
+        notified_status(&pool, other_realm).await,
+        (false, "open".into())
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT (detail->>'findings')::bigint FROM audit_log WHERE action = 'findings_baseline'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 3);
+
+    // Only dev's finding is still pending; a new prod finding alerts again.
+    assert_eq!(enqueue_alerts(&pool, &cfg).await.unwrap(), 1);
+    assert_eq!(outbox(&pool).await.len(), 1);
+    let sid = service(&pool, "prod", "web").await;
+    finding(
+        &pool,
+        "vuln",
+        "prod",
+        Some(sid),
+        "GHSA-new-0002",
+        "critical",
+        vuln_details("v1.9.0", Value::Null, Value::Null),
+    )
+    .await;
+    assert_eq!(enqueue_alerts(&pool, &cfg).await.unwrap(), 1);
+}
