@@ -18,15 +18,15 @@ The Helm chart lives in the repository at `deploy/helm/heimdall`.
   `heimdall scan-images`), or use the images pushed to GHCR by a release.
 
   ```bash
-  docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.3.0 .
-  docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.3.0 .
+  docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.3.1 .
+  docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.3.1 .
   ```
 
 <Aside type="note">
 Releases are cut by pushing a `v*` tag. CI then builds static Linux binaries
 (`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images, and
 pushes the images to GHCR tagged with the version **without the `v`** (tag
-`v0.3.0` gives `heimdall:0.3.0`) and `latest`. That is the tag the chart pulls
+`v0.3.1` gives `heimdall:0.3.1`) and `latest`. That is the tag the chart pulls
 by default (its `appVersion`). A tag build fails unless the tag, the chart's
 `appVersion` and the crate version agree.
 </Aside>
