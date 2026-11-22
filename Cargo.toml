@@ -56,7 +56,7 @@ serde-saphyr = "2.1.1"
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "signal"] }
-url = "2.5.8"
+url = "2.5.9"
 walkdir = "2.5.0"
 comfy-table = "8.0.1"
 
