@@ -5,7 +5,7 @@
 # (built natively by the binaries job), so nothing compiles under emulation.
 ARG BIN_SOURCE=build
 
-FROM node:22-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
