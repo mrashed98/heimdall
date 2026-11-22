@@ -69,7 +69,7 @@
 - [ ] `nav.test.ts`: each path above maps as listed; `/findings/0`, `/findings/abc`, `/nope` → notfound; `/access` with admin=false → notfound.
 - [ ] Implement `route(path, admin)`; App uses it.
 - [ ] Shell per canvas: 68px rail with Logo, icon+label links (aria-current), Settings pinned bottom (admin), avatar menu (name, roles, theme toggle, sign out); realm switcher moves to page headers' filter row (shared component `RealmPicker.svelte`, same URL behaviour). ≤700px: rail becomes a horizontal top bar.
-- [ ] Sign-in page per SignIn artboard: helmet + CINZEL wordmark + tagline left, card right (OIDC button, divider, local form, or key field), Bifröst gradient line on the card. No numbers before sign-in.
+- [ ] Sign-in page per SignIn artboard (centred dark card, refs Better Stack/Height/Synthesia on Mobbin): "Back to docs" link, helmet + wordmark + "Welcome back", card with OIDC button, divider, local form; key-only mode shows one key field; error line above the button keeps the fields.
 - [ ] check/test/build pass; commit.
 
 ### Task 3: Findings feed
@@ -102,7 +102,7 @@
 
 ### Task 5b: Docs site landing page
 
-**Files:** `docs/site/src/pages/index.astro` (landing, per Landing artboard, links built with `import.meta.env.BASE_URL`), delete `docs/site/src/content/docs/index.mdx`, `docs/site/astro.config.mjs` (`redirects: {'/docs': '/heimdall/getting-started/what-is-heimdall/'}`, logo → helmet), `docs/site/src/assets/logo.svg`, `docs/site/public/favicon.svg`, `docs/site/src/styles/custom.css` (Starlight `--sl-color-*` mapped to the palette; Cinzel via `@fontsource/cinzel` for the site title).
+**Files:** `docs/site/src/pages/index.astro` (landing, per Landing artboard: split hero with checklist + integration tiles wired to the helmet (ref 1Password Developer), numbered How-it-works list beside a product panel (ref Retool), three cards with real output: gate report, alert, oath (ref Resend); links built with `import.meta.env.BASE_URL`), delete `docs/site/src/content/docs/index.mdx`, `docs/site/astro.config.mjs` (`redirects: {'/docs': '/heimdall/getting-started/what-is-heimdall/'}`, logo → helmet), `docs/site/src/assets/logo.svg`, `docs/site/public/favicon.svg`, `docs/site/src/styles/custom.css` (Starlight `--sl-color-*` mapped to the palette; Cinzel via `@fontsource/cinzel` for the site title).
 - [ ] `npm run build` in docs/site passes (links validator); `dist/index.html` is the landing; `dist/docs/index.html` redirects; every old doc URL still exists in dist.
 - [ ] Install command on the page is the real one from getting-started/kubernetes.mdx.
 - [ ] Commit.
