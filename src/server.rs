@@ -291,6 +291,13 @@ pub struct FindingRow {
     #[sqlx(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epss_percentile: Option<f32>,
+    /// Advisory summary and the version that fixes it; UI path only.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -586,10 +593,13 @@ async fn findings_handler(
     .filter(|s| *s >= min)
     .map(severity_text)
     .collect();
-    let severity = match given(&q.severity) {
-        Some(s) => Some(severity_text(
-            gate::parse_severity(s).map_err(ApiError::BadRequest)?,
-        )),
+    let severity: Option<Vec<&str>> = match given(&q.severity) {
+        Some(list) => Some(
+            list.split(',')
+                .map(|s| gate::parse_severity(s.trim()).map(severity_text))
+                .collect::<Result<_, _>>()
+                .map_err(ApiError::BadRequest)?,
+        ),
         None => None,
     };
     let sort = match given(&q.sort).unwrap_or("opened_at") {
@@ -666,6 +676,27 @@ async fn findings_handler(
     } else {
         "AND $11::text IS NULL"
     };
+    // UI rows carry the advisory summary and the fix version, and a
+    // fixavailable row is folded into its vuln sibling unless asked for.
+    let (ui_cols, ui_join, fold) = if q.ui.unwrap_or(false) {
+        (
+            ", ua.summary, COALESCE(f.details->'advice'->>'suggest', sib.fix) AS fix",
+            "LEFT JOIN advisories ua ON ua.id = f.ref_id \
+             LEFT JOIN LATERAL (SELECT fx.details->'advice'->>'suggest' AS fix FROM findings fx \
+               WHERE fx.kind = 'fixavailable' AND fx.status = f.status AND fx.ref_id = f.ref_id AND fx.realm = f.realm \
+                 AND fx.component_id IS NOT DISTINCT FROM f.component_id AND fx.service_id IS NOT DISTINCT FROM f.service_id \
+               ORDER BY fx.id LIMIT 1) sib ON f.kind <> 'fixavailable'",
+            if kind.is_none() {
+                "AND NOT (f.kind = 'fixavailable' AND EXISTS (SELECT 1 FROM findings v WHERE v.kind = 'vuln' AND v.status = f.status \
+                   AND v.ref_id = f.ref_id AND v.realm = f.realm AND v.component_id IS NOT DISTINCT FROM f.component_id \
+                   AND v.service_id IS NOT DISTINCT FROM f.service_id))"
+            } else {
+                ""
+            },
+        )
+    } else {
+        ("", "", "")
+    };
     let secondary = if q.ui.unwrap_or(false) {
         "f.opened_at DESC, "
     } else {
@@ -674,19 +705,19 @@ async fn findings_handler(
     let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
                 f.severity, f.status, f.opened_at, f.resolved_at, f.details, \
-                CASE WHEN $15 THEN c.version END AS component_version{epss_cols} \
+                CASE WHEN $15 THEN c.version END AS component_version{epss_cols}{ui_cols} \
          FROM findings f \
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
-         {joins} {epss_join} \
+         {joins} {epss_join} {ui_join} \
          WHERE f.status = CASE WHEN $14::text = 'resolved' THEN 'resolved' WHEN $14::text IS NOT NULL THEN 'open' ELSE $1 END \
            AND ($13::text[] IS NULL OR f.realm = ANY($13)) \
-           {view_filter} \
+           {view_filter} {fold} \
            AND ($2::text IS NULL OR f.realm = $2) \
            AND ($3::text IS NULL OR f.kind = $3) \
            AND f.severity = ANY($4) \
            AND ($7 OR f.realm = ANY($8)) \
-           AND ($9::text IS NULL OR f.severity = $9) \
+           AND ($9::text[] IS NULL OR f.severity = ANY($9)) \
            AND ($10::text IS NULL OR s.name = $10) \
            {search_filter} \
            AND ($12::bool IS NULL OR (f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb) = $12) \
@@ -734,6 +765,11 @@ struct FindingDetailQuery {
 
 #[derive(FromRow)]
 struct FindingDetailRow {
+    kind: FindingKind,
+    severity: Severity,
+    ref_id: Option<String>,
+    status: String,
+    opened_at: DateTime<Utc>,
     realm: String,
     service: Option<String>,
     purl: Option<String>,
@@ -757,9 +793,14 @@ async fn finding_detail_handler(
     let affected_offset = parse_offset(&q.affected_offset)?;
     let oaths_offset = parse_offset(&q.oaths_offset)?;
     let row: Option<FindingDetailRow> = sqlx::query_as(
-        "SELECT f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases, e.score AS epss, e.percentile AS epss_percentile FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id LEFT JOIN epss e ON e.cve_id=COALESCE(a.cve_id, f.ref_id) WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
+        "SELECT f.kind, f.severity, f.ref_id, f.status, f.opened_at, f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases, e.score AS epss, e.percentile AS epss_percentile FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id LEFT JOIN epss e ON e.cve_id=COALESCE(a.cve_id, f.ref_id) WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
     ).bind(id).bind(authed.kind == "key").bind(authed.readable_realms(&state.cfg.realms)).fetch_optional(&state.pool).await?;
     let FindingDetailRow {
+        kind,
+        severity,
+        ref_id,
+        status,
+        opened_at,
         realm,
         service,
         purl,
@@ -772,16 +813,12 @@ async fn finding_detail_handler(
         epss,
         epss_percentile,
     } = row.ok_or(ApiError::NotFound)?;
-    let ref_id: Option<String> = sqlx::query_scalar("SELECT ref_id FROM findings WHERE id=$1")
-        .bind(id)
-        .fetch_one(&state.pool)
-        .await?;
     let affected: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as("SELECT DISTINCT s.name, sc.via_image_digest, i.image_ref FROM service_components sc JOIN services s ON s.id=sc.service_id JOIN components c ON c.id=sc.component_id LEFT JOIN image_sboms i ON i.digest=sc.via_image_digest WHERE s.realm=$1 AND c.purl=$2 ORDER BY s.name, sc.via_image_digest, i.image_ref LIMIT 25 OFFSET $3")
         .bind(&realm).bind(&purl).bind(affected_offset).fetch_all(&state.pool).await?;
     let history: Vec<oath::Oath> = sqlx::query_as("SELECT id, advisory_id, name_key, service_name, realm, kind, reason, version_at_creation, expires_at, review_at, created_by, created_at, status FROM oaths WHERE (advisory_id=$1 OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id=$1) OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id=oaths.advisory_id)) AND name_key=$2 AND service_name=$3 AND (realm=$4 OR realm IS NULL) ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $5")
         .bind(&ref_id).bind(&name_key).bind(&service).bind(&realm).bind(oaths_offset).fetch_all(&state.pool).await?;
     Ok(Json(
-        serde_json::json!({"summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
+        serde_json::json!({"id": id, "kind": kind, "severity": severity, "ref_id": ref_id, "status": status, "opened_at": opened_at, "realm": realm, "service": service, "summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
     ))
 }
 
@@ -1462,6 +1499,115 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(detail["epss"].as_f64(), Some(0.5));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_ui_rows_carry_summary_and_fix_and_fold_fixavailable(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "vuln|log4j", "critical").await;
+        seed_finding(&pool, "prod", "api", "fix|log4j", "critical").await;
+        sqlx::query("INSERT INTO advisories (id, severity, source, summary) VALUES ('GHSA-log4j','critical','osv','Remote code execution in Log4j')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO components (purl,name_key,ecosystem,version) VALUES ('pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1','pkg:maven/org.apache.logging.log4j/log4j-core','maven','2.14.1')").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET ref_id='GHSA-log4j', component_id=(SELECT id FROM components LIMIT 1)").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET kind='fixavailable', details='{\"advice\":{\"suggest\":\"2.15.0\"}}' WHERE key='fix|log4j'").execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+
+        let (status, body) = get(&app, "/api/v1/findings?ui=true", Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["kind"], "vuln");
+        assert_eq!(rows[0]["summary"], "Remote code execution in Log4j");
+        assert_eq!(rows[0]["fix"], "2.15.0");
+
+        let (_, body) = get(
+            &app,
+            "/api/v1/findings?ui=true&kind=fixavailable",
+            Some(&key),
+        )
+        .await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["kind"], "fixavailable");
+        assert_eq!(rows[0]["fix"], "2.15.0");
+
+        let (_, body) = get(&app, "/api/v1/findings", Some(&key)).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 2, "{body}");
+        assert!(
+            !body.contains("summary") && !body.contains("\"fix\""),
+            "{body}"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_fixavailable_shows_when_its_vuln_sibling_is_resolved(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "vuln|x", "high").await;
+        seed_finding(&pool, "prod", "api", "fix|x", "high").await;
+        sqlx::query("UPDATE findings SET ref_id='GHSA-x'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE findings SET kind='fixavailable', details='{\"advice\":{\"suggest\":\"1.2.3\"}}' WHERE key='fix|x'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET status='resolved', resolved_at=now() WHERE key='vuln|x'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let (_, body) = get(&app, "/api/v1/findings?ui=true", Some(&key)).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["kind"], "fixavailable");
+        assert_eq!(rows[0]["fix"], "1.2.3");
+        assert!(
+            rows[0].get("summary").is_none(),
+            "no advisory, no summary: {body}"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_severity_accepts_a_list(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "c", "critical").await;
+        seed_finding(&pool, "prod", "api", "h", "high").await;
+        seed_finding(&pool, "prod", "api", "m", "medium").await;
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let (status, body) = get(
+            &app,
+            "/api/v1/findings?severity=critical,high&sort=severity",
+            Some(&key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        let mut keys: Vec<_> = rows.iter().map(|r| r["key"].as_str().unwrap()).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["c", "h"]);
+        let (status, _) = get(&app, "/api/v1/findings?severity=critical,bogus", Some(&key)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn finding_detail_carries_header_fields(pool: PgPool) {
+        seed_finding(&pool, "prod", "api", "GHSA-head", "high").await;
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let id: i64 = sqlx::query_scalar("SELECT id FROM findings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let app = router(state(pool));
+        let (status, body) = get(&app, &format!("/api/v1/findings/{id}"), Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(d["id"], id);
+        assert_eq!(d["kind"], "vuln");
+        assert_eq!(d["severity"], "high");
+        assert_eq!(d["ref_id"], "GHSA-head");
+        assert_eq!(d["status"], "open");
+        assert_eq!(d["realm"], "prod");
+        assert_eq!(d["service"], "api");
+        assert!(d["opened_at"].is_string());
     }
 
     #[sqlx::test(migrations = "./migrations")]

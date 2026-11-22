@@ -97,7 +97,7 @@ Scope `read`. Newest first.
 | `offset` | `0` | Pagination offset. |
 | `realms` | permitted realms | Comma-separated realm selection. |
 | `view_status` | unset | `open`, `snoozed`, `ignored`, or `resolved`. |
-| `severity` | all | Exact severity. |
+| `severity` | all | Exact severity, or a comma list such as `critical,high`. |
 | `service`, `search` | unset | Service name, or advisory/alias/package search. |
 | `has_fix` | unset | Boolean fix-availability filter. |
 | `sort`, `order` | `opened_at`, `desc` | Sort by `opened_at`, `severity`, `epss`, `kind`, `realm`, `service`, or `advisory`; order `asc` or `desc`. |
@@ -128,6 +128,14 @@ With `ui=true` (or `sort=epss`), rows also carry `epss` and `epss_percentile`
 (0 to 1) when the finding's CVE has an [EPSS score](/heimdall/concepts/matching/#epss).
 The fields are left out otherwise, so API-key responses keep the shape above.
 `GET /api/v1/findings/{id}` returns both fields, `null` when unscored.
+
+With `ui=true`, rows also carry `summary` (the advisory's) and `fix` (the
+version that fixes it, from the finding's own advice or its `fixavailable`
+sibling), each left out when unknown. Unless `kind` is given, a `fixavailable`
+finding whose `vuln` sibling (same advisory, component, service and realm) is
+in the same status is folded into that row, so the list shows one row per
+vulnerability. `GET /api/v1/findings/{id}` also returns `kind`, `severity`,
+`ref_id`, `status`, `opened_at`, `realm` and `service`.
 
 ### `GET /api/v1/services`
 
