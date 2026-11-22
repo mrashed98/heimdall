@@ -100,7 +100,7 @@ Scope `read`. Newest first.
 | `severity` | all | Exact severity. |
 | `service`, `search` | unset | Service name, or advisory/alias/package search. |
 | `has_fix` | unset | Boolean fix-availability filter. |
-| `sort`, `order` | `opened_at`, `desc` | Sort by `opened_at`, `severity`, `kind`, `realm`, `service`, or `advisory`; order `asc` or `desc`. |
+| `sort`, `order` | `opened_at`, `desc` | Sort by `opened_at`, `severity`, `epss`, `kind`, `realm`, `service`, or `advisory`; order `asc` or `desc`. |
 
 Each row:
 
@@ -123,6 +123,11 @@ Each row:
 
 `service`, `purl`, `ref_id` and `resolved_at` can be `null`. `details` is a JSON
 object whose contents depend on `kind`.
+
+With `ui=true` (or `sort=epss`), rows also carry `epss` and `epss_percentile`
+(0 to 1) when the finding's CVE has an [EPSS score](/heimdall/concepts/matching/#epss).
+The fields are left out otherwise, so API-key responses keep the shape above.
+`GET /api/v1/findings/{id}` returns both fields, `null` when unscored.
 
 ### `GET /api/v1/services`
 

@@ -37,6 +37,18 @@ Kubernetes or k3s gets one `k8scve` finding per feed entry. A feed with no
 entries is treated as broken: it is logged as a warning and nothing is
 recorded, so the next good feed is not mistaken for all-new entries.
 
+## EPSS
+
+Once a day Heimdall downloads [FIRST's EPSS scores](https://www.first.org/epss/):
+for each CVE, the chance (0 to 100%) that it is exploited in the wild in the
+next 30 days, and its percentile among all CVEs. Only the CVEs your advisories
+name are stored, and the table is replaced whole only by a complete file. A CVE
+first seen during the day gets its score on the next run.
+
+EPSS does not change severities or alerts. It is shown next to each finding in
+the web UI and the API, so among many critical and high findings you can fix
+the ones most likely to be exploited first: sort the Findings table by **EPSS**.
+
 ## Same CVE, counted once
 
 A CVE found in both OSV and NVD is **one advisory**. Heimdall joins them on the

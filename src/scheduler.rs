@@ -26,7 +26,7 @@ use url::Url;
 use crate::config::HeimdallConfig;
 use crate::inventory::{sight, store};
 use crate::notify::{self, digest, outbox};
-use crate::vuln::{k8s_feed, nvd, osv};
+use crate::vuln::{epss, k8s_feed, nvd, osv};
 use crate::{matcher, meters, retention, watchers, AppState};
 
 /// Where the Kubernetes CVE feed lives.
@@ -49,6 +49,7 @@ enum Job {
     Outbox,
     Digest,
     Nvd,
+    Epss,
     Retention,
 }
 
@@ -57,7 +58,7 @@ enum Job {
 const MAX_OSV_MINUTES: u32 = 15;
 
 impl Job {
-    const ALL: [Job; 8] = [
+    const ALL: [Job; 9] = [
         Job::Sight,
         Job::Osv,
         Job::K8sFeed,
@@ -65,6 +66,7 @@ impl Job {
         Job::Outbox,
         Job::Digest,
         Job::Nvd,
+        Job::Epss,
         Job::Retention,
     ];
 
@@ -77,6 +79,7 @@ impl Job {
             Job::Outbox => "outbox",
             Job::Digest => "digest",
             Job::Nvd => "nvd",
+            Job::Epss => "epss",
             Job::Retention => "retention",
         }
     }
@@ -92,6 +95,8 @@ impl Job {
             Job::Outbox => Duration::from_secs(2),
             Job::Digest => minutes(1),
             Job::Nvd => minutes(cfg.nvd.minutes),
+            // FIRST publishes one file a day.
+            Job::Epss => minutes(24 * 60),
             Job::Retention => minutes(24 * 60),
         }
     }
@@ -201,6 +206,12 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
         Job::Nvd => {
             log_failure("nvd", nvd_refresh(st).await);
             rematch(st).await
+        }
+        Job::Epss => {
+            // Scores only annotate findings: nothing to rematch or announce.
+            let r = epss::refresh(&st.pool, &st.http, epss::FEED_URL).await?;
+            tracing::info!(kept = r.kept, total = r.total, date = %r.date, "epss refresh ran");
+            record_sync(st, "epss").await
         }
         Job::K8sFeed => {
             let base = Url::parse(K8S_FEED_BASE).context("k8s feed url")?;

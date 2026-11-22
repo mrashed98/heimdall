@@ -2,6 +2,7 @@
 
 pub mod collapse;
 pub mod cpe;
+pub mod epss;
 pub mod ghsa;
 pub mod k8s_feed;
 pub mod nvd;

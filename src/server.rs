@@ -284,6 +284,13 @@ pub struct FindingRow {
     #[sqlx(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_version: Option<String>,
+    /// EPSS score and percentile (0 to 1) of the finding's CVE; UI path only.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epss: Option<f32>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epss_percentile: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -470,12 +477,18 @@ async fn status_handler(
         .bind(&selected).fetch_all(&state.pool).await?;
     let entries: Vec<(String, String)> =
         sqlx::query_as("SELECT key, value FROM kv WHERE key = ANY($1)")
-            .bind(["sync|osv", "sync|nvd", "sync|k8s", "sync|sight"])
+            .bind([
+                "sync|osv",
+                "sync|nvd",
+                "sync|k8s",
+                "sync|epss",
+                "sync|sight",
+            ])
             .fetch_all(&state.pool)
             .await?;
     let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
     let mut sync = std::collections::BTreeMap::new();
-    for feed in ["osv", "nvd", "k8s", "sight"] {
+    for feed in ["osv", "nvd", "k8s", "epss", "sight"] {
         let visible = feed != "sight"
             || state
                 .cfg
@@ -586,6 +599,7 @@ async fn findings_handler(
         "realm" => "f.realm",
         "service" => "s.name",
         "advisory" => "f.ref_id",
+        "epss" => "ep.score",
         _ => return Err(ApiError::BadRequest("unknown sort field".into())),
     };
     let direction = match given(&q.order).unwrap_or("desc") {
@@ -633,6 +647,15 @@ async fn findings_handler(
     } else {
         ""
     };
+    // The CVE is the advisory's, or the ref itself (Kubernetes feed, NVD).
+    let (epss_cols, epss_join) = if q.ui.unwrap_or(false) || given(&q.sort) == Some("epss") {
+        (
+            ", ep.score AS epss, ep.percentile AS epss_percentile",
+            "LEFT JOIN LATERAL (SELECT e.score, e.percentile FROM epss e WHERE e.cve_id = COALESCE((SELECT ea.cve_id FROM advisories ea WHERE ea.id = f.ref_id), f.ref_id)) ep ON true",
+        )
+    } else {
+        ("", "")
+    };
     let view_filter = if view_status.is_some() {
         "AND ($14::text = 'resolved' OR CASE WHEN $14 = 'open' THEN active_oath.kind IS NULL ELSE active_oath.kind = CASE $14 WHEN 'snoozed' THEN 'snooze' ELSE 'ignore' END END)"
     } else {
@@ -651,11 +674,11 @@ async fn findings_handler(
     let sql = format!(
         "SELECT f.id, f.key, f.kind, f.realm, s.name AS service, c.purl, f.ref_id, \
                 f.severity, f.status, f.opened_at, f.resolved_at, f.details, \
-                CASE WHEN $15 THEN c.version END AS component_version \
+                CASE WHEN $15 THEN c.version END AS component_version{epss_cols} \
          FROM findings f \
          LEFT JOIN services s ON s.id = f.service_id \
          LEFT JOIN components c ON c.id = f.component_id \
-         {joins} \
+         {joins} {epss_join} \
          WHERE f.status = CASE WHEN $14::text = 'resolved' THEN 'resolved' WHEN $14::text IS NOT NULL THEN 'open' ELSE $1 END \
            AND ($13::text[] IS NULL OR f.realm = ANY($13)) \
            {view_filter} \
@@ -720,6 +743,8 @@ struct FindingDetailRow {
     fixed: Option<serde_json::Value>,
     scores: Option<serde_json::Value>,
     aliases: Option<Vec<String>>,
+    epss: Option<f32>,
+    epss_percentile: Option<f32>,
 }
 
 async fn finding_detail_handler(
@@ -732,7 +757,7 @@ async fn finding_detail_handler(
     let affected_offset = parse_offset(&q.affected_offset)?;
     let oaths_offset = parse_offset(&q.oaths_offset)?;
     let row: Option<FindingDetailRow> = sqlx::query_as(
-        "SELECT f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
+        "SELECT f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases, e.score AS epss, e.percentile AS epss_percentile FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id LEFT JOIN epss e ON e.cve_id=COALESCE(a.cve_id, f.ref_id) WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
     ).bind(id).bind(authed.kind == "key").bind(authed.readable_realms(&state.cfg.realms)).fetch_optional(&state.pool).await?;
     let FindingDetailRow {
         realm,
@@ -744,6 +769,8 @@ async fn finding_detail_handler(
         fixed,
         scores,
         aliases,
+        epss,
+        epss_percentile,
     } = row.ok_or(ApiError::NotFound)?;
     let ref_id: Option<String> = sqlx::query_scalar("SELECT ref_id FROM findings WHERE id=$1")
         .bind(id)
@@ -754,7 +781,7 @@ async fn finding_detail_handler(
     let history: Vec<oath::Oath> = sqlx::query_as("SELECT id, advisory_id, name_key, service_name, realm, kind, reason, version_at_creation, expires_at, review_at, created_by, created_at, status FROM oaths WHERE (advisory_id=$1 OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id=$1) OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id=oaths.advisory_id)) AND name_key=$2 AND service_name=$3 AND (realm=$4 OR realm IS NULL) ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $5")
         .bind(&ref_id).bind(&name_key).bind(&service).bind(&realm).bind(oaths_offset).fetch_all(&state.pool).await?;
     Ok(Json(
-        serde_json::json!({"summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
+        serde_json::json!({"summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
     ))
 }
 
@@ -1391,6 +1418,50 @@ mod tests {
         );
         assert_eq!(rows[0]["component_name"], "django");
         assert_eq!(rows[0]["component_version"], "3.2.0");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn findings_carry_epss_on_the_ui_path_and_sort_by_it(pool: PgPool) {
+        // ref_id = key: one via an advisory's CVE, one a bare CVE, one unscored.
+        for key in ["GHSA-aaaa", "CVE-2024-0002", "GHSA-none"] {
+            seed_finding(&pool, "prod", "api", key, "high").await;
+        }
+        sqlx::query("INSERT INTO advisories (id, severity, source, cve_id) VALUES ('GHSA-aaaa','high','osv','CVE-2024-0001')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO epss (cve_id, score, percentile, scored_on) VALUES ('CVE-2024-0001', 0.5, 0.97, '2026-11-22'), ('CVE-2024-0002', 0.01, 0.4, '2026-11-22')").execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+
+        let (status, body) = get(
+            &app,
+            "/api/v1/findings?ui=true&sort=epss&order=desc",
+            Some(&key),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r["key"].as_str().unwrap(), r["epss"].as_f64()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("GHSA-aaaa", Some(0.5)),
+                ("CVE-2024-0002", Some(0.01)),
+                ("GHSA-none", None)
+            ]
+        );
+        assert_eq!(rows[0]["epss_percentile"].as_f64(), Some(0.97));
+
+        // The API-key list without UI params keeps its old shape.
+        let (_, body) = get(&app, "/api/v1/findings", Some(&key)).await;
+        assert!(!body.contains("epss"), "{body}");
+
+        let id = rows[0]["id"].as_i64().unwrap();
+        let (status, body) = get(&app, &format!("/api/v1/findings/{id}"), Some(&key)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["epss"].as_f64(), Some(0.5));
     }
 
     #[sqlx::test(migrations = "./migrations")]
