@@ -38,6 +38,28 @@
 - [ ] Implement: on ui path select `a.summary` (join advisories) and `COALESCE(f.details->'advice'->>'suggest', sib.fix)` where `sib` is a LATERAL over open `fixavailable` findings with same ref_id, component_id, service_id, realm. Fold: when ui and kind not given, `AND NOT (f.kind='fixavailable' AND EXISTS(open vuln sibling))`. Severity: parse list, validate each, bind `text[]`, `f.severity = ANY($9)`.
 - [ ] `cargo test findings_` passes; clippy clean; document fields in http-api.md; commit.
 
+### Task 2a: Design system and component library
+
+**Files:** Create `web/src/lib/ui/tokens.css` (all palette, type, space 4/8/12/16/24/32, radius 5/7/10/14, dark default + `[data-theme=light]` and `prefers-color-scheme` light block), `web/src/lib/ui/*.svelte` for each component named in the spec, `web/src/lib/ui/index.ts`, `web/src/lib/ui/ui.test.ts`, `web/src/Catalogue.svelte` (mounted at `/design` only when `import.meta.env.DEV`).
+
+**Interfaces — Produces:** props, exactly:
+`Button {variant?: 'primary'|'secondary'|'ghost'|'danger'; size?: 'sm'|'md'; href?: string; type?; disabled?; onclick?; children}`;
+`Badge {severity: string}` (normalises unknown values to 'unknown');
+`Pill {tone?: 'neutral'|'gold'; mono?: boolean; children}`;
+`Input/Select {label: string; hint?: string; error?: string; value (bindable); ...rest}`;
+`EpssBar {score?: number|null; percentile?: number|null}`;
+`Stat {label: string; value: string|number; tone?: 'default'|'ok'|'critical'}`;
+`Panel {title?: string; actions?: Snippet; children}`;
+`IssueRow {href; title; sub: string; meta: string[]; epss?; epssPercentile?; severity}`;
+`EmptyState {title; body?; action?: Snippet}`;
+`DataTable {label; children}`; `Pagination {offset; count; loading; change}`;
+`Tabs {items: {id,label,count?}[]; current (bindable)}`; `Menu {label; children}`;
+`NavRail {items: {href,label,icon,current}[]; footer?: Snippet}`; `SubNav {title?; children}`; `PageHeader {title; description?; actions?: Snippet}`; `RealmPicker {realms: string[]; selected (bindable)}`.
+- [ ] `ui.test.ts` (vitest, no DOM lib): `severityTone('CRITICAL')=='critical'`, `severityTone('weird')=='unknown'`; `epssWidth(0.944)=='94.4%'`, `epssWidth(null)=='0%'`; `epssTone(0.5)=='critical'`, `epssTone(0.05)=='high'`, `epssTone(0.001)=='low'` (helpers live in `ui/format.ts`).
+- [ ] Old `lib/components/*` deleted; callers moved to `ui/`.
+- [ ] Grep check: no `#` hex colours in `web/src/lib/**/*.svelte` outside `ui/tokens.css` and the logo.
+- [ ] check/test/build; commit.
+
 ### Task 2: Theme, brand, shell
 
 **Files:** Rewrite `web/src/lib/theme.css`, `web/src/App.svelte`; replace `web/src/lib/assets/logo.svg` with the helmet; add `web/src/lib/components/Logo.svelte`, `web/src/lib/nav.ts` (+ `nav.test.ts`); `web/package.json` (+ `@fontsource/cinzel` exact version, import 700 latin only in `main.ts`).
@@ -47,7 +69,7 @@
 - [ ] `nav.test.ts`: each path above maps as listed; `/findings/0`, `/findings/abc`, `/nope` → notfound; `/access` with admin=false → notfound.
 - [ ] Implement `route(path, admin)`; App uses it.
 - [ ] Shell per canvas: 68px rail with Logo, icon+label links (aria-current), Settings pinned bottom (admin), avatar menu (name, roles, theme toggle, sign out); realm switcher moves to page headers' filter row (shared component `RealmPicker.svelte`, same URL behaviour). ≤700px: rail becomes a horizontal top bar.
-- [ ] Sign-in page restyled: helmet + CINZEL wordmark left, form card right, same three methods.
+- [ ] Sign-in page per SignIn artboard: helmet + CINZEL wordmark + tagline left, card right (OIDC button, divider, local form, or key field), Bifröst gradient line on the card. No numbers before sign-in.
 - [ ] check/test/build pass; commit.
 
 ### Task 3: Findings feed
@@ -78,7 +100,15 @@
 - [ ] Data calls and behaviour unchanged; existing tests pass.
 - [ ] check/test/build; commit.
 
+### Task 5b: Docs site landing page
+
+**Files:** `docs/site/src/pages/index.astro` (landing, per Landing artboard, links built with `import.meta.env.BASE_URL`), delete `docs/site/src/content/docs/index.mdx`, `docs/site/astro.config.mjs` (`redirects: {'/docs': '/heimdall/getting-started/what-is-heimdall/'}`, logo → helmet), `docs/site/src/assets/logo.svg`, `docs/site/public/favicon.svg`, `docs/site/src/styles/custom.css` (Starlight `--sl-color-*` mapped to the palette; Cinzel via `@fontsource/cinzel` for the site title).
+- [ ] `npm run build` in docs/site passes (links validator); `dist/index.html` is the landing; `dist/docs/index.html` redirects; every old doc URL still exists in dist.
+- [ ] Install command on the page is the real one from getting-started/kubernetes.mdx.
+- [ ] Commit.
+
 ### Task 6: Verify in the browser
 
 - [ ] Run against the local demo instance (port 8080, DB heimdall_ui), screenshot each page dark + light at 1440 and 390 widths, compare with the canvas, fix drift. Check JS gzip size ≤ 250 KB.
+- [ ] Same for the docs landing (`npm run preview`) at 1440 and 390.
 - [ ] Open PR.

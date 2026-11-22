@@ -2,7 +2,8 @@
 
 Status: approved direction (user, 2026-11-22: "yes now it look a lot better").
 Mockups: Claude Design canvas https://claude.ai/artifact/2hb9XDNJ7wjQTvKf9WicjW
-(artboards Main, Finding, Overview, Inventory, Releases, Oaths, Settings).
+(artboards Main, Finding, Overview, Inventory, Releases, Oaths, Settings,
+SignIn, Landing, DesignSystem).
 Builds on `2026-11-15-heimdall-phase2-ui-access-design.md`; its anti-goals
 (no CDN at runtime, 250 KB gzipped JS budget, strict CSP) still hold.
 
@@ -22,6 +23,20 @@ Heimdall character (bronze-gold armour, steel, sky teal, ember).
 - Feed rows show the advisory summary and `package installed -> fix`.
 - One row per vulnerability: a `fixavailable` finding whose `vuln` sibling
   (same advisory, component, service, realm) is open is folded into it.
+
+- Sign-in page rebuilt to the SignIn artboard (same three methods).
+- Design system + component library (user, 2026-11-22: "so it is
+  constructable and easy to extend with new features"): tokens in one file
+  `web/src/lib/ui/tokens.css`; components in `web/src/lib/ui/` (Button,
+  Badge, Pill, Input, Select, EpssBar, Stat, Panel, IssueRow, EmptyState,
+  NavRail, SubNav, PageHeader, DataTable, Pagination, Tabs, Menu,
+  RealmPicker), exported from `web/src/lib/ui/index.ts`. Pages compose
+  these and carry no colour of their own. A living catalogue page at
+  `/design` (dev builds only, not in the production bundle).
+- Docs site: the Starlight splash home becomes a custom landing page
+  (Landing artboard) with the same brand; docs keep their URLs, `/docs`
+  redirects to "What is Heimdall?", and Starlight is themed with the same
+  tokens and logo.
 
 ## Palette (tokens)
 bg #0b1013, rail #070b0d, panel #11181c, panel2 #162026, border #223038,
