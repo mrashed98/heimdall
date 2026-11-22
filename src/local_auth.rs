@@ -6,7 +6,7 @@ use crate::{
     AppState,
 };
 use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier},
     Argon2,
 };
 use axum::{
@@ -36,10 +36,8 @@ pub(crate) fn hash(s: &str) -> Vec<u8> {
     Sha256::digest(s.as_bytes()).to_vec()
 }
 pub fn password_hash(password: &str) -> anyhow::Result<String> {
-    let salt = SaltString::encode_b64(&rand::random::<[u8; 16]>())
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &rand::random::<[u8; 16]>())
         .map(|p| p.to_string())
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
@@ -541,6 +539,27 @@ async fn logout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hashes stored by argon2 0.5 (v0.3.x) must keep verifying after the upgrade.
+    #[test]
+    fn hashes_from_argon2_0_5_still_verify_and_new_ones_round_trip() {
+        let verify = |encoded: &str, pw: &str| {
+            Argon2::default()
+                .verify_password(pw.as_bytes(), &PasswordHash::new(encoded).unwrap())
+                .is_ok()
+        };
+        let old = "$argon2id$v=19$m=19456,t=2,p=1$3I6c3oZmvRItvyOx9kxwEg$HM+iocPgv1tbsWlqWUVwiQGkBQU4IiFRMGST6MmA02g";
+        assert!(verify(old, "correct horse"));
+        assert!(!verify(old, "wrong horse"));
+        let new = password_hash("correct horse").unwrap();
+        assert!(new.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"), "{new}");
+        assert!(verify(&new, "correct horse"));
+        assert_ne!(
+            new,
+            password_hash("correct horse").unwrap(),
+            "salt must be random"
+        );
+    }
     use axum::{
         body::Body,
         http::{Request, StatusCode},
