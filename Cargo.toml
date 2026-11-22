@@ -56,14 +56,14 @@ serde-saphyr = "2.1.1"
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "migrate", "macros", "chrono", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "signal"] }
-url = "2.5.8"
+url = "2.5.9"
 walkdir = "2.5.0"
 comfy-table = "8.0.1"
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }
 rand08 = { package = "rand", version = "0.8" }
-jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0", features = ["aws_lc_rs"] }
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
