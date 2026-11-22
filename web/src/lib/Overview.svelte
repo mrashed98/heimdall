@@ -2,11 +2,11 @@
   import { api } from './api';
   import { severities, statusUrl, type Severity } from './overview';
   import AllQuiet from './illustrations/AllQuiet.svelte';
-  import SeverityBadge from './components/SeverityBadge.svelte';
-  import Table from './components/Table.svelte';
-  import Skeleton from './components/Skeleton.svelte';
-  import EmptyState from './components/EmptyState.svelte';
-  import RetryState from './components/RetryState.svelte';
+  import Badge from './ui/Badge.svelte';
+  import DataTable from './ui/DataTable.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
+  import EmptyState from './ui/EmptyState.svelte';
+  import ErrorState from './ui/ErrorState.svelte';
   let { realms }: { realms: string[] } = $props();
   type Counts = { realm: string, severity: Severity, count: number };
   type Risk = { realm: string, service: string, critical: number, high: number, medium: number, risk: number };
@@ -27,18 +27,18 @@
     return () => { active = false; };
   });
 </script>
-{#if loading}<Skeleton />{:else if failed}<RetryState retry={() => revision++} />{:else if status}
+{#if loading}<Skeleton />{:else if failed}<ErrorState retry={() => revision++} />{:else if status}
   <div class="overview">
     <section class="findings"><div class="section-heading"><div><p class="kicker">THE WATCH</p><h2>Open findings</h2><p>Risk across your selected realms</p></div><div class="fix"><strong>{status.fix_available}</strong><span>Fix available</span></div></div>
       {#if total === 0}<div class="quiet"><AllQuiet /><p>No open findings in these realms.</p></div>{:else}
-        <div class="legend">{#each severities as severity}<SeverityBadge {severity} />{/each}</div>
+        <div class="legend">{#each severities as severity}<Badge {severity} />{/each}</div>
         <div class="bars">{#each groups as group}<div class="bar-row"><strong>{group.realm}</strong><div><svg viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">{#each group.counts as count, i}<rect x={group.counts.slice(0,i).reduce((a,b) => a+b,0) / max * 100} y="0" width={count / max * 100} height="8" class={severities[i]} />{/each}</svg><div class="counts">{#each group.counts as count, i}<span>{severities[i]}: {count}</span>{/each}</div></div></div>{/each}</div>
       {/if}
     </section>
     <section><p class="kicker">PRIORITY</p><h2>Services by risk</h2><p>Critical × 10 + High × 3 + Medium. Top 10 services.</p>
-      {#if rows.length}<Table label="Top services by risk"><thead><tr><th aria-sort={sort === 'service' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('service')}>Service ↕</button></th><th aria-sort={sort === 'realm' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('realm')}>Realm ↕</button></th><th>Critical / High / Medium</th><th aria-sort={sort === 'risk' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('risk')}>Risk ↕</button></th></tr></thead><tbody>{#each rows as row}<tr><td>{row.service}</td><td>{row.realm}</td><td>{row.critical} / {row.high} / {row.medium}</td><td><strong>{row.risk}</strong></td></tr>{/each}</tbody></Table>{:else}<EmptyState message="No services with open findings." />{/if}
+      {#if rows.length}<DataTable label="Top services by risk"><thead><tr><th aria-sort={sort === 'service' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('service')}>Service ↕</button></th><th aria-sort={sort === 'realm' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('realm')}>Realm ↕</button></th><th>Critical / High / Medium</th><th aria-sort={sort === 'risk' ? (ascending ? 'ascending' : 'descending') : 'none'}><button onclick={() => changeSort('risk')}>Risk ↕</button></th></tr></thead><tbody>{#each rows as row}<tr><td>{row.service}</td><td>{row.realm}</td><td>{row.critical} / {row.high} / {row.medium}</td><td><strong>{row.risk}</strong></td></tr>{/each}</tbody></DataTable>{:else}<EmptyState title="No services with open findings." />{/if}
     </section>
-    <div class="lower"><section><p class="kicker">WATCHERS / RELEASES</p><h2>Latest releases</h2><p>Updates from watched projects</p>{#if releases.length}<ul>{#each releases as release}<li><div><strong>{release.target}</strong> <code>{release.version}</code></div><span>{release.published_at ? date(release.published_at) : 'Date unknown'}{release.notes_class ? ` · ${release.notes_class}` : ''}</span></li>{/each}</ul>{:else}<EmptyState message="No releases recorded yet." />{/if}</section>
+    <div class="lower"><section><p class="kicker">WATCHERS / RELEASES</p><h2>Latest releases</h2><p>Updates from watched projects</p>{#if releases.length}<ul>{#each releases as release}<li><div><strong>{release.target}</strong> <code>{release.version}</code></div><span>{release.published_at ? date(release.published_at) : 'Date unknown'}{release.notes_class ? ` · ${release.notes_class}` : ''}</span></li>{/each}</ul>{:else}<EmptyState title="No releases recorded yet." />{/if}</section>
       <section><p class="kicker">FEED HEALTH</p><h2>Last sync</h2><p>Most recent successful refresh</p><ul>{#each [['osv','OSV'],['nvd','NVD'],['k8s','Kubernetes feed'],['epss','EPSS'],['sight','Sight: live cluster inventory']] as [id,label]}<li><strong>{label}</strong><span>{date(status.sync[id])}</span></li>{/each}</ul></section></div>
     {#if status.eol.length}<section><p class="kicker">LIFECYCLE</p><h2>End-of-life warnings</h2><p>Latest 10 warnings in your realms</p><ul>{#each status.eol as warning}<li><strong>{typeof warning.details.target === 'string' ? warning.details.target : (warning.ref_id ?? 'End-of-life warning')}</strong><span>{warning.realm}{warning.service ? ` / ${warning.service}` : ''} {typeof warning.details.eol === 'string' ? `· ${warning.details.eol}` : ''}</span></li>{/each}</ul></section>{/if}
   </div>

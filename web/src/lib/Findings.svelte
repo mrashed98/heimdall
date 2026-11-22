@@ -2,11 +2,11 @@
  import { onMount } from 'svelte';
  import { api, type Grant } from './api';
  import { epssLabel, findingsUrl, validateOath, canEdit, advisoryLinks, defaultFilters, sortFromSearch, sortUrl, type Filters } from './findings';
- import SeverityBadge from './components/SeverityBadge.svelte';
- import Table from './components/Table.svelte';
- import Skeleton from './components/Skeleton.svelte';
- import RetryState from './components/RetryState.svelte';
- import EmptyState from './components/EmptyState.svelte';
+ import Badge from './ui/Badge.svelte';
+ import DataTable from './ui/DataTable.svelte';
+ import Skeleton from './ui/Skeleton.svelte';
+ import ErrorState from './ui/ErrorState.svelte';
+ import EmptyState from './ui/EmptyState.svelte';
  let { realms, grants }: { realms:string[]; grants:Grant[] } = $props();
  type Finding = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; epss?:number; epss_percentile?:number; ref_id:string|null; severity:string; status:string; opened_at:string; details:Record<string, unknown> };
  type Oath = { id:number; kind:string; reason:string; status:string; created_by:string; created_at:string; expires_at:string|null; review_at:string|null };
@@ -41,13 +41,13 @@
  </div>
  <p class="hint">Use the Realms switcher above to filter by realm.</p>
  <div class:with-detail={selected} class="workspace"><section aria-label="Findings list">
- {#if loading}<Skeleton />{:else if failed}<RetryState retry={() => revision++} />{:else if !rows.length}<EmptyState message="No findings match these filters." />{:else}
- <Table label="Findings"><thead><tr>{#each [['advisory','Advisory'],['severity','Severity'],['epss','EPSS'],['kind','Kind'],['realm','Realm'],['service','Service'],['opened_at','Opened']] as [field,label]}{#if field==='severity'}<th>Package</th>{/if}<th aria-sort={sortState(field)}><button onclick={() => sort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions --><tr onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}}><td><button class="row-link" onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}} aria-label={`View ${row.ref_id ?? row.kind} in ${row.realm}`}>{row.ref_id ?? 'View finding'}</button></td><td class="mono">{row.component_name ? [row.component_name, row.component_version].filter(Boolean).join(' ') : '—'}</td><td><SeverityBadge severity={row.severity}/></td><td class="mono" title="Chance of exploitation in the next 30 days (FIRST EPSS)">{epssLabel(row.epss, row.epss_percentile)}</td><td>{row.kind}</td><td>{row.realm}</td><td>{row.service ?? '—'}</td><td>{row.opened_at.slice(0,10)}</td></tr>{/each}</tbody></Table>{/if}
+ {#if loading}<Skeleton />{:else if failed}<ErrorState retry={() => revision++} />{:else if !rows.length}<EmptyState title="No findings match these filters." />{:else}
+ <DataTable label="Findings"><thead><tr>{#each [['advisory','Advisory'],['severity','Severity'],['epss','EPSS'],['kind','Kind'],['realm','Realm'],['service','Service'],['opened_at','Opened']] as [field,label]}{#if field==='severity'}<th>Package</th>{/if}<th aria-sort={sortState(field)}><button onclick={() => sort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions --><tr onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}}><td><button class="row-link" onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}} aria-label={`View ${row.ref_id ?? row.kind} in ${row.realm}`}>{row.ref_id ?? 'View finding'}</button></td><td class="mono">{row.component_name ? [row.component_name, row.component_version].filter(Boolean).join(' ') : '—'}</td><td><Badge severity={row.severity}/></td><td class="mono" title="Chance of exploitation in the next 30 days (FIRST EPSS)">{epssLabel(row.epss, row.epss_percentile)}</td><td>{row.kind}</td><td>{row.realm}</td><td>{row.service ?? '—'}</td><td>{row.opened_at.slice(0,10)}</td></tr>{/each}</tbody></DataTable>{/if}
  <div class="pagination"><button disabled={filters.offset===0 || loading} onclick={() => {filters.offset=Math.max(0,filters.offset-25);selected=null;}}>Previous</button><span>Rows {filters.offset+1}–{filters.offset+rows.length}</span><button disabled={rows.length<25 || loading} onclick={() => {filters.offset+=25;selected=null;}}>Next</button></div>
  </section>
  {#if selected}<aside aria-label="Finding detail"><div class="panel-head"><div><p class="kicker">FINDING / {selected.realm}</p><h2>{selected.ref_id ?? selected.kind}</h2></div><button aria-label="Close detail" onclick={() => selected=null}>×</button></div>
- {#if detailLoading}<Skeleton />{:else if detailFailed}<RetryState retry={() => detailRevision++}/>{:else if detail}
- <h3>{detail.summary || 'Advisory details unavailable'}</h3><SeverityBadge severity={selected.severity}/>
+ {#if detailLoading}<Skeleton />{:else if detailFailed}<ErrorState retry={() => detailRevision++}/>{:else if detail}
+ <h3>{detail.summary || 'Advisory details unavailable'}</h3><Badge severity={selected.severity}/>
  <dl><dt>CVSS score</dt><dd>{detail.scores && Object.keys(detail.scores).length ? Object.entries(detail.scores).map(([source,score])=>`${source.toUpperCase()}: ${score}`).join(' · ') : 'Not recorded'}</dd><dt>CVSS vector</dt><dd>Not recorded</dd><dt>EPSS</dt><dd>{detail.epss == null ? 'Not scored' : `${epssLabel(detail.epss, detail.epss_percentile)}: chance of exploitation in the next 30 days`}</dd><dt>Aliases</dt><dd class="mono">{detail.aliases.join(', ') || 'None recorded'}</dd><dt>Component</dt><dd class="mono">{selected.purl ?? 'Not recorded'}</dd><dt>Installed version</dt><dd class="mono">{detail.version ?? 'Not recorded'}</dd><dt>Fixed versions</dt><dd class="mono">{(detail.name_key && detail.fixed?.[detail.name_key]?.join(', ')) || 'None recorded'}</dd></dl>
  {@const links = advisoryLinks([selected.ref_id ?? '', ...detail.aliases])}{#if links.length}<p class="links">{#each links as link}<a href={link.url} target="_blank" rel="noopener noreferrer">{link.id} ↗</a>{/each}</p>{/if}
  <h3>Affected services and images</h3>{#if detail.affected.length}<ul>{#each detail.affected as item}<li>{item.service}{#if item.image}<br/><span class="mono">{item.image}</span>{/if}{#if item.digest}<br/><span class="mono">{item.digest}</span>{/if}</li>{/each}</ul>{:else}<p>No inventory links recorded.</p>{/if}<div class="pagination"><button disabled={affectedOffset===0} onclick={() => affectedOffset=Math.max(0,affectedOffset-25)}>Previous services</button><button disabled={detail.affected.length<25} onclick={() => affectedOffset+=25}>Next services</button></div>

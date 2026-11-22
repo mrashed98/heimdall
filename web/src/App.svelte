@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, type Component } from 'svelte';
   import Overview from './lib/Overview.svelte';
   import Findings from './lib/Findings.svelte';
   import Services from './lib/Services.svelte';
@@ -23,6 +23,8 @@
   let username = $state(''); let password = $state(''); let key = $state('');
   let message = $state(''); let busy = $state(false); let menu = $state(false);
   let theme = $state('');
+  // Dev-only component catalogue at /design; the branch is dropped from production builds.
+  let Catalogue = $state<Component | null>(null);
   const pages = [
     { path: '/', label: 'Overview', description: 'Overview: risk across your realms' },
     { path: '/findings', label: 'Findings', description: 'Findings: vulnerabilities and other risks' },
@@ -56,13 +58,15 @@
   async function signOut() { try { if (identity?.kind !== 'key') await api<void>('/auth/logout', { method: 'POST' }); } catch { /* Clear local authState even when the session expired. */ } setKey(null); setCsrf(null); identity = null; authState = 'signin'; }
   onMount(() => {
     theme = localStorage.getItem('heimdall-theme') ?? ''; if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    if (import.meta.env.DEV) void import('./Catalogue.svelte').then(m => { Catalogue = m.default; });
     syncLocation(); window.addEventListener('popstate', syncLocation); onAuthState(s => { authState = s; });
     void (async () => { try { methods = await api<Methods>('/auth/login'); await loadIdentity(); } catch { if (authState === 'loading') authState = 'error'; } })();
     return () => window.removeEventListener('popstate', syncLocation);
   });
 </script>
 
-{#if authState === 'signin' || authState === 'loading'}
+{#if Catalogue && path === '/design'}<Catalogue />
+{:else if authState === 'signin' || authState === 'loading'}
   <header class="signin-header"><img src={logo} alt="" /><strong>Heimdall</strong></header>
   <main class="signin">
     <section class="intro"><p class="eyebrow">HEIMDALL / ACCESS</p><h1>The watcher at the Bifröst</h1><p>Keep watch over the services and dependencies in your realms.</p><SignInHero /></section>

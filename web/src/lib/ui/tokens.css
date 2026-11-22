@@ -1,0 +1,52 @@
+/* Heimdall design tokens. The only file with raw colours (besides the logo). */
+:root {
+  color-scheme: dark;
+  --bg: #0b1013; --rail: #070b0d; --panel: #11181c; --panel-2: #162026; --border: #223038;
+  --text: #ece6d8; --muted: #98a6ad;
+  --gold: #d6a24e; --gold-strong: #f2cd85; --gold-soft: #2a2216; --gold-line: #6b5126; --on-gold: #1a1307;
+  --sky: #74aac0; --ok: #5cc79a;
+  --sev-critical: #ff5b4f; --sev-high: #f2872f; --sev-medium: #e8c94f; --sev-low: #74aac0; --sev-unknown: #7d8a91;
+  --danger-line: #5a2723; --shadow: rgba(0, 0, 0, .45);
+  --glow-steel: #18262e; --glow-ember: #2a2216;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --font-display: 'Cinzel', Georgia, serif;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  --r-badge: 5px; --r-control: 7px; --r-panel: 10px; --r-card: 14px;
+  --text-xs: 11.5px; --text-sm: 12.5px; --text-md: 13.5px; --text-lg: 15px; --text-xl: 22px;
+  --bifrost: linear-gradient(90deg, var(--sky), var(--gold), var(--sev-high));
+  /* ponytail: legacy aliases for pages not yet on ui/; removed in Task 5. */
+  --page: var(--bg); --surface: var(--panel); --accent: var(--gold); --accent-high: var(--gold); --accent-low: var(--gold-soft);
+  --critical: var(--sev-critical); --high: var(--sev-high); --medium: var(--sev-medium); --low: var(--sev-low); --unknown: var(--sev-unknown); --fix: var(--ok); --badge-text: var(--on-gold);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #f6f3ec; --rail: #ece6d8; --panel: #ffffff; --panel-2: #f1ece1; --border: #ddd4c3;
+    --text: #1d2930; --muted: #5b6a72;
+    --gold: #8a5d14; --gold-strong: #6e4a0f; --gold-soft: #f4e7cf; --gold-line: #d9b77a; --on-gold: #ffffff;
+    --sky: #2f6f86; --ok: #1f7a55;
+    --sev-critical: #c4302b; --sev-high: #b0501a; --sev-medium: #866a00; --sev-low: #2f6f86; --sev-unknown: #5f6b72;
+    --danger-line: #e9b6b2; --shadow: rgba(29, 41, 48, .12); --glow-steel: #e3ecef; --glow-ember: #f4e7cf;
+  }
+}
+:root[data-theme='light'] {
+    color-scheme: light;
+    --bg: #f6f3ec; --rail: #ece6d8; --panel: #ffffff; --panel-2: #f1ece1; --border: #ddd4c3;
+    --text: #1d2930; --muted: #5b6a72;
+    --gold: #8a5d14; --gold-strong: #6e4a0f; --gold-soft: #f4e7cf; --gold-line: #d9b77a; --on-gold: #ffffff;
+    --sky: #2f6f86; --ok: #1f7a55;
+    --sev-critical: #c4302b; --sev-high: #b0501a; --sev-medium: #866a00; --sev-low: #2f6f86; --sev-unknown: #5f6b72;
+    --danger-line: #e9b6b2; --shadow: rgba(29, 41, 48, .12); --glow-steel: #e3ecef; --glow-ember: #f4e7cf;
+}
+:root[data-theme='dark'] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: var(--text-md)/1.5 var(--font-sans); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button, a, summary { cursor: pointer; }
+a { color: var(--gold); text-decoration: none; }
+a:hover { color: var(--gold-strong); }
+code, .mono { font-family: var(--font-mono); }
+:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }

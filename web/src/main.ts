@@ -1,4 +1,5 @@
 import { mount } from 'svelte';
+import '@fontsource/cinzel/latin-700.css';
+import './lib/ui/tokens.css';
 import App from './App.svelte';
-import './lib/theme.css';
 mount(App, { target: document.getElementById('app')! });
