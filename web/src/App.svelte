@@ -120,7 +120,7 @@
       {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings')}>Go to findings</Button></div>
       {:else}
         {#if header}<PageHeader title={header[0]} description={header[1]}>{#snippet actions()}{#if current.page !== 'settings'}{@render realmPicker()}{/if}{/snippet}</PageHeader>{/if}
-        {#if current.page === 'overview'}<Overview realms={selected} />
+        {#if current.page === 'overview'}<Overview realms={selected} {navigate} />
         {:else if current.page === 'inventory' || current.page === 'service'}<Services realms={selected} serviceId={current.page === 'service' ? current.id : null} />
         {:else if current.page === 'releases'}<Releases realms={selected} />
         {:else if current.page === 'oaths'}<Oaths realms={selected} grants={identity?.grants ?? []} />
