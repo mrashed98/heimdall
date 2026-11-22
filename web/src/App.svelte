@@ -2,6 +2,7 @@
   import { onMount, type Component } from 'svelte';
   import Overview from './lib/Overview.svelte';
   import Findings from './lib/Findings.svelte';
+  import Finding from './lib/Finding.svelte';
   import Services from './lib/Services.svelte';
   import Releases from './lib/Releases.svelte';
   import Oaths from './lib/Oaths.svelte';
@@ -114,7 +115,8 @@
       {/snippet}
     </NavRail>
     <div class="content" class:bleed={current.page === 'findings' || current.page === 'finding'}>
-      {#if current.page === 'findings' || current.page === 'finding'}<Findings realms={selected} {navigate} {realmPicker} />
+      {#if current.page === 'findings'}<Findings realms={selected} {navigate} {realmPicker} />
+      {:else if current.page === 'finding'}<Finding id={current.id} grants={identity?.grants ?? []} {navigate} />
       {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings')}>Go to findings</Button></div>
       {:else}
         {#if header}<PageHeader title={header[0]} description={header[1]}>{#snippet actions()}{#if current.page !== 'settings'}{@render realmPicker()}{/if}{/snippet}</PageHeader>{/if}

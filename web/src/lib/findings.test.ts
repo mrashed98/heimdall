@@ -41,3 +41,19 @@ describe('feed views', () => {
   expect(rowTitle({kind:'weird',ref_id:null,details:{}})).toBe('weird');
  });
 });
+import { nearestFix, compareVersions } from './findings';
+describe('fix versions', () => {
+ it('compares dotted versions numerically', () => {
+  expect(compareVersions('2.9.10.8','2.9.8')).toBeGreaterThan(0);
+  expect(compareVersions('v1.7.7','1.7.7')).toBe(0);
+  expect(compareVersions('4.2.26','4.2.3')).toBeGreaterThan(0);
+  expect(compareVersions('1.0.0-rc1','1.0.0')).toBeLessThan(0);
+ });
+ it('picks the lowest fixed version above the installed one', () => {
+  expect(nearestFix(['2.6.7.4','2.12.1','2.9.10.8'],'2.9.8')).toBe('2.9.10.8');
+  expect(nearestFix(['2.15.0'],'2.14.1')).toBe('2.15.0');
+  expect(nearestFix(['1.0.0'],'2.0.0')).toBeNull();
+  expect(nearestFix([],'1.0.0')).toBeNull();
+  expect(nearestFix(['3.1','2.5'],null)).toBe('2.5');
+ });
+});

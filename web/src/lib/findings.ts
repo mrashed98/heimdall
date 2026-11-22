@@ -71,3 +71,17 @@ export function rowTitle(row: Labelled): string {
     default: return row.summary || row.ref_id || row.kind || 'Finding';
   }
 }
+
+/** Numeric, dot-wise version compare; a pre-release (1.0.0-rc1) sorts before its release. */
+export function compareVersions(a: string, b: string): number {
+  const split = (v: string) => { const [core, pre] = v.replace(/^v/i, '').split(/-(.*)/s); return { parts: core!.split('.').map(n => parseInt(n, 10) || 0), pre: pre ?? '' }; };
+  const x = split(a), y = split(b);
+  for (let i = 0; i < Math.max(x.parts.length, y.parts.length); i++) { const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0); if (d) return d; }
+  if (x.pre === y.pre) return 0;
+  return !x.pre ? 1 : !y.pre ? -1 : x.pre.localeCompare(y.pre);
+}
+/** The lowest fixed version above the installed one (any when unknown), or null. */
+export function nearestFix(fixed: string[], installed: string | null | undefined): string | null {
+  const above = fixed.filter(v => !installed || compareVersions(v, installed) > 0).sort(compareVersions);
+  return above[0] ?? null;
+}
