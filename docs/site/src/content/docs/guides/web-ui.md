@@ -5,7 +5,7 @@ description: Explore findings and take oaths in Heimdall.
 
 Open Heimdall's public URL and sign in with an enabled identity provider, local account, or API key. If you can sign in but have no grants, ask an administrator for access. See [Sign-in and access control](/heimdall/guides/sign-in-access-control/).
 
-Use the navigation to open **Overview** (risk and feed status), **Findings**, **Services**, **Releases**, and **Oaths** (snoozed or ignored findings). Administrators also have **Access** for users, API keys, and audit events. The Findings table shows the affected package and installed version. It defaults to severity descending, then newest first; search, filter or use the column headers to sort, and select a finding to see its details. The sort is included in the URL. Services show their components, images and findings.
+Use the navigation to open **Overview** (risk and feed status), **Findings**, **Services**, **Releases**, and **Oaths** (snoozed or ignored findings). Administrators also have **Access** for users, API keys, and audit events. The Findings table shows the affected package and installed version, and the [EPSS](/heimdall/concepts/matching/#epss) chance of exploitation in the next 30 days (sort by it to see the most likely exploited first). It defaults to severity descending, then newest first; search, filter or use the column headers to sort, and select a finding to see its details. The sort is included in the URL. Services show their components, images and findings.
 
 The top-bar realm switcher selects the realms shown on the pages. The selection is included in the URL so you can share a link; recipients still need access to those realms.
 

@@ -31,6 +31,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 cvss = "3.0.0"
+flate2 = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }

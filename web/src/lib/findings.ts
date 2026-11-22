@@ -1,7 +1,7 @@
 import type { Grant } from './api';
 export type Filters = { severity:string; kind:string; service:string; has_fix:string; view_status:string; search:string; sort:string; order:string; offset:number };
 export const defaultFilters: Filters = {severity:'',kind:'',service:'',has_fix:'',view_status:'open',search:'',sort:'severity',order:'desc',offset:0};
-const sortFields = ['advisory', 'severity', 'kind', 'realm', 'service', 'opened_at'];
+const sortFields = ['advisory', 'severity', 'epss', 'kind', 'realm', 'service', 'opened_at'];
 export function sortFromSearch(search: string): {sort:string; order:string} {
   const params = new URLSearchParams(search);
   const sort = params.get('sort'); const order = params.get('order');
@@ -32,4 +32,12 @@ export function advisoryLinks(ids: string[]): {id:string; url:string}[] {
     if (/^(?:GO|OSV)-[A-Za-z0-9-]+$/.test(id)) return [{id, url: `https://osv.dev/vulnerability/${id}`}];
     return [];
   });
+}
+/** EPSS as a percentage with its percentile, e.g. "12.3% (top 4%)"; "—" when unscored. */
+export function epssLabel(score?: number | null, percentile?: number | null): string {
+  if (score == null) return '—';
+  const pct = (score * 100).toFixed(score < 0.001 ? 2 : 1) + '%';
+  if (percentile == null) return pct;
+  const top = Math.max(1, Math.ceil((1 - percentile) * 100));
+  return `${pct} (top ${top}%)`;
 }
