@@ -53,8 +53,7 @@
   function navigate(to: string) { history.pushState({}, '', to); syncLocation(); window.scrollTo(0, 0); }
   function setRealms(next: string[]) { selected = next; history.replaceState({}, '', realmUrl(location.href, next)); }
   function toggleTheme() {
-    const dark = document.documentElement.dataset.theme ? theme === 'dark' : !matchMedia('(prefers-color-scheme: light)').matches;
-    theme = dark ? 'light' : 'dark'; document.documentElement.dataset.theme = theme;
+    theme = theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = theme;
     try { localStorage.setItem('heimdall-theme', theme); } catch { /* private mode */ }
   }
   async function loadIdentity() {
@@ -110,12 +109,12 @@
       {#snippet footer()}
         <Menu label="Account" align="start" up>
           {#snippet trigger()}<span class="avatar" title={identity?.name}>{initials}</span>{/snippet}
-          <div class="account"><strong>{identity?.name}</strong><span class="muted">{[...new Set(identity?.grants.map(g => g.role))].join(', ') || 'No roles'}</span><Button size="sm" onclick={toggleTheme}>Switch to {(theme || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')) === 'dark' ? 'light' : 'dark'} theme</Button><Button size="sm" variant="ghost" onclick={signOut}>Sign out</Button></div>
+          <div class="account"><strong>{identity?.name}</strong><span class="muted">{[...new Set(identity?.grants.map(g => g.role))].join(', ') || 'No roles'}</span><Button size="sm" onclick={toggleTheme}>Switch to {theme === 'light' ? 'dark' : 'light'} theme</Button><Button size="sm" variant="ghost" onclick={signOut}>Sign out</Button></div>
         </Menu>
       {/snippet}
     </NavRail>
     <div class="content" class:bleed={current.page === 'findings' || current.page === 'finding'}>
-      {#if current.page === 'findings' || current.page === 'finding'}<Findings realms={selected} grants={identity?.grants ?? []} />
+      {#if current.page === 'findings' || current.page === 'finding'}<Findings realms={selected} {navigate} {realmPicker} />
       {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings')}>Go to findings</Button></div>
       {:else}
         {#if header}<PageHeader title={header[0]} description={header[1]}>{#snippet actions()}{#if current.page !== 'settings'}{@render realmPicker()}{/if}{/snippet}</PageHeader>{/if}

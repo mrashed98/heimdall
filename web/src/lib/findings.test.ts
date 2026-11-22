@@ -16,3 +16,28 @@ describe('findings', () => {
  it('builds links only for recognized identifiers', () => {expect(advisoryLinks(['CVE-2026-1234','GHSA-2345-6789-cfgh','GO-2026-1','javascript:bad']).map(x=>x.id)).toEqual(['NVD: CVE-2026-1234','OSV: CVE-2026-1234','GHSA: GHSA-2345-6789-cfgh','OSV: GHSA-2345-6789-cfgh','GO-2026-1']);});
  it('formats EPSS as a percentage and percentile', () => {expect(epssLabel(0.04753,0.92097)).toBe('4.8% (top 8%)'); expect(epssLabel(0.97,0.9999)).toBe('97.0% (top 1%)'); expect(epssLabel(0.0004,0.05)).toBe('0.04% (top 95%)'); expect(epssLabel(0.2)).toBe('20.0%'); expect(epssLabel(undefined)).toBe('—'); expect(epssLabel(null,0.5)).toBe('—');});
 });
+import { views, viewFilters, packageLabel, rowTitle } from './findings';
+describe('feed views', () => {
+ it('maps each view to filters', () => {
+  expect(viewFilters('likely-exploited')).toEqual({sort:'epss',order:'desc'});
+  expect(viewFilters('crit-high')).toEqual({severity:'critical,high'});
+  expect(viewFilters('fix')).toEqual({kind:'fixavailable'});
+  expect(viewFilters('feed')).toEqual({});
+  expect(viewFilters('nope')).toEqual({});
+  expect(new Set(views.map(v=>v.id)).size).toBe(views.length);
+ });
+ it('labels the package line', () => {
+  expect(packageLabel({component_name:'log4j-core',component_version:'2.14.1'})).toBe('log4j-core 2.14.1');
+  expect(packageLabel({component_name:'log4j-core'})).toBe('log4j-core');
+  expect(packageLabel({})).toBe('');
+ });
+ it('titles rows of every kind', () => {
+  expect(rowTitle({kind:'vuln',ref_id:'GHSA-x',summary:'RCE in Log4j',details:{}})).toBe('RCE in Log4j');
+  expect(rowTitle({kind:'vuln',ref_id:'GHSA-x',details:{}})).toBe('GHSA-x');
+  expect(rowTitle({kind:'majorrelease',ref_id:'v0.59.0',details:{target:'pkg:golang/golang.org/x/crypto',version:'v0.59.0'}})).toBe('golang.org/x/crypto v0.59.0 is out');
+  expect(rowTitle({kind:'releasenotecve',ref_id:'GHSA-h',details:{target:'pkg:golang/github.com/gin-gonic/gin',version:'v1.7.7',id:'CVE-2020-28483'}})).toBe('github.com/gin-gonic/gin v1.7.7 fixes CVE-2020-28483');
+  expect(rowTitle({kind:'eol',ref_id:null,details:{target:'postgres 13',eol:'2025-11-13'}})).toBe('postgres 13 reaches end of life on 2025-11-13');
+  expect(rowTitle({kind:'oathexpired',ref_id:'GHSA-y',details:{}})).toBe('Oath expired for GHSA-y');
+  expect(rowTitle({kind:'weird',ref_id:null,details:{}})).toBe('weird');
+ });
+});

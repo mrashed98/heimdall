@@ -7,8 +7,8 @@
 <a class="row" {href} {onclick}>
   <span class="main">
     <span class="title">{title}</span>
-    {#if sub}<span class="sub">{sub}{#if fix} → <span class="fix">{fix}</span>{/if}</span>{/if}
-    <span class="meta">{#each meta.filter(Boolean) as item, i}{#if i}<span aria-hidden="true"> · </span>{/if}<span>{item}</span>{/each}</span>
+    {#if sub}<span class="sub">{sub}{#if fix}<span class="arrow">→</span><span class="fix">{fix}</span>{/if}</span>{/if}
+    <span class="meta">{#each meta.filter(Boolean) as item}<span>{item}</span>{/each}</span>
   </span>
   <EpssBar score={epss} percentile={epssPercentile} />
   <span class="sev"><Badge {severity} /></span>
@@ -19,8 +19,9 @@
   .main { display: grid; gap: 2px; min-width: 0; }
   .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sub { font: var(--text-sm) var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
-  .fix { color: var(--ok); }
-  .meta { font-size: var(--text-xs); color: var(--muted); display: flex; flex-wrap: wrap; }
+  .arrow { margin: 0 .5ch; } .fix { color: var(--ok); }
+  .meta { font-size: var(--text-xs); color: var(--muted); display: flex; flex-wrap: wrap; column-gap: 6px; }
+  .meta span + span::before { content: '·'; margin-right: 6px; }
   .sev { justify-self: end; }
   @media (max-width: 700px) { .row { grid-template-columns: minmax(0, 1fr) auto; } .row :global(.epss) { display: none; } }
 </style>

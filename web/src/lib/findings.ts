@@ -41,3 +41,33 @@ export function epssLabel(score?: number | null, percentile?: number | null): st
   const top = Math.max(1, Math.ceil((1 - percentile) * 100));
   return `${pct} (top ${top}%)`;
 }
+
+/** Saved views in the Findings sub-nav, each a preset of filters. */
+export const views: {id:string; label:string; group:'Views'|'Watch'; filters:Partial<Filters>}[] = [
+  {id:'feed', label:'Feed', group:'Views', filters:{}},
+  {id:'likely-exploited', label:'Likely exploited', group:'Views', filters:{sort:'epss', order:'desc'}},
+  {id:'fix', label:'Fix available', group:'Views', filters:{kind:'fixavailable'}},
+  {id:'crit-high', label:'Critical & high', group:'Views', filters:{severity:'critical,high'}},
+  {id:'k8s', label:'Kubernetes CVEs', group:'Views', filters:{kind:'k8scve'}},
+  {id:'major', label:'Major releases', group:'Watch', filters:{kind:'majorrelease'}},
+  {id:'notes', label:'CVEs in release notes', group:'Watch', filters:{kind:'releasenotecve'}},
+  {id:'eol', label:'End of life', group:'Watch', filters:{kind:'eol'}},
+];
+export function viewFilters(id: string): Partial<Filters> { return {...(views.find(v => v.id === id)?.filters ?? {})}; }
+
+type Labelled = {kind?:string; ref_id?:string|null; summary?:string|null; component_name?:string; component_version?:string; details?:Record<string, unknown>};
+export function packageLabel(row: Labelled): string { return [row.component_name, row.component_version].filter(Boolean).join(' '); }
+const str = (v: unknown) => typeof v === 'string' ? v : '';
+/** A purl target without its scheme and type: pkg:golang/golang.org/x/crypto -> golang.org/x/crypto. */
+function shortTarget(target: string): string { return target.replace(/^pkg:[^/]+\//, ''); }
+/** The headline of a feed row, readable for every finding kind. */
+export function rowTitle(row: Labelled): string {
+  const d = row.details ?? {}; const target = shortTarget(str(d.target)); const version = str(d.version);
+  switch (row.kind) {
+    case 'majorrelease': return target ? `${target} ${version} is out`.replace('  ', ' ') : row.ref_id ?? 'New major release';
+    case 'releasenotecve': return target ? `${target} ${version} fixes ${/^CVE-/i.test(str(d.id)) ? str(d.id) : row.ref_id ?? str(d.id)}` : row.ref_id ?? 'Release fixes a CVE';
+    case 'eol': return `${target || row.ref_id || 'A component'} reaches end of life${str(d.eol) ? ` on ${str(d.eol)}` : ''}`;
+    case 'oathexpired': return `Oath expired for ${row.ref_id ?? 'a finding'}`;
+    default: return row.summary || row.ref_id || row.kind || 'Finding';
+  }
+}

@@ -1,1 +1,2 @@
 .vitest/
+.vite-preview.config.ts
