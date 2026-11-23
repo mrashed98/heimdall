@@ -15,9 +15,6 @@
   --r-badge: 5px; --r-control: 7px; --r-panel: 10px; --r-card: 14px;
   --text-xs: 11.5px; --text-sm: 12.5px; --text-md: 13.5px; --text-lg: 15px; --text-xl: 22px;
   --bifrost: linear-gradient(90deg, var(--sky), var(--gold), var(--sev-high));
-  /* ponytail: legacy aliases for pages not yet on ui/; removed in Task 5. */
-  --page: var(--bg); --surface: var(--panel); --accent: var(--gold); --accent-high: var(--gold); --accent-low: var(--gold-soft);
-  --critical: var(--sev-critical); --high: var(--sev-high); --medium: var(--sev-medium); --low: var(--sev-low); --unknown: var(--sev-unknown); --fix: var(--ok); --badge-text: var(--on-gold);
 }
 /* Dark is the brand default; light is opt-in from the account menu. */
 :root[data-theme='light'] {

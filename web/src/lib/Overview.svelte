@@ -53,7 +53,7 @@
       <Panel title="Fix first" flush>
         {#snippet actions()}Most likely exploited, with a fix{/snippet}
         {#if fixFirst.length}
-          <ul class="list">{#each fixFirst as f}<li><a href={`/findings/${f.id}${q}`} onclick={(e) => go(e, `/findings/${f.id}${q}`)}><span class="t">{rowTitle(f)}</span><span class="mono small">{packageLabel(f)}{#if f.fix} → <b class="ok">{f.fix}</b>{/if}</span></a><EpssBar score={f.epss} percentile={f.epss_percentile} /></li>{/each}</ul>
+          <ul class="list">{#each fixFirst as f}<li><a href={`/findings/${f.id}${q}`} onclick={(e) => go(e, `/findings/${f.id}${q}`)}><span class="t">{rowTitle(f)}</span><span class="mono small">{packageLabel(f)}{#if f.fix}<span class="arrow">→</span><b class="ok">{f.fix}</b>{/if}</span></a><EpssBar score={f.epss} percentile={f.epss_percentile} /></li>{/each}</ul>
         {:else}<p class="pad muted">Nothing with a fix is open.</p>{/if}
       </Panel>
     </div>
@@ -95,7 +95,7 @@
   .kv li { display: flex; justify-content: space-between; gap: var(--s3); padding: 9px var(--s4); border-bottom: 1px solid var(--border); }
   .kv li > span:last-child { text-align: right; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--sev-unknown); margin-right: var(--s2); } .dot.fresh { background: var(--ok); }
-  .mono { font-family: var(--font-mono); } .small { font-size: var(--text-sm); } .muted { color: var(--muted); } .ok { color: var(--ok); font-weight: 600; } .crit { color: var(--sev-critical); font-weight: 700; }
+  .mono { font-family: var(--font-mono); } .small { font-size: var(--text-sm); } .muted { color: var(--muted); } .ok { color: var(--ok); font-weight: 600; } .arrow { margin: 0 .5ch; } .crit { color: var(--sev-critical); font-weight: 700; }
   .pad { padding: var(--s3) var(--s4); margin: 0; }
   @media (max-width: 1000px) { .two { grid-template-columns: 1fr; } }
   @media (max-width: 700px) { .list li { grid-template-columns: 1fr; } .kv li { flex-direction: column; gap: 2px; } .kv li > span:last-child { text-align: left; } }

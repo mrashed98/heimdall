@@ -32,3 +32,12 @@ describe('design system', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+const tokens = Object.values(import.meta.glob('./tokens.css', { query: '?raw', import: 'default', eager: true }))[0] as string;
+describe('tokens', () => {
+  it('defines every custom property the components use', () => {
+    const defined = new Set([...tokens.matchAll(/(--[a-z0-9-]+)\s*:/g)].map(m => m[1]));
+    const used = new Set(Object.values(sources).flatMap(text => [...text.matchAll(/var\((--[a-z0-9-]+)/g)].map(m => m[1]!)));
+    expect([...used].filter(name => !defined.has(name))).toEqual([]);
+  });
+});

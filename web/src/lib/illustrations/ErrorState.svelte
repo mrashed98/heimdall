@@ -1,2 +1,2 @@
 <figure><svg viewBox="0 0 240 175" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M25 145 Q120 15 215 145 M85 150 L120 85 L155 150 Z M120 108 V128 M120 139 V140"/></svg><figcaption>Something went wrong. Please try again.</figcaption></figure>
-<style>figure { margin: 0; color: var(--accent-high); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>
+<style>figure { margin: 0; color: var(--gold); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>

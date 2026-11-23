@@ -1,2 +1,2 @@
 <figure><svg viewBox="0 0 240 175" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M25 150 Q100 25 170 90 M185 105 L205 125 M88 150 Q105 113 145 112 M150 112 L143 105 M150 112 L142 119"/></svg><figcaption>This path leaves the Nine Realms</figcaption></figure>
-<style>figure { margin: 0; color: var(--accent-high); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>
+<style>figure { margin: 0; color: var(--gold); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>
