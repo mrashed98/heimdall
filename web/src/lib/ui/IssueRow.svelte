@@ -7,7 +7,7 @@
 <a class="row" {href} {onclick}>
   <span class="main">
     <span class="title">{title}</span>
-    {#if sub}<span class="sub">{sub}{#if fix}<span class="arrow">→</span><span class="fix">{fix}</span>{/if}</span>{/if}
+    {#if sub || fix}<span class="sub">{sub}{#if fix}{#if sub}<span class="arrow">→</span>{/if}<span class="fix">{fix}</span>{/if}</span>{/if}
     <span class="meta">{#each meta.filter(Boolean) as item}<span>{item}</span>{/each}</span>
   </span>
   <EpssBar score={epss} percentile={epssPercentile} />

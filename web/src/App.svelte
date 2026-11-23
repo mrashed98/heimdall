@@ -114,10 +114,10 @@
         </Menu>
       {/snippet}
     </NavRail>
-    <div class="content" class:bleed={current.page === 'findings' || current.page === 'finding'}>
+    <main class="content" class:bleed={current.page === 'findings' || current.page === 'finding'}>
       {#if current.page === 'findings'}<Findings realms={selected} {navigate} {realmPicker} />
       {:else if current.page === 'finding'}<Finding id={current.id} grants={identity?.grants ?? []} {navigate} />
-      {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings')}>Go to findings</Button></div>
+      {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings' + realmQuery(selected))}>Go to findings</Button></div>
       {:else}
         {#if header}<PageHeader title={header[0]} description={header[1]}>{#snippet actions()}{#if current.page !== 'settings'}{@render realmPicker()}{/if}{/snippet}</PageHeader>{/if}
         {#if current.page === 'overview'}<Overview realms={selected} {navigate} />
@@ -126,7 +126,7 @@
         {:else if current.page === 'oaths'}<Oaths realms={selected} grants={identity?.grants ?? []} />
         {:else if current.page === 'settings'}<Access availableRealms={realms.map(r => r.name)} />{/if}
       {/if}
-    </div>
+    </main>
   </div>
 {:else}
   <main class="state">{#if authState === 'noaccess'}<NoAccess /><Button onclick={signOut}>Sign out</Button>{:else}<ErrorIllustration /><Button onclick={() => location.reload()}>Try again</Button>{/if}</main>

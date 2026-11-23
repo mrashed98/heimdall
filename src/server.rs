@@ -680,7 +680,7 @@ async fn findings_handler(
     // fixavailable row is folded into its vuln sibling unless asked for.
     let (ui_cols, ui_join, fold) = if q.ui.unwrap_or(false) {
         (
-            ", ua.summary, COALESCE(f.details->'advice'->>'suggest', sib.fix) AS fix",
+            ", NULLIF(ua.summary, '') AS summary, COALESCE(f.details->'advice'->>'suggest', sib.fix) AS fix",
             "LEFT JOIN advisories ua ON ua.id = f.ref_id \
              LEFT JOIN LATERAL (SELECT fx.details->'advice'->>'suggest' AS fix FROM findings fx \
                WHERE fx.kind = 'fixavailable' AND fx.status = f.status AND fx.ref_id = f.ref_id AND fx.realm = f.realm \
@@ -696,6 +696,12 @@ async fn findings_handler(
         )
     } else {
         ("", "", "")
+    };
+    // On the UI path a vuln row shows its folded sibling's fix, so the fix filter counts it too.
+    let sib_fix = if q.ui.unwrap_or(false) {
+        " OR sib.fix IS NOT NULL"
+    } else {
+        ""
     };
     let secondary = if q.ui.unwrap_or(false) {
         "f.opened_at DESC, "
@@ -720,7 +726,7 @@ async fn findings_handler(
            AND ($9::text[] IS NULL OR f.severity = ANY($9)) \
            AND ($10::text IS NULL OR s.name = $10) \
            {search_filter} \
-           AND ($12::bool IS NULL OR (f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb) = $12) \
+           AND ($12::bool IS NULL OR ((f.details->'advice' IS NOT NULL AND f.details->'advice' <> 'null'::jsonb){sib_fix}) = $12) \
          ORDER BY {sort} {direction} NULLS LAST, {secondary}f.id DESC \
          LIMIT $5 OFFSET $6"
     );
@@ -817,10 +823,12 @@ async fn finding_detail_handler(
     } = row.ok_or(ApiError::NotFound)?;
     let affected: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as("SELECT DISTINCT s.name, sc.via_image_digest, i.image_ref FROM service_components sc JOIN services s ON s.id=sc.service_id JOIN components c ON c.id=sc.component_id LEFT JOIN image_sboms i ON i.digest=sc.via_image_digest WHERE s.realm=$1 AND c.purl=$2 ORDER BY s.name, sc.via_image_digest, i.image_ref LIMIT 25 OFFSET $3")
         .bind(&realm).bind(&purl).bind(affected_offset).fetch_all(&state.pool).await?;
+    let affected_services: i64 = sqlx::query_scalar("SELECT count(DISTINCT sc.service_id) FROM service_components sc JOIN services s ON s.id=sc.service_id JOIN components c ON c.id=sc.component_id WHERE s.realm=$1 AND c.purl=$2")
+        .bind(&realm).bind(&purl).fetch_one(&state.pool).await?;
     let history: Vec<oath::Oath> = sqlx::query_as("SELECT id, advisory_id, name_key, service_name, realm, kind, reason, version_at_creation, expires_at, review_at, created_by, created_at, status FROM oaths WHERE (advisory_id=$1 OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id=$1) OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id=oaths.advisory_id)) AND name_key=$2 AND service_name=$3 AND (realm=$4 OR realm IS NULL) ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $5")
         .bind(&ref_id).bind(&name_key).bind(&service).bind(&realm).bind(oaths_offset).fetch_all(&state.pool).await?;
     Ok(Json(
-        serde_json::json!({"id": id, "kind": kind, "details": details, "severity": severity, "ref_id": ref_id, "status": status, "opened_at": opened_at, "realm": realm, "service": service, "summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
+        serde_json::json!({"id": id, "kind": kind, "details": details, "severity": severity, "ref_id": ref_id, "status": status, "opened_at": opened_at, "realm": realm, "service": service, "summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected_services": affected_services, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
     ))
 }
 
@@ -1543,6 +1551,30 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn findings_ui_fix_filter_counts_a_folded_sibling_fix_and_drops_empty_summary(
+        pool: PgPool,
+    ) {
+        seed_finding(&pool, "prod", "api", "vuln|y", "high").await;
+        seed_finding(&pool, "prod", "api", "fix|y", "high").await;
+        sqlx::query("INSERT INTO advisories (id, severity, source, summary) VALUES ('GHSA-y','high','osv','')").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE findings SET ref_id='GHSA-y'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE findings SET kind='fixavailable', details='{\"advice\":{\"suggest\":\"1.2.3\"}}' WHERE key='fix|y'").execute(&pool).await.unwrap();
+        let key = create_key(&pool, &[], "reader", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let (_, body) = get(&app, "/api/v1/findings?ui=true&has_fix=true", Some(&key)).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.len(), 1, "{body}");
+        assert_eq!(rows[0]["kind"], "vuln");
+        assert_eq!(rows[0]["fix"], "1.2.3");
+        assert!(rows[0].get("summary").is_none(), "{body}");
+        let (_, body) = get(&app, "/api/v1/findings?ui=true&has_fix=false", Some(&key)).await;
+        assert_eq!(body, "[]");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn findings_fixavailable_shows_when_its_vuln_sibling_is_resolved(pool: PgPool) {
         seed_finding(&pool, "prod", "api", "vuln|x", "high").await;
         seed_finding(&pool, "prod", "api", "fix|x", "high").await;
@@ -1681,6 +1713,7 @@ mod tests {
         assert_eq!(detail["summary"], "Example");
         assert_eq!(detail["fixed"]["pkg:generic/foo"][0], "2");
         assert_eq!(detail["affected"][0]["service"], "api");
+        assert_eq!(detail["affected_services"], 1);
         assert_eq!(detail["oaths"][0]["reason"], "later");
     }
 

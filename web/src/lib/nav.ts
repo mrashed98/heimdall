@@ -10,6 +10,6 @@ export function route(path: string, admin: boolean): Route {
   const page = fixed[path];
   if (page) return { page } as Route;
   const m = /^\/(findings|services)\/([1-9]\d*)$/.exec(path);
-  if (m) return { page: m[1] === 'findings' ? 'finding' : 'service', id: Number(m[2]) };
+  if (m && Number.isSafeInteger(Number(m[2]))) return { page: m[1] === 'findings' ? 'finding' : 'service', id: Number(m[2]) };
   return { page: 'notfound' };
 }

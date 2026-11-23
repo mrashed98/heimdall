@@ -3,7 +3,7 @@
   let { offset, count, loading, change }: { offset: number; count: number; loading: boolean; change: (offset: number) => void } = $props();
 </script>
 <nav class="pages" aria-label="Pages">
-  <span>{count ? `${offset + 1}–${offset + count}` : 'No rows on this page'}</span>
+  <span>{count ? `${offset + 1}–${offset + count}` : loading ? '' : 'No rows on this page'}</span>
   <button disabled={offset === 0 || loading} onclick={() => change(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
   <button disabled={count < PAGE_SIZE || loading} onclick={() => change(offset + PAGE_SIZE)}>Next</button>
 </nav>

@@ -48,7 +48,7 @@ const next = [['New here?', 'What is Heimdall?', 'getting-started/what-is-heimda
           <div class="ctas"><a class="btn primary" href={doc('getting-started/what-is-heimdall')}>Read the docs</a><a class="btn secondary" href={doc('getting-started/quick-start')}>Quick start</a></div>
           <pre class="install"><span>$</span> helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace</pre>
         </div>
-        <div class="diagram" aria-label="Kubernetes, Helm, Argo CD, GitHub, OSV, NVD, EPSS and OCI registries feed Heimdall">
+        <div class="diagram" role="img" aria-label="Kubernetes, Helm, Argo CD, GitHub, OSV, NVD, EPSS and OCI registries feed Heimdall">
           <div class="tiles">{tiles.map(([name, abbr]) => <div class="tile"><span>{abbr}</span><small>{name}</small></div>)}</div>
           <svg class="wires" viewBox="0 0 420 110" aria-hidden="true"><g><path d="M45 0 C45 60 210 50 210 105" /><path d="M150 0 C150 60 210 50 210 105" /><path d="M270 0 C270 60 210 50 210 105" /><path d="M375 0 C375 60 210 50 210 105" /></g><circle cx="210" cy="105" r="4" /></svg>
           <div class="core"><span class="helm big" set:html={helm} /></div>

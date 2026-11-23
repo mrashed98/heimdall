@@ -2,7 +2,7 @@
   import Menu from './Menu.svelte';
   let { realms, selected, change }: { realms: string[]; selected: string[]; change: (next: string[]) => void } = $props();
 </script>
-<Menu label="Filter realms" align="end">
+<Menu label={`Filter realms, current: ${selected.length ? selected.join(', ') : 'All'}`} align="end">
   {#snippet trigger()}<span class="trigger">Realm: <b>{selected.length ? selected.join(', ') : 'All'}</b> ▾</span>{/snippet}
   <strong>Realms</strong>
   <label><input type="checkbox" checked={selected.length === 0} onchange={() => change([])} /> All my realms</label>

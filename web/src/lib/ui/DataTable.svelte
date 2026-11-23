@@ -10,5 +10,5 @@
   .wrap :global(th), .wrap :global(td) { padding: 9px var(--s4); border-bottom: 1px solid var(--border); vertical-align: top; }
   .wrap :global(tbody tr:hover) { background: var(--panel-2); }
   .wrap :global(th button) { border: 0; background: none; padding: 0; font-weight: 600; color: inherit; }
-  .wrap :global(th[aria-sort='ascending'] button::after) { content: ' ↑'; } .wrap :global(th[aria-sort='descending'] button::after) { content: ' ↓'; }
+  .wrap :global(th[aria-sort='none'] button::after) { content: ' ↕'; opacity: .5; } .wrap :global(th[aria-sort='ascending'] button::after) { content: ' ↑'; } .wrap :global(th[aria-sort='descending'] button::after) { content: ' ↓'; }
 </style>

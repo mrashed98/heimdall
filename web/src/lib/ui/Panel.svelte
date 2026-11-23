@@ -1,9 +1,10 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   let { title, actions, flush = false, children }: { title?: string; actions?: Snippet; flush?: boolean; children: Snippet } = $props();
+  const uid = $props.id();
 </script>
-<section class="panel">
-  {#if title || actions}<header><h2>{title}</h2>{#if actions}<div class="actions">{@render actions()}</div>{/if}</header>{/if}
+<section class="panel" aria-labelledby={title ? uid : undefined}>
+  {#if title || actions}<header>{#if title}<h2 id={uid}>{title}</h2>{/if}{#if actions}<div class="actions">{@render actions()}</div>{/if}</header>{/if}
   <div class:body={!flush}>{@render children()}</div>
 </section>
 <style>

@@ -3,7 +3,7 @@
   let { label, trigger, align = 'start', up = false, children }: { label: string; trigger: Snippet; align?: 'start' | 'end'; up?: boolean; children: Snippet } = $props();
   let el = $state<HTMLDetailsElement>();
 </script>
-<svelte:window onclick={(e) => { if (el?.open && !el.contains(e.target as Node)) el.open = false; }} onkeydown={(e) => { if (e.key === 'Escape' && el) el.open = false; }} />
+<svelte:window onclick={(e) => { if (el?.open && !el.contains(e.target as Node)) el.open = false; }} onkeydown={(e) => { if (e.key === 'Escape' && el?.open) { el.open = false; el.querySelector('summary')?.focus(); } }} />
 <details class="menu" bind:this={el}><summary aria-label={label}>{@render trigger()}</summary><div class="pop {align}" class:up>{@render children()}</div></details>
 <style>
   .menu { position: relative; }

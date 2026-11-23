@@ -13,7 +13,7 @@
   --font-display: 'Cinzel', Georgia, serif;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --r-badge: 5px; --r-control: 7px; --r-panel: 10px; --r-card: 14px;
-  --text-xs: 11.5px; --text-sm: 12.5px; --text-md: 13.5px; --text-lg: 15px; --text-xl: 22px;
+  --text-xs: 11.5px; --text-sm: 12.5px; --text-md: 13.5px; --text-lg: 15px; --text-xl: 22px; --text-2xl: 26px;
   --bifrost: linear-gradient(90deg, var(--sky), var(--gold), var(--sev-high));
 }
 /* Dark is the brand default; light is opt-in from the account menu. */

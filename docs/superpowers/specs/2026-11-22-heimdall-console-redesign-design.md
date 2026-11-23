@@ -45,6 +45,14 @@ critical #ff5b4f, high #f2872f, medium #e8c94f, low #74aac0,
 unknown #7d8a91, ok #5cc79a. UI font: system-ui; code: ui-monospace;
 wordmark: Cinzel 700, self-hosted.
 
+This palette supersedes section 6 (Visual identity) of the Phase 2 spec
+(`2026-11-15-heimdall-phase2-ui-access-design.md`) for the web console and
+the docs site. The CLI keeps its own terminal colours (`src/ui/render.rs`,
+`src/ui/banner.rs`): ANSI codes follow the user's terminal theme, so they
+are not tied to these hex values. Two Phase 2 rules carry over: a severity
+colour is always paired with its word, and text meets WCAG AA (every text
+token above is at least 4.6:1 on bg, panel and panel2).
+
 ## Non-goals
 - Trend charts (wait on #50 metrics history); the Overview shows no
   placeholder chart in the product.

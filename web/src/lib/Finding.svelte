@@ -1,9 +1,10 @@
 <script lang="ts">
   import { api, ApiError, type Grant } from './api';
   import { advisoryLinks, canEdit, epssLabel, nearestFix, rowTitle, validateOath } from './findings';
+  import { epssTone } from './ui/format';
   import { Badge, Button, EmptyState, EpssBar, ErrorState, Icon, Input, PageHeader, Panel, Pill, Select, Skeleton, Stat } from './ui';
   type Oath = { id: number; kind: string; reason: string; status: string; created_by: string; created_at: string; expires_at: string | null; review_at: string | null };
-  type Detail = { kind: string; details: Record<string, unknown>; severity: string; ref_id: string | null; status: string; opened_at: string; realm: string; service: string | null; summary: string | null; aliases: string[]; scores: Record<string, number> | null; epss: number | null; epss_percentile: number | null; fixed: Record<string, string[]> | null; name_key: string | null; version: string | null; purl: string | null; affected: { service: string; digest: string | null; image: string | null }[]; oaths: Oath[] };
+  type Detail = { kind: string; details: Record<string, unknown>; severity: string; ref_id: string | null; status: string; opened_at: string; realm: string; service: string | null; summary: string | null; aliases: string[]; scores: Record<string, number> | null; epss: number | null; epss_percentile: number | null; fixed: Record<string, string[]> | null; name_key: string | null; version: string | null; purl: string | null; affected: { service: string; digest: string | null; image: string | null }[]; affected_services: number; oaths: Oath[] };
   let { id, grants, navigate }: { id: number; grants: Grant[]; navigate: (to: string) => void } = $props();
 
   let detail = $state<Detail | null>(null); let loading = $state(true); let failed = $state(false); let missing = $state(false); let revision = $state(0);
@@ -36,6 +37,7 @@
       reason = ''; until = ''; allRealms = false; error = result.warning ?? ''; revision++;
     } catch { error = 'Could not take this oath. Check the details and try again.'; } finally { busy = false; }
   }
+  function oathStatus(o: Oath) { const due = o.expires_at ?? o.review_at; return o.status === 'active' && due && new Date(due).getTime() <= Date.now() ? 'expired' : o.status; }
   function go(e: MouseEvent, to: string) { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); navigate(to); }
 </script>
 
@@ -54,10 +56,10 @@
     </PageHeader>
     <div class="tags"><Badge severity={detail.severity} /><Pill>{detail.kind}</Pill><Pill>{detail.status}</Pill>{#if detail.service}<Pill>{detail.service}</Pill>{/if}<Pill>{detail.realm}</Pill></div>
     <div class="stats">
-      <Stat label="Exploit likelihood (EPSS)" value={detail.epss == null ? '—' : epssLabel(detail.epss, detail.epss_percentile)} tone={detail.epss != null && detail.epss >= 0.1 ? 'critical' : 'default'} />
+      <Stat label="Exploit likelihood (EPSS)" value={detail.epss == null ? '—' : epssLabel(detail.epss, detail.epss_percentile)} tone={epssTone(detail.epss) === 'critical' ? 'critical' : 'default'} />
       <Stat label="CVSS" value={cvss ?? '—'} />
       <Stat label="Fixed in" value={fix ?? '—'} tone={fix ? 'ok' : 'default'} />
-      <Stat label="Services running it" value={detail.affected.length >= 25 ? '25+' : detail.affected.length} />
+      <Stat label="Services running it" value={detail.affected_services} />
     </div>
     <div class="grid">
       <div class="main">
@@ -93,7 +95,7 @@
           <div id="oath"><Panel title="Take an oath">
             <form onsubmit={swear}>
               <Select label="Decision" bind:value={kind}><option value="snooze">Snooze until a date</option><option value="ignore">Ignore</option></Select>
-              <Input label={`Expiry date ${kind === 'snooze' ? '(required)' : '(optional)'}`} type="date" bind:value={until} />
+              <Input label={kind === 'snooze' ? 'Expiry date (required)' : 'Review date (optional)'} type="date" bind:value={until} />
               <label class="field">Reason<textarea bind:value={reason} rows="3" placeholder="Why this risk is accepted"></textarea></label>
               {#if canEdit(grants, '*')}<label class="check"><input type="checkbox" bind:checked={allRealms} /> Apply to all realms</label>{/if}
               {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -102,7 +104,7 @@
           </Panel></div>
         {/if}
         <Panel title="Oaths">
-          {#if detail.oaths.length}<ul class="oaths">{#each detail.oaths as oath}<li><strong>{oath.kind} · {oath.status}</strong><span>{oath.reason}</span><span class="muted small">{oath.created_by} · {oath.created_at.slice(0, 10)}{oath.expires_at ? ` · until ${oath.expires_at.slice(0, 10)}` : ''}</span></li>{/each}</ul>
+          {#if detail.oaths.length}<ul class="oaths">{#each detail.oaths as oath}<li><strong>{oath.kind} · {oathStatus(oath)}</strong><span>{oath.reason}</span><span class="muted small">{oath.created_by} · {oath.created_at.slice(0, 10)}{(oath.expires_at ?? oath.review_at) ? ` · ${oath.expires_at ? 'until' : 'review'} ${(oath.expires_at ?? oath.review_at)!.slice(0, 10)}` : ''}</span></li>{/each}</ul>
           {:else}<p class="muted">No oaths for this finding. It still counts and still alerts.</p>{/if}
           {#if oathsOffset > 0 || detail.oaths.length >= 25}<div class="pager"><Button size="sm" disabled={oathsOffset === 0} onclick={() => oathsOffset = Math.max(0, oathsOffset - 25)}>Previous</Button><Button size="sm" disabled={detail.oaths.length < 25} onclick={() => oathsOffset += 25}>Next</Button></div>{/if}
         </Panel>

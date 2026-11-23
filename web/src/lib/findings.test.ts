@@ -73,3 +73,27 @@ describe('filters in the URL', () => {
   expect(filtersFromSearch('?view_status=evil').view_status).toBe('open');
  });
 });
+import { initialFilters } from './findings';
+describe('review fixes', () => {
+ it('keeps a cleared view preset cleared on reload', () => {
+  expect(initialFilters('?view=fix').kind).toBe('fixavailable');
+  expect(initialFilters(filtersSearch({...defaultFilters}, '?view=fix')).kind).toBe('');
+  expect(initialFilters(filtersSearch({...defaultFilters}, '?view=likely-exploited')).sort).toBe('severity');
+ });
+ it('writes the query without URLSearchParams.size', () => {
+  const d = Object.getOwnPropertyDescriptor(URLSearchParams.prototype, 'size');
+  Object.defineProperty(URLSearchParams.prototype, 'size', {get: () => undefined, configurable: true});
+  try { expect(filtersSearch({...defaultFilters, kind:'eol'}, '?realms=prod')).toBe('?realms=prod&kind=eol'); }
+  finally { if (d) Object.defineProperty(URLSearchParams.prototype, 'size', d); }
+ });
+ it('compares numeric pre-releases numerically', () => {
+  expect(compareVersions('1.0.0-rc10', '1.0.0-rc2')).toBeGreaterThan(0);
+  expect(nearestFix(['1.0.0-rc10','1.0.0-rc2'],'0.9')).toBe('1.0.0-rc2');
+ });
+ it('maps the watch views', () => {
+  expect(viewFilters('k8s')).toEqual({kind:'k8scve'});
+  expect(viewFilters('major')).toEqual({kind:'majorrelease'});
+  expect(viewFilters('notes')).toEqual({kind:'releasenotecve'});
+  expect(viewFilters('eol')).toEqual({kind:'eol'});
+ });
+});

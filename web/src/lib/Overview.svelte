@@ -21,7 +21,8 @@
   $effect(() => {
     const url = statusUrl(realms); const realmParam = realms.length ? `&realms=${encodeURIComponent(realms.join(','))}` : ''; revision;
     let active = true; loading = true; failed = false;
-    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`)])
+    // The fix-first list is optional: if it fails, only that panel is empty.
+    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`).catch(() => [] as Fixable[])])
       .then(([s, r, f]) => { if (active) { status = s; releases = r; fixFirst = f; loading = false; } })
       .catch(() => { if (active) { failed = true; loading = false; } });
     return () => { active = false; };
@@ -33,7 +34,7 @@
   <div class="overview">
     <div class="stats">
       <Stat label="Open findings" value={total} href={'/findings' + q} />
-      <Stat label="Critical" value={bySeverity('critical')} tone={bySeverity('critical') ? 'critical' : 'default'} href={'/findings?view=crit-high' + (q ? '&' + q.slice(1) : '')} />
+      <Stat label="Critical" value={bySeverity('critical')} tone={bySeverity('critical') ? 'critical' : 'default'} href={'/findings?severity=critical' + (q ? '&' + q.slice(1) : '')} />
       <Stat label="High" value={bySeverity('high')} />
       <Stat label="Fix available" value={status.fix_available} tone="ok" href={'/findings?view=fix' + (q ? '&' + q.slice(1) : '')} />
     </div>
@@ -44,7 +45,7 @@
           <div class="legend">{#each severities as s}<Badge severity={s} />{/each}</div>
           {#each groups as g}
             <div class="bar-row"><strong>{g.realm}</strong>
-              <div class="bar" aria-label={`${g.realm}: ${g.counts.map((c, i) => `${severities[i]} ${c}`).join(', ')}`}>{#each g.counts as c, i}{#if c}<span class={severities[i]} style:width="{c / max * 100}%"></span>{/if}{/each}</div>
+              <div class="bar" role="img" aria-label={`${g.realm}: ${g.counts.map((c, i) => `${severities[i]} ${c}`).join(', ')}`}>{#each g.counts as c, i}{#if c}<span class={severities[i]} style:width="{c / max * 100}%"></span>{/if}{/each}</div>
               <span class="muted small">{g.counts.reduce((a, b) => a + b, 0)}</span>
             </div>
           {/each}

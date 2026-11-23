@@ -13,7 +13,7 @@ describe('route', () => {
     expect(route('/access', true)).toEqual({ page: 'settings' });
   });
   it('rejects bad ids and unknown paths', () => {
-    for (const path of ['/findings/0', '/findings/abc', '/findings/01', '/services/-1', '/nope', '/findings/1/x']) expect(route(path, true)).toEqual({ page: 'notfound' });
+    for (const path of ['/findings/0', '/findings/abc', '/findings/01', '/services/-1', '/nope', '/findings/1/x', '/findings/9007199254740993']) expect(route(path, true)).toEqual({ page: 'notfound' });
   });
   it('hides settings from non-admins', () => {
     expect(route('/access', false)).toEqual({ page: 'notfound' });

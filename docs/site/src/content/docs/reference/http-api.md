@@ -134,8 +134,8 @@ version that fixes it, from the finding's own advice or its `fixavailable`
 sibling), each left out when unknown. Unless `kind` is given, a `fixavailable`
 finding whose `vuln` sibling (same advisory, component, service and realm) is
 in the same status is folded into that row, so the list shows one row per
-vulnerability. `GET /api/v1/findings/{id}` also returns `kind`, `details`, `severity`,
-`ref_id`, `status`, `opened_at`, `realm` and `service`.
+vulnerability, and `has_fix` counts the folded sibling's fix. `GET /api/v1/findings/{id}` also returns `kind`, `details`, `severity`,
+`ref_id`, `status`, `opened_at`, `realm`, `service`, and `affected_services`: the number of distinct services in the realm running the package.
 
 ### `GET /api/v1/services`
 

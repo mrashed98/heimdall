@@ -78,7 +78,7 @@ export function compareVersions(a: string, b: string): number {
   const x = split(a), y = split(b);
   for (let i = 0; i < Math.max(x.parts.length, y.parts.length); i++) { const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0); if (d) return d; }
   if (x.pre === y.pre) return 0;
-  return !x.pre ? 1 : !y.pre ? -1 : x.pre.localeCompare(y.pre);
+  return !x.pre ? 1 : !y.pre ? -1 : x.pre.localeCompare(y.pre, undefined, {numeric: true});
 }
 /** The lowest fixed version above the installed one (any when unknown), or null. */
 export function nearestFix(fixed: string[], installed: string | null | undefined): string | null {
@@ -98,8 +98,16 @@ export function filtersFromSearch(search: string): Filters {
 /** The page query with these filters written in (defaults left out), other params kept. */
 export function filtersSearch(f: Filters, search: string): string {
   const q = new URLSearchParams(search);
-  for (const k of urlKeys) { if (f[k] && f[k] !== defaultFilters[k]) q.set(k, f[k]); else q.delete(k); }
-  for (const [k, v] of [['sort', f.sort], ['order', f.order]] as const) { if (v !== defaultFilters[k]) q.set(k, v); else q.delete(k); }
+  // A key the active view presets is always written, even when cleared, so the preset does not come back on reload.
+  const preset = viewFilters(q.get('view') ?? 'feed');
+  for (const k of urlKeys) { if (k in preset || (f[k] && f[k] !== defaultFilters[k])) q.set(k, f[k]); else q.delete(k); }
+  for (const [k, v] of [['sort', f.sort], ['order', f.order]] as const) { if (k in preset || v !== defaultFilters[k]) q.set(k, v); else q.delete(k); }
   if (f.offset) q.set('offset', String(f.offset)); else q.delete('offset');
-  return q.size ? `?${q}` : '';
+  return q.toString() ? `?${q}` : '';
+}
+/** The feed's filters: the URL's, with the view's preset filling keys the URL leaves out. */
+export function initialFilters(search: string): Filters {
+  const f = filtersFromSearch(search); const q = new URLSearchParams(search);
+  for (const [k, v] of Object.entries(viewFilters(q.get('view') ?? 'feed'))) if (!q.has(k)) (f as Record<string, unknown>)[k] = v;
+  return f;
 }
