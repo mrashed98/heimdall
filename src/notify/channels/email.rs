@@ -2,7 +2,8 @@
 //!
 //! The queued payload is `{"subject", "text", "html"}`; sender and
 //! recipients come from the channel config when the message is built, and
-//! SMTP credentials from the environment when it is sent.
+//! SMTP credentials (from the environment, or a UI channel's secrets) when
+//! it is sent.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -13,6 +14,7 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde_json::{json, Value};
 
+use super::{secret, Secrets};
 use crate::config::{EmailChannel, SmtpSecurity};
 use crate::notify::alert::{body_lines, severity_name, truncate, Alert, AlertKind, Markup};
 
@@ -164,17 +166,21 @@ pub trait Mailer: Send + Sync {
 }
 
 /// The real mailer: one SMTP connection per message (the outbox sends at
-/// most one message every 2 s, so pooling buys nothing).
-pub struct SmtpMailer;
+/// most one message every 2 s, so pooling buys nothing). `secrets` holds
+/// the credentials of UI channels; config channels read the environment.
+pub struct SmtpMailer<'s> {
+    pub secrets: &'s Secrets,
+}
 
-impl Mailer for SmtpMailer {
+impl Mailer for SmtpMailer<'_> {
     fn send<'a>(
         &'a self,
         ch: &'a EmailChannel,
         msg: Message,
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>> {
         Box::pin(async move {
-            let transport = transport(ch).map_err(|e| MailError::Transient(e.to_string()))?;
+            let transport =
+                transport(ch, self.secrets).map_err(|e| MailError::Transient(e.to_string()))?;
             transport
                 .send(msg)
                 .await
@@ -184,7 +190,10 @@ impl Mailer for SmtpMailer {
     }
 }
 
-fn transport(ch: &EmailChannel) -> anyhow::Result<AsyncSmtpTransport<Tokio1Executor>> {
+fn transport(
+    ch: &EmailChannel,
+    secrets: &Secrets,
+) -> anyhow::Result<AsyncSmtpTransport<Tokio1Executor>> {
     let mut b = match ch.security {
         // STARTTLS is required, never opportunistic: no silent downgrade.
         SmtpSecurity::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&ch.host)?,
@@ -194,8 +203,8 @@ fn transport(ch: &EmailChannel) -> anyhow::Result<AsyncSmtpTransport<Tokio1Execu
     .port(ch.port())
     .timeout(Some(SEND_TIMEOUT));
     if let (Some(u), Some(p)) = (&ch.username_env, &ch.password_env) {
-        let user = std::env::var(u).map_err(|_| anyhow::anyhow!("{u} is not set"))?;
-        let pass = std::env::var(p).map_err(|_| anyhow::anyhow!("{p} is not set"))?;
+        let user = secret(u, secrets).ok_or_else(|| anyhow::anyhow!("{u} is not set"))?;
+        let pass = secret(p, secrets).ok_or_else(|| anyhow::anyhow!("{p} is not set"))?;
         b = b.credentials(Credentials::new(user, pass));
     }
     Ok(b.build())

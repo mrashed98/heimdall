@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 use sqlx::{PgConnection, PgPool};
 
+use super::channels::Secrets;
 use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::Severity;
 use crate::secrets::SecretKey;
@@ -333,6 +334,166 @@ struct Row {
     settings: sqlx::types::Json<Map<String, Value>>,
     secrets: Option<Vec<u8>>,
     secret_names: Vec<String>,
+}
+
+/// How a stored channel loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiState {
+    Ok,
+    /// `HEIMDALL_SECRET_KEY` is not set: delivered without secrets, so its
+    /// rows stay queued.
+    KeyMissing,
+    /// Its secrets can't be opened (another key), or it no longer validates
+    /// (a realm was removed). In the first case it is still in the list
+    /// without secrets; in the second it is left out.
+    Unreadable,
+    /// A config channel has the same name: the config one wins.
+    NameClash,
+}
+
+/// A stored channel as loaded, for the API. Holds no secret values.
+#[derive(Debug, Clone)]
+pub struct UiChannel {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub state: UiState,
+    pub config: Option<ChannelConfig>,
+    /// The secret fields that hold a value (from `secret_names`).
+    pub present: Vec<String>,
+}
+
+/// Every channel the alert pipeline delivers to. No `Debug`: `secrets`
+/// holds decrypted values.
+pub struct Channels {
+    /// The config channels, then the deliverable UI channels.
+    pub list: Vec<ChannelConfig>,
+    /// The UI channels' decrypted secrets, keyed by `ui_secret_ref`.
+    pub secrets: Secrets,
+    pub ui: Vec<UiChannel>,
+}
+
+impl Channels {
+    /// The config channels alone, with no UI channels.
+    pub fn from_config(cfg: &HeimdallConfig) -> Channels {
+        Channels {
+            list: cfg.channels(),
+            secrets: Secrets::new(),
+            ui: Vec::new(),
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct LoadRow {
+    id: i64,
+    #[sqlx(flatten)]
+    row: Row,
+}
+
+/// The config channels followed by the stored ones, with the stored ones'
+/// secrets decrypted. Called once per alert run or drain tick. A stored
+/// channel without its secrets (no key, or sealed under another key) stays
+/// in `list`, so its rows are queued and wait; one that clashes with a
+/// config name or no longer validates is left out and warned about once.
+pub async fn load(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+    key: Option<&SecretKey>,
+) -> anyhow::Result<Channels> {
+    let mut chans = Channels::from_config(cfg);
+    let rows: Vec<LoadRow> = sqlx::query_as(
+        "SELECT id, name, type, realms, min_severity, digest, settings, secrets, secret_names \
+         FROM alert_channels ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let config_names: BTreeSet<String> = chans.list.iter().map(|c| c.name().to_string()).collect();
+    for LoadRow { id, row } in rows {
+        let present: Vec<&str> = row.secret_names.iter().map(String::as_str).collect();
+        let built = build(
+            &row.kind,
+            &row.name,
+            &row.realms,
+            row.min_severity,
+            row.digest,
+            &row.settings.0,
+            &present,
+        );
+        let mut ui = UiChannel {
+            id,
+            name: row.name.clone(),
+            kind: row.kind.clone(),
+            state: UiState::Ok,
+            config: None,
+            present: row.secret_names.clone(),
+        };
+        if config_names.contains(&row.name) {
+            super::warn_once(
+                &format!("ui-clash|{}", row.name),
+                &format!(
+                    "alert channel `{}` from the UI has the name of a config channel; \
+                     the config one is used and the UI one is skipped",
+                    row.name
+                ),
+            );
+            ui.state = UiState::NameClash;
+            ui.config = built.ok();
+            chans.ui.push(ui);
+            continue;
+        }
+        // A realm removed from the config since the channel was saved.
+        let built = match row.realms.iter().find(|r| !cfg.realms.contains(r)) {
+            Some(r) => Err(invalid(format!("unknown realm `{r}`"))),
+            None => built,
+        };
+        let config = match built {
+            Ok(c) => c,
+            Err(e) => {
+                // `build` errors name fields, never secret values (it never
+                // sees them).
+                super::warn_once(
+                    &format!("ui-invalid|{}", row.name),
+                    &format!("alert channel `{}` from the UI is skipped: {e}", row.name),
+                );
+                ui.state = UiState::Unreadable;
+                chans.ui.push(ui);
+                continue;
+            }
+        };
+        if let Some(sealed) = &row.secrets {
+            match key {
+                None => ui.state = UiState::KeyMissing,
+                Some(k) => match k.open(&aad(&row.name), sealed).ok().and_then(|plain| {
+                    serde_json::from_slice::<BTreeMap<String, String>>(&plain).ok()
+                }) {
+                    Some(values) => {
+                        for (field, value) in values {
+                            chans
+                                .secrets
+                                .insert(ui_secret_ref(&row.name, &field), value);
+                        }
+                    }
+                    None => {
+                        super::warn_once(
+                            &format!("ui-unreadable|{}", row.name),
+                            &format!(
+                                "alert channel `{}`: its secrets can't be read with the \
+                                 current {}; its alerts stay queued until they are re-entered",
+                                row.name,
+                                crate::secrets::ENV_VAR
+                            ),
+                        );
+                        ui.state = UiState::Unreadable;
+                    }
+                },
+            }
+        }
+        chans.list.push(config.clone());
+        ui.config = Some(config);
+        chans.ui.push(ui);
+    }
+    Ok(chans)
 }
 
 /// Apply `p` to channel `id`. Validation runs on the merged state; on any

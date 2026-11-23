@@ -176,7 +176,9 @@ async fn baseline(realm: &str, config: PathBuf) -> anyhow::Result<()> {
     let cfg = HeimdallConfig::load(&config)?;
     let url = std::env::var("DATABASE_URL").context("DATABASE_URL is not set")?;
     let pool = heimdall::db::connect(&url).await?;
-    let n = heimdall::notify::baseline(&pool, &cfg, realm).await?;
+    let key = heimdall::secrets::SecretKey::from_env();
+    let chans = heimdall::notify::store::load(&pool, &cfg, key.as_ref()).await?;
+    let n = heimdall::notify::baseline(&pool, &cfg, &chans, realm).await?;
     println!("{n} open finding(s) in {realm} marked announced; they stay open and visible");
     Ok(())
 }

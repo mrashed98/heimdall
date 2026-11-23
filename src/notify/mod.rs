@@ -33,6 +33,7 @@ use sqlx::{FromRow, PgConnection, PgPool};
 use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::{FindingKind, Severity};
 use alert::Alert;
+use store::Channels;
 
 /// One finding on a card.
 #[derive(Debug, Clone, PartialEq, FromRow)]
@@ -115,8 +116,12 @@ impl AlertGroup {
 /// once), so it goes out once a channel covers the realm. A finding every
 /// covering channel filters out by `min_severity` is marked: that is an
 /// explicit opt-out.
-pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Result<usize> {
-    let chans = cfg.channels();
+pub async fn enqueue_alerts(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+    chans: &Channels,
+) -> anyhow::Result<usize> {
+    let chans = &chans.list;
     if chans.is_empty() {
         return Ok(0);
     }
@@ -126,7 +131,7 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
     let items: Vec<(String, AlertItem)> = pending(&mut tx)
         .await?
         .into_iter()
-        .filter(|(_, i)| realm_has_route(cfg, &i.realm))
+        .filter(|(_, i)| realm_has_route(chans, &i.realm))
         .collect();
     if items.is_empty() {
         return Ok(0);
@@ -140,7 +145,7 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
 
     let mut queued = 0;
     for g in &groups {
-        for ch in &chans {
+        for ch in chans {
             let Some(sub) = for_route(g, ch) else {
                 continue;
             };
@@ -162,12 +167,13 @@ pub async fn enqueue_alerts(pool: &PgPool, cfg: &HeimdallConfig) -> anyhow::Resu
 /// queued.
 pub async fn enqueue_first_run_summary(
     pool: &PgPool,
-    cfg: &HeimdallConfig,
+    _cfg: &HeimdallConfig,
+    chans: &Channels,
     realm: &str,
 ) -> anyhow::Result<bool> {
-    let routes: Vec<ChannelConfig> = cfg
-        .channels()
-        .into_iter()
+    let routes: Vec<&ChannelConfig> = chans
+        .list
+        .iter()
         .filter(|c| c.covers(realm) && c.wants_digest())
         .collect();
     if routes.is_empty() {
@@ -191,7 +197,7 @@ pub async fn enqueue_first_run_summary(
     .fetch_all(&mut *tx)
     .await?;
     let summary = Alert::first_run(realm, &counts);
-    for ch in &routes {
+    for ch in routes {
         let payload = channels::render(ch, &summary);
         outbox::push(&mut tx, &format!("first_run|{realm}"), &payload, ch).await?;
     }
@@ -204,8 +210,14 @@ pub async fn enqueue_first_run_summary(
 /// backlog is not flooded. The findings stay open in the UI, API and counts;
 /// one-shot kinds resolve as if sent. Afterwards only new findings and state
 /// changes (a fix appears, an oath expires, severity rises) alert. Audited.
-/// Returns how many findings were marked.
-pub async fn baseline(pool: &PgPool, cfg: &HeimdallConfig, realm: &str) -> anyhow::Result<usize> {
+/// Returns how many findings were marked. `_chans` is unused: baseline
+/// queues nothing, it takes the list for symmetry with the other entry points.
+pub async fn baseline(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+    _chans: &Channels,
+    realm: &str,
+) -> anyhow::Result<usize> {
     anyhow::ensure!(
         cfg.realms.iter().any(|r| r == realm),
         "unknown realm {realm:?} (configured: {})",
@@ -349,10 +361,10 @@ async fn load_extras(tx: &mut PgConnection, g: &mut AlertGroup) -> anyhow::Resul
     Ok(())
 }
 
-/// Does any channel (a `teams:` route or a `channels:` entry) cover this
-/// realm? Warns once per realm when none does.
-pub(crate) fn realm_has_route(cfg: &HeimdallConfig, realm: &str) -> bool {
-    let covered = cfg.channels().iter().any(|c| c.covers(realm));
+/// Does any channel (a `teams:` route, a `channels:` entry or a UI channel)
+/// cover this realm? Warns once per realm when none does.
+pub(crate) fn realm_has_route(chans: &[ChannelConfig], realm: &str) -> bool {
+    let covered = chans.iter().any(|c| c.covers(realm));
     if !covered {
         warn_once(
             &format!("realm|{realm}"),

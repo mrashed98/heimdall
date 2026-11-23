@@ -253,7 +253,8 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
             announce(st, &st.cfg.realms).await
         }
         Job::Outbox => {
-            let r = outbox::drain_once(&st.pool, &st.http, &st.cfg, now).await?;
+            let chans = channels(st).await?;
+            let r = outbox::drain_once(&st.pool, &st.http, &st.cfg, &chans, now).await?;
             meters::record_drain(&r);
             // Every 2 s: quiet unless something happened.
             if r.sent + r.retry + r.failed > 0 {
@@ -269,7 +270,8 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
             Ok(())
         }
         Job::Digest => {
-            if digest::maybe_send(&st.pool, &st.cfg, now).await? {
+            let chans = channels(st).await?;
+            if digest::maybe_send(&st.pool, &st.cfg, &chans, now).await? {
                 tracing::info!("weekly digest queued");
             } else {
                 tracing::debug!("no digest due");
@@ -379,19 +381,25 @@ async fn match_all(st: &AppState) -> Vec<String> {
 /// the alerts. If a summary could not be queued, alerts wait for the next
 /// round so they never go out before it.
 async fn announce(st: &AppState, realms: &[String]) -> anyhow::Result<()> {
+    let chans = channels(st).await?;
     for realm in realms {
-        if notify::enqueue_first_run_summary(&st.pool, &st.cfg, realm)
+        if notify::enqueue_first_run_summary(&st.pool, &st.cfg, &chans, realm)
             .await
             .with_context(|| format!("first-run summary of {realm}; alerts wait"))?
         {
             tracing::info!(realm = %realm, "first-run summary queued");
         }
     }
-    let queued = notify::enqueue_alerts(&st.pool, &st.cfg).await?;
+    let queued = notify::enqueue_alerts(&st.pool, &st.cfg, &chans).await?;
     if queued > 0 {
         tracing::info!(queued, "alerts queued");
     }
     Ok(())
+}
+
+/// The config and UI alert channels, loaded once per tick.
+async fn channels(st: &AppState) -> anyhow::Result<notify::store::Channels> {
+    notify::store::load(&st.pool, &st.cfg, st.secret_key.as_deref()).await
 }
 
 fn log_failure(step: &str, r: anyhow::Result<()>) {

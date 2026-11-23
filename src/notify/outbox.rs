@@ -10,6 +10,7 @@ use sqlx::{PgConnection, PgPool};
 
 use super::channels::email::{MailError, Mailer, SmtpMailer};
 use super::channels::{self, HttpAuth, Request};
+use super::store::Channels;
 use crate::config::{ChannelConfig, HeimdallConfig};
 
 /// First retry delay; doubled per failed attempt.
@@ -66,18 +67,23 @@ pub async fn drain_once(
     pool: &PgPool,
     http: &reqwest::Client,
     cfg: &HeimdallConfig,
+    chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
+    let mailer = SmtpMailer {
+        secrets: &chans.secrets,
+    };
     let d = Delivery {
         http,
-        mailer: &SmtpMailer,
+        mailer: &mailer,
     };
-    drain_with(pool, &d, cfg, now).await
+    drain_with(pool, &d, cfg, chans, now).await
 }
 
 /// Send at most one due payload (oldest first); the caller loops every 2 s,
 /// which paces the channels. Rows of a channel whose secret variables are
-/// unset stay queued untouched until they are set, as do rows queued for a
+/// unset (or a UI channel whose secrets can't be read) stay queued untouched
+/// until they are set, as do rows queued for a
 /// channel that has since changed type.
 ///
 /// The row is locked `FOR UPDATE SKIP LOCKED` for the whole send, so a second
@@ -85,10 +91,11 @@ pub async fn drain_once(
 pub async fn drain_with(
     pool: &PgPool,
     d: &Delivery<'_>,
-    cfg: &HeimdallConfig,
+    _cfg: &HeimdallConfig,
+    chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
-    for (route, kind) in orphaned(pool, cfg).await? {
+    for (route, kind) in orphaned(pool, chans).await? {
         super::warn_once(
             &format!("orphan|{route}|{kind}"),
             &format!(
@@ -98,9 +105,9 @@ pub async fn drain_with(
             ),
         );
     }
-    let mut ready: Vec<ChannelConfig> = Vec::new();
-    for ch in cfg.channels() {
-        match channels::missing_env(&ch) {
+    let mut ready: Vec<&ChannelConfig> = Vec::new();
+    for ch in &chans.list {
+        match channels::missing_env(ch, &chans.secrets) {
             None => ready.push(ch),
             Some(var) => super::warn_once(
                 &format!("webhook|{}", ch.name()),
@@ -135,13 +142,13 @@ pub async fn drain_with(
     let Some((id, route, card, attempts)) = row else {
         return Ok(result);
     };
-    let Some(ch) = ready.iter().find(|c| c.name() == route) else {
+    let Some(ch) = ready.iter().copied().find(|c| c.name() == route) else {
         return Ok(result);
     };
     let kind = ch.type_name();
     result.channel_type = Some(kind);
 
-    let outcome = match channels::request(ch, &card, now) {
+    let outcome = match channels::request(ch, &card, now, &chans.secrets) {
         Ok(req) => send(d, ch, req).await,
         Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
     };
@@ -216,13 +223,9 @@ pub async fn drain_with(
 
 /// `(route, channel_type)` of unsent rows no configured channel matches
 /// (removed, renamed, or changed type). They are never sent.
-pub async fn orphaned(
-    pool: &PgPool,
-    cfg: &HeimdallConfig,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let chans = cfg.channels();
-    let names: Vec<&str> = chans.iter().map(|c| c.name()).collect();
-    let types: Vec<&str> = chans.iter().map(|c| c.type_name()).collect();
+pub async fn orphaned(pool: &PgPool, chans: &Channels) -> anyhow::Result<Vec<(String, String)>> {
+    let names: Vec<&str> = chans.list.iter().map(|c| c.name()).collect();
+    let types: Vec<&str> = chans.list.iter().map(|c| c.type_name()).collect();
     let rows = sqlx::query_as(
         "SELECT DISTINCT route, channel_type FROM outbox \
          WHERE sent_at IS NULL \

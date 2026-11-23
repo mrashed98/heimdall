@@ -1,7 +1,7 @@
 //! Alert channels: a formatter per type turns the neutral [`Alert`] into the
 //! payload queued in the outbox, and `request` turns a queued payload into
-//! what is sent, adding the secrets (read from the environment at send time,
-//! never stored in the database).
+//! what is sent, adding the secrets at send time: a UI channel's from the
+//! decrypted [`Secrets`] map, a config channel's from the environment.
 
 pub mod alertmanager;
 pub mod discord;
@@ -13,6 +13,8 @@ pub mod webhook;
 
 #[cfg(test)]
 mod tests;
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -35,14 +37,23 @@ pub fn render(ch: &ChannelConfig, a: &Alert) -> Value {
     }
 }
 
-/// An environment variable read at send time; empty counts as unset.
-fn env(var: &str) -> Option<String> {
-    std::env::var(var).ok().filter(|v| !v.is_empty())
+/// Decrypted UI channel secrets, keyed by their `ui:<name>:<field>` ref.
+pub type Secrets = HashMap<String, String>;
+
+/// The value of a `*_env` key at send time: from `secrets` (a UI channel's
+/// ref), else the environment variable of that name. Empty counts as unset.
+pub(crate) fn secret(var: &str, secrets: &Secrets) -> Option<String> {
+    secrets
+        .get(var)
+        .cloned()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var(var).ok().filter(|v| !v.is_empty()))
 }
 
-/// The first required environment variable of `ch` that is not set, if any.
-/// A channel with one missing keeps its rows queued.
-pub fn missing_env(ch: &ChannelConfig) -> Option<String> {
+/// The first required secret of `ch` that is not set, if any (its `*_env`
+/// value: a variable name or a UI ref). A channel with one missing keeps its
+/// rows queued.
+pub fn missing_env(ch: &ChannelConfig, secrets: &Secrets) -> Option<String> {
     let mut required: Vec<&str> = Vec::new();
     match ch {
         ChannelConfig::Teams(c) => required.push(&c.webhook_env),
@@ -65,7 +76,7 @@ pub fn missing_env(ch: &ChannelConfig) -> Option<String> {
     }
     required
         .into_iter()
-        .find(|v| env(v).is_none())
+        .find(|v| secret(v, secrets).is_none())
         .map(str::to_string)
 }
 
@@ -94,8 +105,13 @@ pub enum Request {
 /// Build the request for a queued `payload` of channel `ch`. Fails when a
 /// secret is missing (the caller checked `missing_env` first) or the
 /// payload does not fit the channel (it was queued for another type).
-pub fn request(ch: &ChannelConfig, payload: &Value, now: DateTime<Utc>) -> anyhow::Result<Request> {
-    let need = |var: &str| env(var).ok_or_else(|| anyhow::anyhow!("{var} is not set"));
+pub fn request(
+    ch: &ChannelConfig,
+    payload: &Value,
+    now: DateTime<Utc>,
+    secrets: &Secrets,
+) -> anyhow::Result<Request> {
+    let need = |var: &str| secret(var, secrets).ok_or_else(|| anyhow::anyhow!("{var} is not set"));
     let json = |v: &Value| serde_json::to_vec(v).expect("JSON values serialize");
     let http = |url: String, body: Vec<u8>| Request::Http {
         url,
