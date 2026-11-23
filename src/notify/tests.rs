@@ -1630,8 +1630,8 @@ async fn delete_discards_queued_rows(pool: PgPool) {
     queued_for(&pool, "s", "slack", json!({})).await;
     // Another type under the same name is not this channel's.
     queued_for(&pool, "s", "discord", json!({})).await;
-    assert_eq!(store::queued_count(&pool, id).await.unwrap(), 2);
-    assert_eq!(store::delete(&pool, "bob", id).await.unwrap(), 2);
+    assert_eq!(store::queued_count(&pool, &c, id).await.unwrap(), 2);
+    assert_eq!(store::delete(&pool, &c, "bob", id).await.unwrap(), 2);
     type Discarded = (String, Option<DateTime<Utc>>, Value, Option<String>);
     let rows: Vec<Discarded> =
         sqlx::query_as("SELECT channel_type, sent_at, card, last_error FROM outbox ORDER BY id")
@@ -1656,11 +1656,11 @@ async fn delete_discards_queued_rows(pool: PgPool) {
         json!({"name": "s", "type": "slack", "discarded": 2})
     );
     assert!(matches!(
-        store::delete(&pool, "bob", id).await,
+        store::delete(&pool, &c, "bob", id).await,
         Err(store::StoreError::NotFound)
     ));
     assert!(matches!(
-        store::queued_count(&pool, id).await,
+        store::queued_count(&pool, &c, id).await,
         Err(store::StoreError::NotFound)
     ));
 
@@ -1673,6 +1673,46 @@ async fn delete_discards_queued_rows(pool: PgPool) {
         .unwrap();
     assert_eq!(r.sent, 0);
     server.verify().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn delete_ui_channel_clashing_with_config_keeps_queued_rows(pool: PgPool) {
+    let c = ui_cfg(
+        "channels:\n  - {type: slack, name: s, webhook_env: NOTIFY_CLASH_URL, min_severity: high}\n",
+    );
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO alert_channels (name, type, min_severity, created_by, updated_by) \
+         VALUES ('s', 'slack', 'high', 'alice', 'alice') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let row = queued_for(&pool, "s", "slack", json!({})).await;
+    assert_eq!(store::queued_count(&pool, &c, id).await.unwrap(), 0);
+    assert_eq!(store::delete(&pool, &c, "bob", id).await.unwrap(), 0);
+    let (sent_at, card, err): (Option<DateTime<Utc>>, Value, Option<String>) =
+        sqlx::query_as("SELECT sent_at, card, last_error FROM outbox WHERE id = $1")
+            .bind(row)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(sent_at.is_none(), "the config channel's row stays queued");
+    assert!(card.get("failed").is_none(), "{card}");
+    assert_eq!(err, None);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM alert_channels")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the UI row is gone");
+    let detail: Value =
+        sqlx::query_scalar("SELECT detail FROM audit_log WHERE action = 'channel_deleted'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        detail,
+        json!({"name": "s", "type": "slack", "discarded": 0})
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

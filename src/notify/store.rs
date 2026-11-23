@@ -663,9 +663,12 @@ async fn name_and_type(conn: &mut PgConnection, id: i64) -> Result<(String, Stri
 }
 
 /// How many alerts are queued for channel `id`: what deleting it discards.
-pub async fn queued_count(pool: &PgPool, id: i64) -> Result<i64, StoreError> {
+pub async fn queued_count(pool: &PgPool, cfg: &HeimdallConfig, id: i64) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
     let (name, kind) = name_and_type(&mut tx, id).await?;
+    if config_owns(cfg, &name, &kind) {
+        return Ok(0);
+    }
     let n = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
     )
@@ -676,26 +679,45 @@ pub async fn queued_count(pool: &PgPool, id: i64) -> Result<i64, StoreError> {
     Ok(n)
 }
 
+/// Whether a config channel has this name and type. It wins a clash with a
+/// UI channel, so the queued rows under that (name, type) are its own.
+fn config_owns(cfg: &HeimdallConfig, name: &str, kind: &str) -> bool {
+    cfg.channels()
+        .iter()
+        .any(|c| c.name() == name && c.type_name() == kind)
+}
+
 /// Delete channel `id` and discard its queued alerts in the same
 /// transaction, so a later channel with the same name and type never sends
-/// them. Needs no key. Returns how many alerts were discarded.
-pub async fn delete(pool: &PgPool, actor: &str, id: i64) -> Result<u64, StoreError> {
+/// them. If a config channel has the same name and type, the queued alerts
+/// are that channel's and are left alone. Needs no key. Returns how many
+/// alerts were discarded.
+pub async fn delete(
+    pool: &PgPool,
+    cfg: &HeimdallConfig,
+    actor: &str,
+    id: i64,
+) -> Result<u64, StoreError> {
     let mut tx = pool.begin().await?;
     let (name, kind) = name_and_type(&mut tx, id).await?;
     sqlx::query("DELETE FROM alert_channels WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    let discarded = sqlx::query(
-        "UPDATE outbox SET sent_at=now(), card=jsonb_set(card,'{failed}','true'), \
-         last_error='channel deleted' \
-         WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
-    )
-    .bind(&name)
-    .bind(&kind)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let discarded = if config_owns(cfg, &name, &kind) {
+        0
+    } else {
+        sqlx::query(
+            "UPDATE outbox SET sent_at=now(), card=jsonb_set(card,'{failed}','true'), \
+             last_error='channel deleted' \
+             WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
+        )
+        .bind(&name)
+        .bind(&kind)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    };
     crate::admin::record(
         &mut tx,
         actor,
