@@ -237,6 +237,23 @@ async fn name_in_db(conn: &mut PgConnection, name: &str) -> Result<bool, sqlx::E
         .await
 }
 
+/// A UI channel name must be usable inside `ui:<name>:<field>` unambiguously.
+fn check_name(name: &str) -> Result<(), StoreError> {
+    if name.trim().is_empty() {
+        return Err(invalid("name must not be empty"));
+    }
+    if name != name.trim() {
+        return Err(invalid("name must not start or end with whitespace"));
+    }
+    if name.contains(':') {
+        return Err(invalid("name must not contain `:`"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(invalid("name must not contain control characters"));
+    }
+    Ok(())
+}
+
 /// Validate and insert a UI channel; returns its id.
 pub async fn create(
     pool: &PgPool,
@@ -245,6 +262,7 @@ pub async fn create(
     actor: &str,
     c: &NewChannel,
 ) -> Result<i64, StoreError> {
+    check_name(&c.name)?;
     let secrets: BTreeMap<String, String> = c.secrets.clone().into_iter().collect();
     check(
         cfg,
@@ -258,9 +276,6 @@ pub async fn create(
             secrets: &secrets,
         },
     )?;
-    if c.name.trim().is_empty() {
-        return Err(invalid("name must not be empty"));
-    }
     if cfg.channels().iter().any(|ch| ch.name() == c.name) {
         return Err(StoreError::NameTaken);
     }
@@ -317,6 +332,7 @@ struct Row {
     digest: Option<bool>,
     settings: sqlx::types::Json<Map<String, Value>>,
     secrets: Option<Vec<u8>>,
+    secret_names: Vec<String>,
 }
 
 /// Apply `p` to channel `id`. Validation runs on the merged state; on any
@@ -331,7 +347,7 @@ pub async fn update(
 ) -> Result<(), StoreError> {
     let mut tx = pool.begin().await?;
     let row: Option<Row> = sqlx::query_as(
-        "SELECT name, type, realms, min_severity, digest, settings, secrets FROM alert_channels WHERE id=$1 FOR UPDATE",
+        "SELECT name, type, realms, min_severity, digest, settings, secrets, secret_names FROM alert_channels WHERE id=$1 FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -339,15 +355,32 @@ pub async fn update(
     let row = row.ok_or(StoreError::NotFound)?;
     // The stored secrets must be opened to merge them.
     let key = key.ok_or(StoreError::NoKey)?;
-    // Secrets sealed under another key are unreadable: treat them as absent,
-    // so the admin recovers by re-entering them (validation then requires
-    // every required secret in the patch) and the row is resealed.
-    let old: BTreeMap<String, String> = row
-        .secrets
-        .as_ref()
-        .and_then(|sealed| key.open(&aad(&row.name), sealed).ok())
-        .and_then(|plain| serde_json::from_slice(&plain).ok())
-        .unwrap_or_default();
+    // Secrets sealed under another key are unreadable. The patch may then
+    // only proceed if it re-enters or explicitly clears every stored secret
+    // (names come from `secret_names`, readable without the key); the row
+    // is then resealed with the current key.
+    let old: BTreeMap<String, String> = match &row.secrets {
+        None => BTreeMap::new(),
+        Some(sealed) => match key
+            .open(&aad(&row.name), sealed)
+            .ok()
+            .and_then(|plain| serde_json::from_slice(&plain).ok())
+        {
+            Some(m) => m,
+            None => {
+                if let Some(n) = row
+                    .secret_names
+                    .iter()
+                    .find(|n| !p.secrets.contains_key(n.as_str()))
+                {
+                    return Err(invalid(format!(
+                        "re-enter secret `{n}`: it can't be read with the current key"
+                    )));
+                }
+                BTreeMap::new()
+            }
+        },
+    };
     let fields = secret_fields(&row.kind)
         .ok_or_else(|| invalid(format!("unknown channel type `{}`", row.kind)))?;
     let mut secrets = old.clone();
@@ -682,6 +715,115 @@ mod tests {
             opened(&b, "s", &sealed.unwrap()),
             json!({"webhook":"https://hooks.example/new"})
         );
+
+        // A webhook channel: re-entering only `url` would drop `secret`.
+        let id = create(
+            &pool,
+            &cfg,
+            Some(&a),
+            "alice",
+            &new(json!({"type":"webhook","name":"w","min_severity":"high",
+                "secrets":{"url":"https://hook.example/u","secret":"sig"}})),
+        )
+        .await
+        .unwrap();
+        let before = stored(&pool, id).await;
+        let err = update(
+            &pool,
+            &cfg,
+            Some(&b),
+            "bob",
+            id,
+            &patch(json!({"secrets":{"url":"https://hook.example/v"}})),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, StoreError::Invalid(m) if m.contains("`secret`")),
+            "{err:?}"
+        );
+        assert_eq!(stored(&pool, id).await, before);
+        update(
+            &pool,
+            &cfg,
+            Some(&b),
+            "bob",
+            id,
+            &patch(json!({"secrets":{"url":"https://hook.example/v","secret":null}})),
+        )
+        .await
+        .unwrap();
+        let (sealed, names) = stored(&pool, id).await;
+        assert_eq!(names, ["url"]);
+        assert_eq!(
+            opened(&b, "w", &sealed.unwrap()),
+            json!({"url":"https://hook.example/v"})
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn patch_unrelated_to_secrets_cannot_drop_unreadable_ones(pool: PgPool) {
+        let cfg = cfg();
+        let a = key();
+        let b = SecretKey::parse(&STANDARD.encode([9u8; 32])).unwrap();
+        let id = create(
+            &pool,
+            &cfg,
+            Some(&a),
+            "alice",
+            &new(
+                json!({"type":"alertmanager","name":"am","min_severity":"high",
+                "settings":{"url":"https://am.example"},
+                "secrets":{"username":"u","password":"p"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        let before = stored(&pool, id).await;
+        let err = update(
+            &pool,
+            &cfg,
+            Some(&b),
+            "bob",
+            id,
+            &patch(json!({"min_severity":"critical"})),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
+        assert_eq!(stored(&pool, id).await, before);
+        let sev: Severity =
+            sqlx::query_scalar("SELECT min_severity FROM alert_channels WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sev, Severity::High);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn create_rejects_bad_names(pool: PgPool) {
+        for name in ["a:b", " a", ""] {
+            let err = create(
+                &pool,
+                &cfg(),
+                Some(&key()),
+                "alice",
+                &new(json!({"type":"slack","name":name,"min_severity":"high",
+                    "secrets":{"webhook":"https://hooks.example/x"}})),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, StoreError::Invalid(m) if m.contains("name")),
+                "{name:?}: {err:?}"
+            );
+        }
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM alert_channels")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[sqlx::test(migrations = "./migrations")]
