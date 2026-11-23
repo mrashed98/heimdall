@@ -11,5 +11,6 @@
   .pop { position: absolute; z-index: 20; min-width: 220px; max-height: 60vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-panel); padding: var(--s3); box-shadow: 0 16px 40px var(--shadow); margin-top: 6px; }
   .start { left: 0; } .end { right: 0; }
   .up { bottom: 100%; margin: 0 0 6px; }
-  @media (max-width: 700px) { .up { bottom: auto; margin: 6px 0 0; } .start.up { left: auto; right: 0; } }
+  /* On phones the rail is a top bar: open the account menu as a fixed panel below it. */
+  @media (max-width: 700px) { .up { position: fixed; top: 56px; right: var(--s2); left: auto; bottom: auto; margin: 0; } }
 </style>

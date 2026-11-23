@@ -1,30 +1,37 @@
 <script lang="ts">
-  import { onMount, type Snippet } from 'svelte';
+  import { onMount, untrack, type Snippet } from 'svelte';
   import { api } from './api';
-  import { defaultFilters, findingsUrl, packageLabel, rowTitle, sortFromSearch, views, viewFilters, type Filters } from './findings';
+  import { defaultFilters, filtersFromSearch, filtersSearch, findingsUrl, packageLabel, rowTitle, views, viewFilters, type Filters } from './findings';
   import { EmptyState, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, Select, Skeleton, SubNav } from './ui';
   type Row = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; epss?:number; epss_percentile?:number; ref_id:string|null; severity:string; opened_at:string; summary?:string; fix?:string; details:Record<string, unknown> };
   let { realms, navigate, realmPicker }: { realms:string[]; navigate:(to:string)=>void; realmPicker:Snippet } = $props();
 
   function viewFromSearch(search: string) { const id = new URLSearchParams(search).get('view') ?? 'feed'; return views.some(v => v.id === id) ? id : 'feed'; }
   let view = $state(viewFromSearch(location.search));
-  let filters = $state<Filters>({ ...defaultFilters, ...viewFilters(viewFromSearch(location.search)), ...pickSort(location.search) });
-  function pickSort(search: string) { return new URLSearchParams(search).has('sort') ? sortFromSearch(search) : {}; }
+  // Filters live in the URL (so Back from a finding restores them); a view's preset fills keys the URL leaves out.
+  function initial(search: string): Filters {
+    const f = filtersFromSearch(search); const q = new URLSearchParams(search);
+    for (const [k, v] of Object.entries(viewFilters(viewFromSearch(search)))) if (!q.has(k)) (f as Record<string, unknown>)[k] = v;
+    return f;
+  }
+  let filters = $state<Filters>(initial(location.search));
   let rows = $state<Row[]>([]); let loading = $state(true); let failed = $state(false); let revision = $state(0);
   let url = $derived(findingsUrl(filters, realms));
   let current = $derived(views.find(v => v.id === view)!);
 
   onMount(() => {
-    const sync = () => { view = viewFromSearch(location.search); filters = { ...defaultFilters, ...viewFilters(view), ...pickSort(location.search) }; };
+    const sync = () => { view = viewFromSearch(location.search); filters = initial(location.search); };
     window.addEventListener('popstate', sync); return () => window.removeEventListener('popstate', sync);
   });
-  $effect(() => { realms.join(','); filters.offset = 0; });
+  let realmKey = untrack(() => realms.join(','));
+  $effect(() => { const key = realms.join(','); if (key !== realmKey) { realmKey = key; filters.offset = 0; } });
+  $effect(() => { const s = filtersSearch(filters, location.search); if (s !== location.search) history.replaceState({}, '', location.pathname + s); });
   $effect(() => { const target = url; revision; let active = true; loading = true; failed = false; api<Row[]>(target).then(d => { if (active) { rows = d; loading = false; } }).catch(() => { if (active) { failed = true; loading = false; } }); return () => { active = false; }; });
 
   function viewHref(id: string) { const q = new URLSearchParams(); if (realms.length) q.set('realms', realms.join(',')); if (id !== 'feed') q.set('view', id); return '/findings' + (q.size ? `?${q}` : ''); }
   function pickView(e: MouseEvent, id: string) { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); view = id; filters = { ...defaultFilters, ...viewFilters(id) }; history.pushState({}, '', viewHref(id)); }
   function changeFilter() { filters.offset = 0; }
-  function changeSort(value: string) { const [sort, order] = value.split(':'); filters.sort = sort!; filters.order = order!; filters.offset = 0; const next = new URL(location.href); next.searchParams.set('sort', sort!); next.searchParams.set('order', order!); history.replaceState({}, '', next.pathname + next.search); }
+  function changeSort(value: string) { const [sort, order] = value.split(':'); filters.sort = sort!; filters.order = order!; filters.offset = 0; }
   function open(e: MouseEvent, id: number) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); navigate(`/findings/${id}${location.search}`); }
   const sorts = [['severity:desc', 'Severity'], ['epss:desc', 'Exploit likelihood'], ['opened_at:desc', 'Newest'], ['opened_at:asc', 'Oldest'], ['advisory:asc', 'Advisory'], ['service:asc', 'Service']];
 </script>

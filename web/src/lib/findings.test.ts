@@ -57,3 +57,19 @@ describe('fix versions', () => {
   expect(nearestFix(['3.1','2.5'],null)).toBe('2.5');
  });
 });
+import { filtersFromSearch, filtersSearch } from './findings';
+describe('filters in the URL', () => {
+ it('round-trips every filter and the page, omitting defaults', () => {
+  const f: Filters = {severity:'critical,high',kind:'vuln',service:'api team',has_fix:'true',view_status:'snoozed',search:'log4j',sort:'epss',order:'desc',offset:50};
+  const search = filtersSearch(f, '?realms=prod&view=fix');
+  const q = new URLSearchParams(search);
+  expect(q.get('realms')).toBe('prod'); expect(q.get('view')).toBe('fix');
+  expect(filtersFromSearch(search)).toEqual(f);
+  expect(filtersSearch(defaultFilters, '?realms=prod')).toBe('?realms=prod');
+  expect(filtersFromSearch('')).toEqual(defaultFilters);
+ });
+ it('ignores junk values', () => {
+  expect(filtersFromSearch('?offset=-5&view_status=evil&order=up').offset).toBe(0);
+  expect(filtersFromSearch('?view_status=evil').view_status).toBe('open');
+ });
+});

@@ -85,3 +85,21 @@ export function nearestFix(fixed: string[], installed: string | null | undefined
   const above = fixed.filter(v => !installed || compareVersions(v, installed) > 0).sort(compareVersions);
   return above[0] ?? null;
 }
+
+const urlKeys = ['severity', 'kind', 'service', 'has_fix', 'view_status', 'search'] as const;
+/** Filters as they sit in the page URL, so Back from a finding restores them. */
+export function filtersFromSearch(search: string): Filters {
+  const q = new URLSearchParams(search); const f: Filters = { ...defaultFilters, ...sortFromSearch(search) };
+  for (const k of urlKeys) { const v = q.get(k); if (v) f[k] = v; }
+  if (!['open', 'snoozed', 'ignored', 'resolved'].includes(f.view_status)) f.view_status = 'open';
+  const offset = Number(q.get('offset')); f.offset = Number.isInteger(offset) && offset > 0 ? offset : 0;
+  return f;
+}
+/** The page query with these filters written in (defaults left out), other params kept. */
+export function filtersSearch(f: Filters, search: string): string {
+  const q = new URLSearchParams(search);
+  for (const k of urlKeys) { if (f[k] && f[k] !== defaultFilters[k]) q.set(k, f[k]); else q.delete(k); }
+  for (const [k, v] of [['sort', f.sort], ['order', f.order]] as const) { if (v !== defaultFilters[k]) q.set(k, v); else q.delete(k); }
+  if (f.offset) q.set('offset', String(f.offset)); else q.delete('offset');
+  return q.size ? `?${q}` : '';
+}

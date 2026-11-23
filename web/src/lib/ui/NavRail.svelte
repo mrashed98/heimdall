@@ -24,7 +24,9 @@
   .item.bottom ~ .footer { margin-top: 6px; }
   .rail:not(:has(.bottom)) .footer { margin-top: auto; }
   @media (max-width: 700px) {
-    .rail { position: sticky; z-index: 10; height: auto; width: 100%; flex-direction: row; padding: 6px var(--s2); border-right: 0; border-bottom: 1px solid var(--border); overflow-x: auto; }
-    .home { margin: 0 var(--s2) 0 0; } .item { width: auto; padding: 6px 8px; } .bottom, .footer, .rail:not(:has(.bottom)) .footer { margin-top: 0; } .bottom { margin-left: auto; }
+    .rail { position: sticky; z-index: 10; height: auto; width: 100%; flex-direction: row; padding: 6px var(--s2); border-right: 0; border-bottom: 1px solid var(--border); gap: 2px; }
+    .home { margin: 0 var(--s1) 0 0; } .item { width: auto; padding: 8px; }
+    /* Icon-only on phones; the label stays for screen readers. */
+    .item span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } .bottom, .footer, .rail:not(:has(.bottom)) .footer { margin-top: 0; } .bottom { margin-left: auto; }
   }
 </style>

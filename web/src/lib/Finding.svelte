@@ -3,7 +3,7 @@
   import { advisoryLinks, canEdit, epssLabel, nearestFix, rowTitle, validateOath } from './findings';
   import { Badge, Button, EmptyState, EpssBar, ErrorState, Icon, Input, PageHeader, Panel, Pill, Select, Skeleton, Stat } from './ui';
   type Oath = { id: number; kind: string; reason: string; status: string; created_by: string; created_at: string; expires_at: string | null; review_at: string | null };
-  type Detail = { kind: string; severity: string; ref_id: string | null; status: string; opened_at: string; realm: string; service: string | null; summary: string | null; aliases: string[]; scores: Record<string, number> | null; epss: number | null; epss_percentile: number | null; fixed: Record<string, string[]> | null; name_key: string | null; version: string | null; purl: string | null; affected: { service: string; digest: string | null; image: string | null }[]; oaths: Oath[] };
+  type Detail = { kind: string; details: Record<string, unknown>; severity: string; ref_id: string | null; status: string; opened_at: string; realm: string; service: string | null; summary: string | null; aliases: string[]; scores: Record<string, number> | null; epss: number | null; epss_percentile: number | null; fixed: Record<string, string[]> | null; name_key: string | null; version: string | null; purl: string | null; affected: { service: string; digest: string | null; image: string | null }[]; oaths: Oath[] };
   let { id, grants, navigate }: { id: number; grants: Grant[]; navigate: (to: string) => void } = $props();
 
   let detail = $state<Detail | null>(null); let loading = $state(true); let failed = $state(false); let missing = $state(false); let revision = $state(0);

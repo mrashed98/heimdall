@@ -766,6 +766,7 @@ struct FindingDetailQuery {
 #[derive(FromRow)]
 struct FindingDetailRow {
     kind: FindingKind,
+    details: serde_json::Value,
     severity: Severity,
     ref_id: Option<String>,
     status: String,
@@ -793,10 +794,11 @@ async fn finding_detail_handler(
     let affected_offset = parse_offset(&q.affected_offset)?;
     let oaths_offset = parse_offset(&q.oaths_offset)?;
     let row: Option<FindingDetailRow> = sqlx::query_as(
-        "SELECT f.kind, f.severity, f.ref_id, f.status, f.opened_at, f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases, e.score AS epss, e.percentile AS epss_percentile FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id LEFT JOIN epss e ON e.cve_id=COALESCE(a.cve_id, f.ref_id) WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
+        "SELECT f.kind, f.details, f.severity, f.ref_id, f.status, f.opened_at, f.realm, s.name AS service, c.purl, c.version, c.name_key, a.summary, a.fixed, a.scores, a.aliases, e.score AS epss, e.percentile AS epss_percentile FROM findings f LEFT JOIN services s ON s.id=f.service_id LEFT JOIN components c ON c.id=f.component_id LEFT JOIN advisories a ON a.id=f.ref_id LEFT JOIN epss e ON e.cve_id=COALESCE(a.cve_id, f.ref_id) WHERE f.id=$1 AND ($2 OR f.realm = ANY($3))"
     ).bind(id).bind(authed.kind == "key").bind(authed.readable_realms(&state.cfg.realms)).fetch_optional(&state.pool).await?;
     let FindingDetailRow {
         kind,
+        details,
         severity,
         ref_id,
         status,
@@ -818,7 +820,7 @@ async fn finding_detail_handler(
     let history: Vec<oath::Oath> = sqlx::query_as("SELECT id, advisory_id, name_key, service_name, realm, kind, reason, version_at_creation, expires_at, review_at, created_by, created_at, status FROM oaths WHERE (advisory_id=$1 OR advisory_id IN (SELECT unnest(aliases) FROM advisories WHERE id=$1) OR $1 IN (SELECT unnest(a.aliases) FROM advisories a WHERE a.id=oaths.advisory_id)) AND name_key=$2 AND service_name=$3 AND (realm=$4 OR realm IS NULL) ORDER BY created_at DESC, id DESC LIMIT 25 OFFSET $5")
         .bind(&ref_id).bind(&name_key).bind(&service).bind(&realm).bind(oaths_offset).fetch_all(&state.pool).await?;
     Ok(Json(
-        serde_json::json!({"id": id, "kind": kind, "severity": severity, "ref_id": ref_id, "status": status, "opened_at": opened_at, "realm": realm, "service": service, "summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
+        serde_json::json!({"id": id, "kind": kind, "details": details, "severity": severity, "ref_id": ref_id, "status": status, "opened_at": opened_at, "realm": realm, "service": service, "summary": summary, "aliases": aliases.unwrap_or_default(), "scores": scores, "epss": epss, "epss_percentile": epss_percentile, "fixed": fixed, "name_key": name_key, "version": version, "purl": purl, "affected": affected.into_iter().map(|(service,digest,image)| serde_json::json!({"service":service,"digest":digest,"image":image})).collect::<Vec<_>>(), "oaths": history}),
     ))
 }
 
@@ -1608,6 +1610,7 @@ mod tests {
         assert_eq!(d["realm"], "prod");
         assert_eq!(d["service"], "api");
         assert!(d["opened_at"].is_string());
+        assert!(d["details"].is_object(), "detail carries details: {body}");
     }
 
     #[sqlx::test(migrations = "./migrations")]

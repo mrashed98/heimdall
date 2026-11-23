@@ -134,7 +134,7 @@ version that fixes it, from the finding's own advice or its `fixavailable`
 sibling), each left out when unknown. Unless `kind` is given, a `fixavailable`
 finding whose `vuln` sibling (same advisory, component, service and realm) is
 in the same status is folded into that row, so the list shows one row per
-vulnerability. `GET /api/v1/findings/{id}` also returns `kind`, `severity`,
+vulnerability. `GET /api/v1/findings/{id}` also returns `kind`, `details`, `severity`,
 `ref_id`, `status`, `opened_at`, `realm` and `service`.
 
 ### `GET /api/v1/services`
