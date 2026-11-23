@@ -59,7 +59,7 @@
       <Stat label="Exploit likelihood (EPSS)" value={detail.epss == null ? '—' : epssLabel(detail.epss, detail.epss_percentile)} tone={epssTone(detail.epss) === 'critical' ? 'critical' : 'default'} />
       <Stat label="CVSS" value={cvss ?? '—'} />
       <Stat label="Fixed in" value={fix ?? '—'} tone={fix ? 'ok' : 'default'} />
-      <Stat label="Services with it" value={detail.affected_services} />
+      <Stat label="Services with this version" value={detail.affected_services} />
     </div>
     <div class="grid">
       <div class="main">
