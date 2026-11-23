@@ -394,8 +394,10 @@ struct LoadRow {
 /// The config channels followed by the stored ones, with the stored ones'
 /// secrets decrypted. Called once per alert run or drain tick. A stored
 /// channel without its secrets (no key, or sealed under another key) stays
-/// in `list`, so its rows are queued and wait; one that clashes with a
-/// config name or no longer validates is left out and warned about once.
+/// in `list`, so its rows are queued and wait. Realms removed from the config
+/// are ignored (with a warning) rather than dropping the channel. One that
+/// clashes with a config name or no longer builds is left out and warned
+/// about once.
 pub async fn load(
     pool: &PgPool,
     cfg: &HeimdallConfig,
@@ -411,10 +413,36 @@ pub async fn load(
     let config_names: BTreeSet<String> = chans.list.iter().map(|c| c.name().to_string()).collect();
     for LoadRow { id, row } in rows {
         let present: Vec<&str> = row.secret_names.iter().map(String::as_str).collect();
+        // Realms removed from the config since the channel was saved are
+        // dropped, so the channel keeps the realms it still validly covers.
+        // If none are left, the stored list is kept as is: an empty list
+        // would mean "all realms". The channel then covers no configured
+        // realm but stays listed, so its queued rows still drain.
+        let (known, gone): (Vec<String>, Vec<String>) = row
+            .realms
+            .iter()
+            .cloned()
+            .partition(|r| cfg.realms.contains(r));
+        if !gone.is_empty() {
+            super::warn_once(
+                &format!("ui-realms|{}|{}", row.name, gone.join(",")),
+                &format!(
+                    "alert channel `{}` from the UI covers realms no longer in the config \
+                     ({}); they are ignored",
+                    row.name,
+                    gone.join(", ")
+                ),
+            );
+        }
+        let realms = if known.is_empty() {
+            &row.realms
+        } else {
+            &known
+        };
         let built = build(
             &row.kind,
             &row.name,
-            &row.realms,
+            realms,
             row.min_severity,
             row.digest,
             &row.settings.0,
@@ -442,16 +470,14 @@ pub async fn load(
             chans.ui.push(ui);
             continue;
         }
-        // A realm removed from the config since the channel was saved.
-        let built = match row.realms.iter().find(|r| !cfg.realms.contains(r)) {
-            Some(r) => Err(invalid(format!("unknown realm `{r}`"))),
-            None => built,
-        };
         let config = match built {
             Ok(c) => c,
             Err(e) => {
-                // `build` errors name fields, never secret values (it never
-                // sees them).
+                // Trade-off: a row that no longer builds is left out of
+                // `list`, so `enqueue_alerts` queues nothing for it and its
+                // alerts are lost until it is fixed; there is no
+                // `ChannelConfig` to queue them under. `build` errors name
+                // fields, never secret values (it never sees them).
                 super::warn_once(
                     &format!("ui-invalid|{}", row.name),
                     &format!("alert channel `{}` from the UI is skipped: {e}", row.name),

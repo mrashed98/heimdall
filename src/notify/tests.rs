@@ -1196,6 +1196,15 @@ async fn ui_slack(pool: &PgPool, c: &HeimdallConfig, k: &SecretKey, name: &str, 
         .unwrap();
 }
 
+/// Make every queued row due before the fixed test clock, so a row that is
+/// held back is held only because of its secrets.
+async fn make_due(pool: &PgPool) {
+    sqlx::query("UPDATE outbox SET next_attempt_at = '2000-01-01'")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn ui_channel_is_delivered_like_a_config_one(pool: PgPool) {
     let server = MockServer::start().await;
@@ -1224,8 +1233,8 @@ async fn ui_channel_is_delivered_like_a_config_one(pool: PgPool) {
     assert!(notified_status(&pool, f).await.0);
     let rows = outbox(&pool).await;
     assert_eq!(rows[0].route, "s");
-    // Rows are due from when they were queued (real time).
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, Utc::now())
+    make_due(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!((r.sent, r.channel_type), (1, Some("slack")));
@@ -1256,7 +1265,8 @@ async fn ui_channel_rows_stay_queued_without_key(pool: PgPool) {
     let f = vuln(&pool, "prod", "api", "critical").await;
     assert_eq!(enqueue_alerts(&pool, &c, &ch).await.unwrap(), 1);
     assert!(notified_status(&pool, f).await.0);
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, Utc::now())
+    make_due(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -1286,7 +1296,8 @@ async fn unreadable_secret_keeps_rows_queued(pool: PgPool) {
 
     vuln(&pool, "prod", "api", "critical").await;
     assert_eq!(enqueue_alerts(&pool, &c, &ch).await.unwrap(), 1);
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, Utc::now())
+    make_due(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -1318,23 +1329,79 @@ async fn config_wins_a_name_clash(pool: PgPool) {
     assert_eq!(w.webhook_env, "NOTIFY_CLASH_URL");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stored_channel_that_no_longer_validates_is_skipped(pool: PgPool) {
-    let c = cfg("realms: [prod, dev]\n");
+/// Create UI slack channel `s` covering `realms` under a config with
+/// realms [prod, dev].
+async fn ui_slack_in(pool: &PgPool, realms: &[&str]) {
     let new: store::NewChannel = serde_json::from_value(json!({
-        "type": "slack", "name": "s", "min_severity": "high", "realms": ["dev"],
+        "type": "slack", "name": "s", "min_severity": "high", "realms": realms,
         "secrets": {"webhook": "https://hooks.example/topsecret"},
     }))
     .unwrap();
-    store::create(&pool, &c, Some(&key(7)), "alice", &new)
-        .await
-        .unwrap();
+    store::create(
+        pool,
+        &cfg("realms: [prod, dev]\n"),
+        Some(&key(7)),
+        "alice",
+        &new,
+    )
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn ui_channel_with_removed_realm_still_gets_remaining_realms(pool: PgPool) {
+    ui_slack_in(&pool, &["prod", "dev"]).await;
+    // `dev` is later removed from the config; a config channel covers prod.
+    let c = ui_cfg(
+        "channels:\n  - {type: slack, name: other, webhook_env: NOTIFY_REALM_URL, \
+         min_severity: high, realms: [prod]}\n",
+    );
+    let ch = store::load(&pool, &c, Some(&key(7))).await.unwrap();
+    assert_eq!(ch.ui[0].state, UiState::Ok);
+    assert!(ch.ui[0].config.is_some());
+    assert_eq!(
+        ch.list.iter().map(|c| c.name()).collect::<Vec<_>>(),
+        ["other", "s"]
+    );
+    assert!(!ch.secrets.is_empty());
+
+    let f = vuln(&pool, "prod", "api", "critical").await;
+    enqueue_alerts(&pool, &c, &ch).await.unwrap();
+    assert!(notified_status(&pool, f).await.0);
+    let mut routes: Vec<String> = outbox(&pool).await.into_iter().map(|r| r.route).collect();
+    routes.sort();
+    assert_eq!(routes, ["other", "s"]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn ui_channel_with_only_removed_realms_stays_listed(pool: PgPool) {
+    ui_slack_in(&pool, &["dev"]).await;
     // `dev` is later removed from the config.
-    let ch = store::load(&pool, &ui_cfg(""), Some(&key(7)))
-        .await
-        .unwrap();
-    assert_eq!(ch.ui[0].state, UiState::Unreadable);
-    assert!(ch.ui[0].config.is_none());
-    assert!(ch.list.is_empty());
-    assert!(ch.secrets.is_empty());
+    let c = ui_cfg(
+        "channels:\n  - {type: slack, name: other, webhook_env: NOTIFY_REALM_URL, \
+         min_severity: high}\n",
+    );
+    let ch = store::load(&pool, &c, Some(&key(7))).await.unwrap();
+    assert_eq!(ch.ui[0].state, UiState::Ok);
+    let s = ch
+        .list
+        .iter()
+        .find(|c| c.name() == "s")
+        .expect("s is listed");
+    // It covers no configured realm, and is not widened to all of them.
+    assert!(!s.covers("prod"));
+
+    vuln(&pool, "prod", "api", "critical").await;
+    enqueue_alerts(&pool, &c, &ch).await.unwrap();
+    let routes: Vec<String> = outbox(&pool).await.into_iter().map(|r| r.route).collect();
+    assert_eq!(routes, ["other"]);
+    // A row queued for it earlier still drains: it is not orphaned.
+    sqlx::query(
+        "INSERT INTO outbox (group_key, card, route, channel_type, next_attempt_at) \
+         VALUES ('alert|old', '{}', 's', 'slack', '2000-01-01')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(outbox::orphaned(&pool, &ch).await.unwrap().is_empty());
 }

@@ -114,7 +114,7 @@ Migration `0010_alert_channels.sql`:
   - `secrets` (BYTEA: AES-GCM ciphertext of a JSON map from field to
     value, with a random 96-bit nonce prepended)
   - `created_at`, `created_by`, `updated_at`, `updated_by`
-- The AAD is `alert_channels:<id>`, so a ciphertext cannot be moved to
+- The AAD is `alert_channels:<name>` (names are immutable), so a ciphertext cannot be moved to
   another row.
 - `outbox` gains `last_error_at TIMESTAMPTZ` and `last_error TEXT`
   (redacted).
