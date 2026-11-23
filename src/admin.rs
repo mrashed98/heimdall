@@ -20,7 +20,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/users/{id}/grants", get(grants).put(replace_grants))
         .route("/api/v1/audit", get(audit))
 }
-fn require_admin(p: &Principal) -> Result<(), ApiError> {
+pub(crate) fn require_admin(p: &Principal) -> Result<(), ApiError> {
     if p.can("admin", "*") {
         Ok(())
     } else {

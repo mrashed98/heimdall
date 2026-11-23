@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(auth::routes())
         .merge(crate::admin::routes())
+        .merge(crate::channels_api::routes())
         .merge(crate::local_auth::routes())
         .merge(crate::oidc::routes())
         .merge(ingest::api::routes())

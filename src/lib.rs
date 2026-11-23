@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 pub mod admin;
 pub mod auth;
+mod channels_api;
 pub mod client;
 pub mod config;
 pub mod db;
