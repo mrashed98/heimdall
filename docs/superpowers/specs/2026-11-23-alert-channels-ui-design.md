@@ -212,19 +212,111 @@ Findings go out as grouped alerts to every channel that covers their realm.
  sec-slack     Slack       prod       critical      yes     failed 10m ago ⚠  UI       [Test] [Edit] [⋯]
 ```
 
-- **Add channel:** the admin picks a type (Teams, Slack, Discord, Telegram,
-  PagerDuty, Alertmanager, Email, Webhook), then fills in one form per type.
-  The form has the common fields (name, realms multi-select, minimum
-  severity, digest) plus the type's fields.
-- **Secret inputs** are password fields. When editing, they show "Saved ·
-  Replace" instead of a value.
-- **Config rows** have no Edit or Delete. A tooltip says "Defined in
-  heimdall.yaml", and missing env vars are listed by name.
+#### The list
+
+Configured channels are shown as one table, with an "Add channel ▾" type
+menu at the top right.
+
+- References: Unity's
+  [Project integrations](https://mobbin.com/screens/7e0bfd6c-d380-4ce9-ad4a-6261d14a6667)
+  table with its "New integration ▾" menu, Apollo's
+  [Connected integrations](https://mobbin.com/screens/e4e07047-5579-43e7-87f4-b61a25df1e46)
+  table, and Claude's
+  [Connectors](https://mobbin.com/screens/e6ade293-ed67-4901-8d3c-4196c31b842e)
+  list with per-row actions and a ⋯ menu.
+- A catalog of type cards, as in Rox and Unity's notification cards, does
+  not fit here. Heimdall has several channels of the same type, each with
+  its own realms and severity, and a card per type cannot show that.
+- Row actions:
+  - **Test** on every row.
+  - **Edit** and a **⋯ menu** (Delete) on UI rows only.
+- **Config rows** have no Edit or Delete. A "config" badge has the tooltip
+  "Defined in heimdall.yaml", and missing env vars are listed by name.
+  No reference covers this mix of read-only and editable rows; it is my
+  judgement.
+
+#### Adding and editing
+
+Adding and editing happen in a dialog, one form per type:
+
+- **Common fields:** name, realms (multi-select), minimum severity, digest
+  on/off.
+- **Type fields:** the fields of that type.
+- **Primary button:** "Create channel" or "Save changes".
+- References: Unity's
+  [New Slack integration](https://mobbin.com/screens/46e8bd72-fee2-4bfe-8a45-d556b0680f6d)
+  dialog opened from the type menu, Toggl Track's
+  [Create new Webhook](https://mobbin.com/screens/ddc1263f-be44-4873-a46f-cb6bce066567)
+  dialog (name, URL and optional secret in one short form), and Typeform's
+  [Edit webhook](https://mobbin.com/screens/f5e51d62-c65d-42d5-913a-aaf89b2b1f74)
+  dialog.
+- **No new dependency:** the console has no dialog yet, so add a `Dialog`
+  component to `web/src/lib/ui` built on the native `<dialog>` with
+  `showModal()`. That provides focus trapping, Escape to close and the
+  backdrop.
+
+#### Secret fields
+
+A secret is write-only once saved.
+
+- **While typing:** a password input with a Show toggle. References:
+  Typeform's [Secret](https://mobbin.com/screens/f5e51d62-c65d-42d5-913a-aaf89b2b1f74)
+  field with Show, and Gumloop's
+  [secret fields](https://mobbin.com/screens/fdaa2674-3bc0-463a-b007-9887d73be003)
+  with an eye toggle.
+- **After saving:** a masked "•••••••• Saved" value with **Replace**,
+  plus **Remove** for optional secrets.
+  - Reference: Fireflies'
+    [API key and webhook secret](https://mobbin.com/screens/b9680340-94f9-42ad-8145-1c998862a228),
+    a masked field with a reset control.
+  - **Replace** opens an empty input.
+  - **Remove** sends `null` (see PATCH).
+- **Warning:** a line under the field says the value cannot be shown
+  again. Reference: Oyster's
+  [OAuth credentials](https://mobbin.com/screens/7caec408-5ca7-47c0-b032-08eeb1139295)
+  ("you won't be able to view the plain text again").
+- **Avoided:** GitLab's
+  [webhook form](https://mobbin.com/screens/626ad662-f333-4f24-aec1-aab61b154dd3)
+  warns "Secret token will be cleared on save unless token is updated".
+  Here, an untouched field always keeps the stored secret.
+
+#### Webhook signing secret
+
+The webhook signing secret gets a **Generate** button.
+
+- It fills the field in the browser with 32 random bytes in hex, using
+  `crypto.getRandomValues`, and shows the value with a Copy button.
+- The admin pastes it into the receiving system before saving, because it
+  cannot be shown afterwards.
+- References: Toggl Track ("If left empty, a secure secret will be
+  generated for you"), Hashnode's
+  [Create new webhook](https://mobbin.com/screens/bed62517-0f83-49a1-ba6c-d16b73f84a8e)
+  with copy and regenerate controls, and Whereby's
+  [Add a new webhook](https://mobbin.com/screens/70863d84-511c-453d-aac3-fbe964955e09)
+  with a prefilled secret.
+
+#### Delete
+
+Delete lives in the ⋯ menu.
+
+- It opens a confirmation that says what will stop: "Alerts for these
+  realms will no longer go to this channel. N queued alerts will be
+  discarded."
+- Reference: Typeform's
+  [Edit webhook](https://mobbin.com/screens/f5e51d62-c65d-42d5-913a-aaf89b2b1f74),
+  whose delete section explains what will no longer be delivered.
+
+#### Other states
+
 - **Key not set:** the list shows the config channels and a notice in
-  place of the Add button.
+  place of the Add menu.
 - **Empty state:** keeps the mockup's wording ("None yet. Findings stay
-  pending and go out as grouped alerts once a channel exists.") and offers
-  the type buttons.
+  pending and go out as grouped alerts once a channel exists."). The type
+  buttons open the add dialog for that type.
+  - References: Plain's
+    [Notifications](https://mobbin.com/screens/d07d62bb-eddb-47fa-b3f1-11b5b110b0bd)
+    empty state with a set-up button, and Churnkey's
+    [Integrations](https://mobbin.com/screens/68423b71-08ac-460f-abe4-2f38b438b433).
 
 ## Left to the builder
 
