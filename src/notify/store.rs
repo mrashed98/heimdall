@@ -339,14 +339,15 @@ pub async fn update(
     let row = row.ok_or(StoreError::NotFound)?;
     // The stored secrets must be opened to merge them.
     let key = key.ok_or(StoreError::NoKey)?;
-    let old: BTreeMap<String, String> = match &row.secrets {
-        Some(sealed) => key
-            .open(&aad(&row.name), sealed)
-            .ok()
-            .and_then(|plain| serde_json::from_slice(&plain).ok())
-            .ok_or_else(|| invalid("stored secrets cannot be read with the current key"))?,
-        None => BTreeMap::new(),
-    };
+    // Secrets sealed under another key are unreadable: treat them as absent,
+    // so the admin recovers by re-entering them (validation then requires
+    // every required secret in the patch) and the row is resealed.
+    let old: BTreeMap<String, String> = row
+        .secrets
+        .as_ref()
+        .and_then(|sealed| key.open(&aad(&row.name), sealed).ok())
+        .and_then(|plain| serde_json::from_slice(&plain).ok())
+        .unwrap_or_default();
     let fields = secret_fields(&row.kind)
         .ok_or_else(|| invalid(format!("unknown channel type `{}`", row.kind)))?;
     let mut secrets = old.clone();
@@ -635,6 +636,52 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
         assert_eq!(stored(&pool, id).await, before);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn patch_recovers_unreadable_secrets(pool: PgPool) {
+        let cfg = cfg();
+        let a = key();
+        let b = SecretKey::parse(&STANDARD.encode([9u8; 32])).unwrap();
+        let id = create(
+            &pool,
+            &cfg,
+            Some(&a),
+            "alice",
+            &new(json!({"type":"slack","name":"s","min_severity":"high",
+                "secrets":{"webhook":"https://hooks.example/x"}})),
+        )
+        .await
+        .unwrap();
+        let before = stored(&pool, id).await;
+        let err = update(
+            &pool,
+            &cfg,
+            Some(&b),
+            "bob",
+            id,
+            &patch(json!({"min_severity":"critical"})),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
+        assert_eq!(stored(&pool, id).await, before);
+        update(
+            &pool,
+            &cfg,
+            Some(&b),
+            "bob",
+            id,
+            &patch(json!({"secrets":{"webhook":"https://hooks.example/new"}})),
+        )
+        .await
+        .unwrap();
+        let (sealed, names) = stored(&pool, id).await;
+        assert_eq!(names, ["webhook"]);
+        assert_eq!(
+            opened(&b, "s", &sealed.unwrap()),
+            json!({"webhook":"https://hooks.example/new"})
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
