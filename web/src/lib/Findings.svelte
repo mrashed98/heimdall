@@ -1,60 +1,77 @@
 <script lang="ts">
- import { onMount } from 'svelte';
- import { api, type Grant } from './api';
- import { epssLabel, findingsUrl, validateOath, canEdit, advisoryLinks, defaultFilters, sortFromSearch, sortUrl, type Filters } from './findings';
- import SeverityBadge from './components/SeverityBadge.svelte';
- import Table from './components/Table.svelte';
- import Skeleton from './components/Skeleton.svelte';
- import RetryState from './components/RetryState.svelte';
- import EmptyState from './components/EmptyState.svelte';
- let { realms, grants }: { realms:string[]; grants:Grant[] } = $props();
- type Finding = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; epss?:number; epss_percentile?:number; ref_id:string|null; severity:string; status:string; opened_at:string; details:Record<string, unknown> };
- type Oath = { id:number; kind:string; reason:string; status:string; created_by:string; created_at:string; expires_at:string|null; review_at:string|null };
- type Detail = { summary:string|null; aliases:string[]; scores:Record<string, number>|null; epss?:number|null; epss_percentile?:number|null; fixed:Record<string,string[]>|null; name_key:string|null; version:string|null; affected:{service:string; digest:string|null; image:string|null}[]; oaths:Oath[] };
- let filters = $state<Filters>({...defaultFilters, ...sortFromSearch(location.search)});
- onMount(() => {
-  history.replaceState({}, '', sortUrl(location.href, filters.sort, filters.order));
-  const syncSort = () => { Object.assign(filters, sortFromSearch(location.search)); filters.offset=0; };
-  window.addEventListener('popstate', syncSort); return () => window.removeEventListener('popstate', syncSort);
- });
- let rows = $state<Finding[]>([]); let selected = $state<Finding|null>(null); let detail = $state<Detail|null>(null);
- let loading=$state(true), failed=$state(false), detailLoading=$state(false), detailFailed=$state(false), revision=$state(0), detailRevision=$state(0);
- let affectedOffset=$state(0), oathsOffset=$state(0);
- let kind=$state('snooze'), until=$state(''), reason=$state(''), allRealms=$state(false), error=$state(''), busy=$state(false);
- let url=$derived(findingsUrl(filters, realms));
- $effect(() => { realms.join(','); filters.offset=0; selected=null; });
- $effect(() => { const target=url; revision; let active=true; loading=true; failed=false; api<Finding[]>(target).then(data=>{if(active){rows=data;loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}}); return ()=>{active=false}; });
- $effect(() => { const id=selected?.id; const ao=affectedOffset, oo=oathsOffset; detailRevision; if(!id){detail=null;return;} let active=true; detailLoading=true;detailFailed=false; detail=null; api<Detail>(`/api/v1/findings/${id}?affected_offset=${ao}&oaths_offset=${oo}`).then(data=>{if(active){detail=data;detailLoading=false;}}).catch(()=>{if(active){detailFailed=true;detailLoading=false;}}); return ()=>{active=false}; });
- function changeFilter(){filters.offset=0; selected=null;}
- function sort(field:string){if(filters.sort===field) filters.order=filters.order==='asc'?'desc':'asc'; else {filters.sort=field;filters.order='asc';} filters.offset=0; history.pushState({}, '', sortUrl(location.href, filters.sort, filters.order));}
- function sortState(field:string): 'ascending'|'descending'|'none' {return filters.sort===field ? (filters.order==='asc'?'ascending':'descending') : 'none';}
- async function submit(e:SubmitEvent){e.preventDefault(); if(!selected) return; error=validateOath(kind,until,reason,allRealms,grants); if(error)return; busy=true; try {const result=await api<{warning:string|null}>('/api/v1/oaths',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({advisory_id:selected.ref_id,purl:selected.purl,service:selected.service,realm:allRealms?'':selected.realm,all_realms:allRealms,kind,reason,until:until||null})}); reason='';until='';allRealms=false;error=result.warning ?? '';revision++;detailRevision++;} catch {error='Could not take this oath. Check the details and try again.';} finally {busy=false;} }
+  import { onMount, untrack, type Snippet } from 'svelte';
+  import { api } from './api';
+  import { defaultFilters, initialFilters, filtersSearch, findingsUrl, packageLabel, rowTitle, views, viewFilters, type Filters } from './findings';
+  import { EmptyState, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, Select, Skeleton, SubNav } from './ui';
+  type Row = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; epss?:number; epss_percentile?:number; ref_id:string|null; severity:string; opened_at:string; summary?:string; fix?:string; details:Record<string, unknown> };
+  let { realms, navigate, realmPicker }: { realms:string[]; navigate:(to:string)=>void; realmPicker:Snippet } = $props();
+
+  function viewFromSearch(search: string) { const id = new URLSearchParams(search).get('view') ?? 'feed'; return views.some(v => v.id === id) ? id : 'feed'; }
+  let view = $state(viewFromSearch(location.search));
+  // Filters live in the URL (so Back from a finding restores them); a view's preset fills keys the URL leaves out.
+  let filters = $state<Filters>(initialFilters(location.search));
+  let rows = $state<Row[]>([]); let loading = $state(true); let failed = $state(false); let revision = $state(0);
+  let url = $derived(findingsUrl(filters, realms));
+  let current = $derived(views.find(v => v.id === view)!);
+
+  onMount(() => {
+    const sync = () => { view = viewFromSearch(location.search); filters = initialFilters(location.search); };
+    window.addEventListener('popstate', sync); return () => window.removeEventListener('popstate', sync);
+  });
+  let realmKey = untrack(() => realms.join(','));
+  $effect(() => { const key = realms.join(','); if (key !== realmKey) { realmKey = key; filters.offset = 0; } });
+  $effect(() => { const s = filtersSearch(filters, location.search); if (s !== location.search) history.replaceState({}, '', location.pathname + s); });
+  $effect(() => { const target = url; revision; let active = true; loading = true; failed = false; api<Row[]>(target).then(d => { if (active) { rows = d; loading = false; } }).catch(() => { if (active) { failed = true; loading = false; } }); return () => { active = false; }; });
+
+  function viewHref(id: string) { const q = new URLSearchParams(); if (realms.length) q.set('realms', realms.join(',')); if (id !== 'feed') q.set('view', id); return '/findings' + (q.size ? `?${q}` : ''); }
+  function pickView(e: MouseEvent, id: string) { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); view = id; filters = { ...defaultFilters, ...viewFilters(id) }; history.pushState({}, '', viewHref(id)); }
+  function changeFilter() { filters.offset = 0; }
+  function changeSort(value: string) { const [sort, order] = value.split(':'); filters.sort = sort!; filters.order = order!; filters.offset = 0; }
+  function open(e: MouseEvent, id: number) { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); navigate(`/findings/${id}${location.search}`); }
+  const sorts = [['severity:desc', 'Severity'], ['epss:desc', 'Exploit likelihood'], ['opened_at:desc', 'Newest'], ['opened_at:asc', 'Oldest'], ['advisory:asc', 'Advisory'], ['service:asc', 'Service']];
 </script>
-<div class="findings-page">
- <div class="filters" aria-label="Finding filters">
-  <label>Search<input type="search" placeholder="Advisory, alias or package" bind:value={filters.search} oninput={changeFilter} /></label>
-  <label>Severity<select bind:value={filters.severity} onchange={changeFilter}><option value="">All severities</option>{#each ['critical','high','medium','low','unknown'] as value}<option {value}>{value}</option>{/each}</select></label>
-  <label>Kind<select bind:value={filters.kind} onchange={changeFilter}><option value="">All kinds</option>{#each ['vuln','fixavailable','majorrelease','oathexpired','eol','k8scve','releasenotecve'] as value}<option {value}>{value}</option>{/each}</select></label>
-  <label>Service<input placeholder="Service name" bind:value={filters.service} oninput={changeFilter} /></label>
-  <label>Fix<select bind:value={filters.has_fix} onchange={changeFilter}><option value="">Any</option><option value="true">Available</option><option value="false">Not available</option></select></label>
-  <label>Status<select bind:value={filters.view_status} onchange={changeFilter}><option value="open">Open</option><option value="snoozed">Snoozed</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></select></label>
- </div>
- <p class="hint">Use the Realms switcher above to filter by realm.</p>
- <div class:with-detail={selected} class="workspace"><section aria-label="Findings list">
- {#if loading}<Skeleton />{:else if failed}<RetryState retry={() => revision++} />{:else if !rows.length}<EmptyState message="No findings match these filters." />{:else}
- <Table label="Findings"><thead><tr>{#each [['advisory','Advisory'],['severity','Severity'],['epss','EPSS'],['kind','Kind'],['realm','Realm'],['service','Service'],['opened_at','Opened']] as [field,label]}{#if field==='severity'}<th>Package</th>{/if}<th aria-sort={sortState(field)}><button onclick={() => sort(field)}>{label} ↕</button></th>{/each}</tr></thead><tbody>{#each rows as row}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions --><tr onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}}><td><button class="row-link" onclick={() => {selected=row;affectedOffset=0;oathsOffset=0;error='';}} aria-label={`View ${row.ref_id ?? row.kind} in ${row.realm}`}>{row.ref_id ?? 'View finding'}</button></td><td class="mono">{row.component_name ? [row.component_name, row.component_version].filter(Boolean).join(' ') : '—'}</td><td><SeverityBadge severity={row.severity}/></td><td class="mono" title="Chance of exploitation in the next 30 days (FIRST EPSS)">{epssLabel(row.epss, row.epss_percentile)}</td><td>{row.kind}</td><td>{row.realm}</td><td>{row.service ?? '—'}</td><td>{row.opened_at.slice(0,10)}</td></tr>{/each}</tbody></Table>{/if}
- <div class="pagination"><button disabled={filters.offset===0 || loading} onclick={() => {filters.offset=Math.max(0,filters.offset-25);selected=null;}}>Previous</button><span>Rows {filters.offset+1}–{filters.offset+rows.length}</span><button disabled={rows.length<25 || loading} onclick={() => {filters.offset+=25;selected=null;}}>Next</button></div>
- </section>
- {#if selected}<aside aria-label="Finding detail"><div class="panel-head"><div><p class="kicker">FINDING / {selected.realm}</p><h2>{selected.ref_id ?? selected.kind}</h2></div><button aria-label="Close detail" onclick={() => selected=null}>×</button></div>
- {#if detailLoading}<Skeleton />{:else if detailFailed}<RetryState retry={() => detailRevision++}/>{:else if detail}
- <h3>{detail.summary || 'Advisory details unavailable'}</h3><SeverityBadge severity={selected.severity}/>
- <dl><dt>CVSS score</dt><dd>{detail.scores && Object.keys(detail.scores).length ? Object.entries(detail.scores).map(([source,score])=>`${source.toUpperCase()}: ${score}`).join(' · ') : 'Not recorded'}</dd><dt>CVSS vector</dt><dd>Not recorded</dd><dt>EPSS</dt><dd>{detail.epss == null ? 'Not scored' : `${epssLabel(detail.epss, detail.epss_percentile)}: chance of exploitation in the next 30 days`}</dd><dt>Aliases</dt><dd class="mono">{detail.aliases.join(', ') || 'None recorded'}</dd><dt>Component</dt><dd class="mono">{selected.purl ?? 'Not recorded'}</dd><dt>Installed version</dt><dd class="mono">{detail.version ?? 'Not recorded'}</dd><dt>Fixed versions</dt><dd class="mono">{(detail.name_key && detail.fixed?.[detail.name_key]?.join(', ')) || 'None recorded'}</dd></dl>
- {@const links = advisoryLinks([selected.ref_id ?? '', ...detail.aliases])}{#if links.length}<p class="links">{#each links as link}<a href={link.url} target="_blank" rel="noopener noreferrer">{link.id} ↗</a>{/each}</p>{/if}
- <h3>Affected services and images</h3>{#if detail.affected.length}<ul>{#each detail.affected as item}<li>{item.service}{#if item.image}<br/><span class="mono">{item.image}</span>{/if}{#if item.digest}<br/><span class="mono">{item.digest}</span>{/if}</li>{/each}</ul>{:else}<p>No inventory links recorded.</p>{/if}<div class="pagination"><button disabled={affectedOffset===0} onclick={() => affectedOffset=Math.max(0,affectedOffset-25)}>Previous services</button><button disabled={detail.affected.length<25} onclick={() => affectedOffset+=25}>Next services</button></div>
- <h3>Oaths: snoozed or ignored findings</h3>{#if detail.oaths.length}<ul>{#each detail.oaths as oath}<li><strong>{oath.kind} · {oath.status}</strong><br/>{oath.reason}<br/><small>{oath.created_by} · {oath.created_at.slice(0,10)}{oath.expires_at ? ` · expires ${oath.expires_at.slice(0,10)}` : ''}</small></li>{/each}</ul>{:else}<p>No oaths recorded for this finding.</p>{/if}<div class="pagination"><button disabled={oathsOffset===0} onclick={() => oathsOffset=Math.max(0,oathsOffset-25)}>Previous oaths</button><button disabled={detail.oaths.length<25} onclick={() => oathsOffset+=25}>Next oaths</button></div>
- {#if canEdit(grants, selected.realm) && selected.ref_id && selected.purl && selected.service}<form onsubmit={submit}><h3>Take an oath</h3><label>Decision<select bind:value={kind}><option value="snooze">Snooze</option><option value="ignore">Ignore</option></select></label><label>Expiry date {kind==='snooze'?'(required)':'(optional)'}<input type="date" bind:value={until}/></label><label>Reason<textarea bind:value={reason} rows="3"></textarea></label>{#if canEdit(grants,'*')}<label class="check"><input type="checkbox" bind:checked={allRealms}/> Apply to all realms</label>{/if}{#if error}<p role="alert">{error}</p>{/if}<button disabled={busy}>{busy ? 'Saving…' : 'Take oath'}</button></form>{/if}
- {/if}</aside>{/if}</div>
+
+<div class="findings">
+  <SubNav label="Finding views">
+    {#snippet header()}<Logo size={24} wordmark />{/snippet}
+    {#each ['Views', 'Watch'] as group}
+      <div class="group">{group}</div>
+      {#each views.filter(v => v.group === group) as v}<a class="link" href={viewHref(v.id)} aria-current={view === v.id ? 'page' : undefined} onclick={(e) => pickView(e, v.id)}>{v.label}</a>{/each}
+    {/each}
+  </SubNav>
+  <div class="feed">
+    <PageHeader title={current.label} description={current.group === 'Watch' ? 'What the watchers found for components you run' : 'Open vulnerabilities and risks across your realms'}>{#snippet actions()}{@render realmPicker()}{/snippet}</PageHeader>
+    <div class="filters" aria-label="Finding filters">
+      <div class="search"><Input label="Search" hideLabel type="search" placeholder="Search advisory, alias or package" bind:value={filters.search} oninput={changeFilter} /></div>
+      <Select label="Severity" hideLabel bind:value={filters.severity} onchange={changeFilter}><option value="">All severities</option><option value="critical,high">Critical & high</option>{#each ['critical', 'high', 'medium', 'low', 'unknown'] as s}<option value={s}>{s[0]!.toUpperCase() + s.slice(1)}</option>{/each}</Select>
+      <Select label="Kind" hideLabel bind:value={filters.kind} onchange={changeFilter}><option value="">All kinds</option>{#each [['vuln', 'Vulnerability'], ['fixavailable', 'Fix available'], ['k8scve', 'Kubernetes CVE'], ['majorrelease', 'Major release'], ['releasenotecve', 'CVE in release notes'], ['eol', 'End of life'], ['oathexpired', 'Oath expired']] as [value, label]}<option {value}>{label}</option>{/each}</Select>
+      <div class="service"><Input label="Service" hideLabel placeholder="Service" bind:value={filters.service} oninput={changeFilter} /></div>
+      <Select label="Fix" hideLabel bind:value={filters.has_fix} onchange={changeFilter}><option value="">Fix: any</option><option value="true">Fix available</option><option value="false">No fix yet</option></Select>
+      <Select label="Status" hideLabel bind:value={filters.view_status} onchange={changeFilter}><option value="open">Open</option><option value="snoozed">Snoozed</option><option value="ignored">Ignored</option><option value="resolved">Resolved</option></Select>
+      <Select label="Sort" hideLabel value={`${filters.sort}:${filters.order}`} onchange={(e) => changeSort(e.currentTarget.value)}>{#if !sorts.some(([v]) => v === `${filters.sort}:${filters.order}`)}<option value={`${filters.sort}:${filters.order}`}>Sort: {filters.sort} {filters.order}</option>{/if}{#each sorts as [value, label]}<option {value}>Sort: {label}</option>{/each}</Select>
+    </div>
+    <Panel flush>
+      <div class="head" aria-hidden="true"><span>Finding</span><span>Exploit likelihood</span><span>Severity</span></div>
+      {#if loading}<Skeleton rows={6} label="Loading findings" />
+      {:else if failed}<ErrorState retry={() => revision++} />
+      {:else if !rows.length}<EmptyState title="Nothing matches" body={filters.view_status === 'open' && view === 'feed' ? 'No open findings in these realms. All quiet at the Bifröst.' : 'No findings match these filters.'} />
+      {:else}
+        {#each rows as row (row.id)}
+          <IssueRow href={`/findings/${row.id}${location.search}`} onclick={(e) => open(e, row.id)} title={rowTitle(row)} sub={packageLabel(row)} fix={row.fix} meta={[row.ref_id ?? '', row.service ?? '', row.realm, `opened ${row.opened_at.slice(0, 10)}`]} epss={row.epss} epssPercentile={row.epss_percentile} severity={row.severity} />
+        {/each}
+      {/if}
+      {#if !failed}<Pagination offset={filters.offset} count={rows.length} {loading} change={(n) => { filters.offset = n; window.scrollTo(0, 0); }} />{/if}
+    </Panel>
+  </div>
 </div>
+
 <style>
- .findings-page{margin-top:2rem}.filters{display:flex;flex-wrap:wrap;gap:.8rem;align-items:end}.filters label,form label{display:grid;gap:.35rem;font-size:.8rem;font-weight:700}.filters label:first-child{flex:1 1 220px}select,textarea{color:var(--text);background:var(--page);border:1px solid var(--border);border-radius:6px;padding:.65rem;font:inherit}input,select{min-width:0}.hint,small{color:var(--muted);font-size:.8rem}.workspace{margin-top:1.5rem;display:grid;gap:2rem}.workspace.with-detail{grid-template-columns:minmax(0,1fr) minmax(300px,380px)}section,aside{min-width:0}.row-link{border:0;background:none;padding:0;color:var(--accent-high);font-family:var(--font-mono);text-align:left}.pagination{display:flex;align-items:center;gap:1rem;margin-top:1rem;font-size:.85rem}.pagination span{color:var(--muted)}aside{border-left:1px solid var(--border);padding-left:1.5rem;overflow-wrap:anywhere}.panel-head{display:flex;justify-content:space-between;gap:1rem}.panel-head h2{font:700 1.1rem var(--font-mono);margin:.25rem 0 1rem}.kicker{color:var(--accent-high);font-size:.7rem;letter-spacing:.1em;font-weight:700}h3{font-size:1rem;margin:1.5rem 0 .6rem}dl{display:grid;gap:.3rem;margin-top:1.5rem}dt{color:var(--muted);font-size:.8rem}dd{margin:0 0 .6rem}.mono{font-family:var(--font-mono);font-size:.85em}.links{display:flex;gap:.7rem;flex-wrap:wrap;font: .85rem var(--font-mono)}ul{padding-left:1.2rem}li{margin:.6rem 0}form{display:grid;gap:.8rem;border-top:1px solid var(--border);margin-top:1.5rem}form h3{margin-bottom:0}.check{display:flex;align-items:center;font-weight:400} @media(max-width:1100px){.workspace.with-detail{grid-template-columns:1fr}aside{border-left:0;border-top:1px solid var(--border);padding:1.5rem 0}}
+  .findings { display: flex; min-height: 100vh; }
+  .feed { flex: 1; min-width: 0; padding: 18px 24px 32px; }
+  .filters { display: flex; flex-wrap: wrap; gap: var(--s2); margin-bottom: var(--s3); align-items: end; }
+  .search { flex: 1 1 200px; } .service { flex: 0 1 130px; }
+  .head { display: grid; grid-template-columns: minmax(0, 1fr) 150px 92px; gap: var(--s4); padding: 8px var(--s4); background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: var(--text-xs); color: var(--muted); }
+  .head span:last-child { text-align: right; }
+  @media (max-width: 1000px) { .findings { flex-direction: column; } }
+  @media (max-width: 700px) { .feed { padding: var(--s4); } .head { display: none; } }
 </style>

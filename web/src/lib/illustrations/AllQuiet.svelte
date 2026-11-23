@@ -1,2 +1,2 @@
 <figure><svg viewBox="0 0 240 175" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 145 Q120 10 220 145 M55 145 Q120 50 185 145 M78 113 Q120 78 162 113 Q120 148 78 113 Z"/><circle cx="120" cy="113" r="9"/></svg><figcaption>All quiet at the Bifröst</figcaption></figure>
-<style>figure { margin: 0; color: var(--accent-high); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>
+<style>figure { margin: 0; color: var(--gold); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>

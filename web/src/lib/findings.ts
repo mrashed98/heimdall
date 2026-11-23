@@ -41,3 +41,73 @@ export function epssLabel(score?: number | null, percentile?: number | null): st
   const top = Math.max(1, Math.ceil((1 - percentile) * 100));
   return `${pct} (top ${top}%)`;
 }
+
+/** Saved views in the Findings sub-nav, each a preset of filters. */
+export const views: {id:string; label:string; group:'Views'|'Watch'; filters:Partial<Filters>}[] = [
+  {id:'feed', label:'Feed', group:'Views', filters:{}},
+  {id:'likely-exploited', label:'Likely exploited', group:'Views', filters:{sort:'epss', order:'desc'}},
+  {id:'fix', label:'Fix available', group:'Views', filters:{kind:'fixavailable'}},
+  {id:'crit-high', label:'Critical & high', group:'Views', filters:{severity:'critical,high'}},
+  {id:'k8s', label:'Kubernetes CVEs', group:'Views', filters:{kind:'k8scve'}},
+  {id:'major', label:'Major releases', group:'Watch', filters:{kind:'majorrelease'}},
+  {id:'notes', label:'CVEs in release notes', group:'Watch', filters:{kind:'releasenotecve'}},
+  {id:'eol', label:'End of life', group:'Watch', filters:{kind:'eol'}},
+];
+export function viewFilters(id: string): Partial<Filters> { return {...(views.find(v => v.id === id)?.filters ?? {})}; }
+
+type Labelled = {kind?:string; ref_id?:string|null; summary?:string|null; component_name?:string; component_version?:string; details?:Record<string, unknown>};
+export function packageLabel(row: Labelled): string { return [row.component_name, row.component_version].filter(Boolean).join(' '); }
+const str = (v: unknown) => typeof v === 'string' ? v : '';
+/** A purl target without its scheme and type: pkg:golang/golang.org/x/crypto -> golang.org/x/crypto. */
+function shortTarget(target: string): string { return target.replace(/^pkg:[^/]+\//, ''); }
+/** The headline of a feed row, readable for every finding kind. */
+export function rowTitle(row: Labelled): string {
+  const d = row.details ?? {}; const target = shortTarget(str(d.target)); const version = str(d.version);
+  switch (row.kind) {
+    case 'majorrelease': return target ? `${target} ${version} is out`.replace('  ', ' ') : row.ref_id ?? 'New major release';
+    case 'releasenotecve': return target ? `${target} ${version} fixes ${/^CVE-/i.test(str(d.id)) ? str(d.id) : row.ref_id ?? str(d.id)}` : row.ref_id ?? 'Release fixes a CVE';
+    case 'eol': return `${target || row.ref_id || 'A component'} reaches end of life${str(d.eol) ? ` on ${str(d.eol)}` : ''}`;
+    case 'oathexpired': return `Oath expired for ${row.ref_id ?? 'a finding'}`;
+    default: return row.summary || row.ref_id || row.kind || 'Finding';
+  }
+}
+
+/** Numeric, dot-wise version compare; a pre-release (1.0.0-rc1) sorts before its release. */
+export function compareVersions(a: string, b: string): number {
+  const split = (v: string) => { const [core, pre] = v.replace(/^v/i, '').split(/-(.*)/s); return { parts: core!.split('.').map(n => parseInt(n, 10) || 0), pre: pre ?? '' }; };
+  const x = split(a), y = split(b);
+  for (let i = 0; i < Math.max(x.parts.length, y.parts.length); i++) { const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0); if (d) return d; }
+  if (x.pre === y.pre) return 0;
+  return !x.pre ? 1 : !y.pre ? -1 : x.pre.localeCompare(y.pre, undefined, {numeric: true});
+}
+/** The lowest fixed version above the installed one (any when unknown), or null. */
+export function nearestFix(fixed: string[], installed: string | null | undefined): string | null {
+  const above = fixed.filter(v => !installed || compareVersions(v, installed) > 0).sort(compareVersions);
+  return above[0] ?? null;
+}
+
+const urlKeys = ['severity', 'kind', 'service', 'has_fix', 'view_status', 'search'] as const;
+/** Filters as they sit in the page URL, so Back from a finding restores them. */
+export function filtersFromSearch(search: string): Filters {
+  const q = new URLSearchParams(search); const f: Filters = { ...defaultFilters, ...sortFromSearch(search) };
+  for (const k of urlKeys) { const v = q.get(k); if (v) f[k] = v; }
+  if (!['open', 'snoozed', 'ignored', 'resolved'].includes(f.view_status)) f.view_status = 'open';
+  const offset = Number(q.get('offset')); f.offset = Number.isInteger(offset) && offset > 0 ? offset : 0;
+  return f;
+}
+/** The page query with these filters written in (defaults left out), other params kept. */
+export function filtersSearch(f: Filters, search: string): string {
+  const q = new URLSearchParams(search);
+  // A key the active view presets is always written, even when cleared, so the preset does not come back on reload.
+  const preset = viewFilters(q.get('view') ?? 'feed');
+  for (const k of urlKeys) { if (k in preset || (f[k] && f[k] !== defaultFilters[k])) q.set(k, f[k]); else q.delete(k); }
+  for (const [k, v] of [['sort', f.sort], ['order', f.order]] as const) { if (k in preset || v !== defaultFilters[k]) q.set(k, v); else q.delete(k); }
+  if (f.offset) q.set('offset', String(f.offset)); else q.delete('offset');
+  return q.toString() ? `?${q}` : '';
+}
+/** The feed's filters: the URL's, with the view's preset filling keys the URL leaves out. */
+export function initialFilters(search: string): Filters {
+  const f = filtersFromSearch(search); const q = new URLSearchParams(search);
+  for (const [k, v] of Object.entries(viewFilters(q.get('view') ?? 'feed'))) if (!q.has(k)) (f as Record<string, unknown>)[k] = v;
+  return f;
+}

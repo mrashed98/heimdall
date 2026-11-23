@@ -7,6 +7,8 @@ import starlightLinksValidator from 'starlight-links-validator';
 export default defineConfig({
   site: 'https://mrashed98.github.io',
   base: '/heimdall',
+  // The home page is a landing page; /docs goes straight into the docs.
+  redirects: { '/docs': '/heimdall/getting-started/what-is-heimdall/' },
   integrations: [
     starlight({
       title: 'Heimdall',
@@ -25,7 +27,7 @@ export default defineConfig({
         baseUrl: 'https://github.com/mrashed98/heimdall/edit/main/docs/site/',
       },
       lastUpdated: true,
-      customCss: ['./src/styles/custom.css'],
+      customCss: ['@fontsource/cinzel/latin-700.css', './src/styles/custom.css'],
       plugins: [starlightLinksValidator()],
       sidebar: [
         {

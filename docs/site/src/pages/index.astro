@@ -1,0 +1,119 @@
+---
+// Landing page. Docs pages keep their URLs; /docs redirects into them.
+import '@fontsource/cinzel/latin-700.css';
+import '../styles/landing.css';
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const doc = (path: string) => `${base}/${path}/`;
+const repo = 'https://github.com/mrashed98/heimdall';
+const helm = `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M9.2 15.2C5.2 12.4 4.4 6.4 7.6 2c-.2 4.2 1 7.6 4.4 9.8z" fill="#d6a24e"/><path d="M22.8 15.2c4-2.8 4.8-8.8 1.6-13.2.2 4.2-1 7.6-4.4 9.8z" fill="#d6a24e"/><path d="M9 15c0-4.2 3.1-6.6 7-6.6s7 2.4 7 6.6v4.6c0 4.2-3 7.2-7 9.4-4-2.2-7-5.2-7-9.4z" fill="#1d2930" stroke="#d6a24e" stroke-width="1.4"/><path d="M11.4 17.6h9.2" stroke="#f2cd85" stroke-width="1.8" stroke-linecap="round"/><path d="M16 18.6v6" stroke="#d6a24e" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+const tiles = [['Kubernetes', 'K8s'], ['Helm', 'Helm'], ['Argo CD', 'Argo'], ['GitHub', 'GH'], ['OSV', 'OSV'], ['NVD', 'NVD'], ['EPSS', 'EPSS'], ['OCI registries', 'OCI']];
+const checks = ['Know every component running in your cluster', 'Hear about CVEs, releases and end of life early', 'Stop vulnerable builds at the CI gate', 'Accept a risk on purpose, with a date that brings it back'];
+const steps = [
+  ['01', 'Sight', 'Reads your cluster (pods, nodes, Helm labels, Argo CD apps), image SBOMs, SBOMs from CI and components you declare.', 'concepts/architecture'],
+  ['02', 'Watchers', 'Polls GitHub, endoflife.date, OCI and Helm registries, Terraform, the Go proxy and npm for releases and end of support.', 'guides/watching-infrastructure'],
+  ['03', 'Gjallarhorn', 'One alert per advisory or release in Teams, Slack, PagerDuty or email, sent once, plus a weekly digest.', 'guides/alert-channels'],
+  ['04', 'Hofund', 'The CI gate fails a build on vulnerabilities, with the same data as the server and exit codes you can trust.', 'guides/ci-gate'],
+  ['05', 'Oaths', 'Snooze or ignore one advisory for one service, with a reason, an owner and a date that brings it back.', 'guides/oaths'],
+];
+const next = [['New here?', 'What is Heimdall?', 'getting-started/what-is-heimdall'], ['Try it locally', 'Quick start', 'getting-started/quick-start'], ['Running Kubernetes?', 'Install on Kubernetes', 'getting-started/kubernetes'], ['Blocking builds in CI?', 'Set up the CI gate', 'guides/ci-gate']];
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Heimdall: the watcher at the Bifröst</title>
+  <meta name="description" content="A lightweight Dependency-Track alternative in Rust: know what your Kubernetes cluster runs, hear about vulnerabilities and releases early, and stop bad builds at the bridge." />
+  <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href={`${base}/`}><span class="helm" set:html={helm} /><span class="word">HEIMDALL</span></a>
+    <nav aria-label="Site">
+      <a href="#how">How it works</a>
+      <a class="here" href={doc('getting-started/what-is-heimdall')}>Docs</a>
+      <a href={doc('reference/configuration')}>Reference</a>
+      <a href={doc('project/changelog')}>Changelog</a>
+      <a class="btn secondary sm" href={repo}>GitHub</a>
+    </nav>
+  </header>
+  <main>
+    <section class="hero">
+      <div class="wrap split">
+        <div class="copy">
+          <a class="badge" href={doc('concepts/matching') + '#epss'}>EPSS exploit scores on every finding ›</a>
+          <h1>Keep watch over everything your cluster runs</h1>
+          <p class="lead">A lightweight Dependency-Track alternative in Rust. One binary, one Deployment and the Postgres you already run.</p>
+          <ul class="checks">{checks.map(c => <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4.5 4.5L19 7" /></svg>{c}</li>)}</ul>
+          <div class="ctas"><a class="btn primary" href={doc('getting-started/what-is-heimdall')}>Read the docs</a><a class="btn secondary" href={doc('getting-started/quick-start')}>Quick start</a></div>
+          <pre class="install"><span>$</span> helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace</pre>
+        </div>
+        <div class="diagram" role="img" aria-label="Kubernetes, Helm, Argo CD, GitHub, OSV, NVD, EPSS and OCI registries feed Heimdall">
+          <div class="tiles">{tiles.map(([name, abbr]) => <div class="tile"><span>{abbr}</span><small>{name}</small></div>)}</div>
+          <svg class="wires" viewBox="0 0 420 110" aria-hidden="true"><g><path d="M45 0 C45 60 210 50 210 105" /><path d="M150 0 C150 60 210 50 210 105" /><path d="M270 0 C270 60 210 50 210 105" /><path d="M375 0 C375 60 210 50 210 105" /></g><circle cx="210" cy="105" r="4" /></svg>
+          <div class="core"><span class="helm big" set:html={helm} /></div>
+          <span class="word">HEIMDALL</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="how" class="band">
+      <div class="wrap split">
+        <div class="steps">
+          <span class="tag">How it works</span>
+          <h2>From what you run to what you fix, in five steps</h2>
+          {steps.map(([n, title, body, path], i) => (
+            <details class="step" open={i === 0}>
+              <summary><span>{title}</span><span class="n">{n}</span></summary>
+              <p>{body} <a href={doc(path)}>Read more →</a></p>
+            </details>
+          ))}
+        </div>
+        <div class="frame">
+          <div class="window">
+            <div class="window-head"><b>Inventory</b><span>example data</span></div>
+            <div class="grid-row head"><span>Service</span><span>Image</span><span>Components</span><span>Findings</span></div>
+            {[['search-indexer', 'search:1.8.2', '3', '144', 'crit'], ['payments-api', 'payments:4.2.0', '41', '37', 'high'], ['web-frontend', 'web:2.11.0', '212', '18', 'med'], ['auth-gateway', 'gateway:0.9.4', '27', '0', 'ok']].map(([s, img, c, f, tone]) => (
+              <div class="grid-row"><b>{s}</b><code>{img}</code><span>{c}</span><b class={tone}>{f}</b></div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>Built to be acted on</h2>
+        <p class="sub">Every output is something a person or a pipeline can act on: a failing build with the fixed version, an alert with the fix, a risk accepted until a date.</p>
+        <div class="cards">
+          <article class="card">
+            <div class="demo"><pre class="term">&gt;&gt; Hofund - CI gate
+SEVERITY  ADVISORY             VERSION -&gt; FIXED
+<span class="crit">CRITICAL</span>  GHSA-jf85-cpcp-j695  4.17.11 -&gt; <span class="ok">4.17.21</span>
+<span class="high">HIGH    </span>  CVE-2024-45337       0.21.0 -&gt; <span class="ok">0.31.0</span>  #7
+findings: 1 critical, 1 high
+verdict: <b class="crit">FAIL</b> (checked against osv)</pre></div>
+            <div class="body"><h3>Hofund, the CI gate</h3><p><code>heimdall gate</code> fails a build on vulnerabilities, with the same data as the server and exit codes your pipeline can trust.</p><a href={doc('guides/ci-gate')}>Set up the gate →</a></div>
+          </article>
+          <article class="card">
+            <div class="demo"><div class="alert"><div class="row"><b>Remote code execution in Log4j</b><span class="crit sev">CRITICAL</span></div><code>CVE-2021-44228 · log4j-core 2.14.1 → <span class="ok">2.15.0</span></code><span class="muted">search-indexer · homelab · EPSS 94.4%</span><div class="chips"><span>Open in Heimdall</span><span>Take an oath</span></div></div></div>
+            <div class="body"><h3>Gjallarhorn, the alarm</h3><p>One alert per advisory or release in Teams, Slack, PagerDuty or email, sent once, plus a weekly digest.</p><a href={doc('guides/alert-channels')}>Alert channels →</a></div>
+          </article>
+          <article class="card">
+            <div class="demo"><div class="alert plain"><div class="row"><b>Snooze · GHSA-3xgq-45jj-v275</b><span class="pill">active</span></div><span class="muted">cross-spawn in web-frontend · dev realm</span><span>“Only reachable from the build step; upgrading with the next Node bump.”</span><code class="muted">until 2026-12-15 · by an editor</code></div></div>
+            <div class="body"><h3>Oaths</h3><p>Snooze or ignore one advisory for one service, with a reason, an owner and a date that brings it back.</p><a href={doc('guides/oaths')}>How oaths work →</a></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="band last">
+      <div class="wrap next">{next.map(([q, label, path]) => <a class="next-card" href={doc(path)}><b>{q}</b><span>{label} →</span></a>)}</div>
+    </section>
+  </main>
+  <footer class="foot">
+    <span class="brand small"><span class="helm" set:html={helm} />Heimdall · Apache-2.0</span>
+    <nav aria-label="Footer"><a href={doc('getting-started/what-is-heimdall')}>Docs</a><a href={repo}>GitHub</a><a href={doc('project/security')}>Security</a><a href={doc('project/changelog')}>Changelog</a></nav>
+  </footer>
+</body>
+</html>

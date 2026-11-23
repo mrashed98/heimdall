@@ -1,0 +1,19 @@
+<script lang="ts">
+  // The horned helmet. Colours are the brand's own, so this file is exempt from the token rule.
+  let { size = 32, wordmark = false }: { size?: number; wordmark?: boolean } = $props();
+</script>
+<span class="logo">
+  <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+    <path d="M9.2 15.2C5.2 12.4 4.4 6.4 7.6 2c-.2 4.2 1 7.6 4.4 9.8z" fill="#d6a24e" />
+    <path d="M22.8 15.2c4-2.8 4.8-8.8 1.6-13.2.2 4.2-1 7.6-4.4 9.8z" fill="#d6a24e" />
+    <path d="M9 15c0-4.2 3.1-6.6 7-6.6s7 2.4 7 6.6v4.6c0 4.2-3 7.2-7 9.4-4-2.2-7-5.2-7-9.4z" fill="#1d2930" stroke="#d6a24e" stroke-width="1.4" />
+    <path d="M11.4 17.6h9.2" stroke="#f2cd85" stroke-width="1.8" stroke-linecap="round" />
+    <path d="M16 18.6v6" stroke="#d6a24e" stroke-width="1.4" stroke-linecap="round" />
+  </svg>
+  {#if wordmark}<span class="word" style:font-size="{Math.round(size * 0.56)}px">HEIMDALL</span>{/if}
+</span>
+<style>
+  .logo { display: inline-flex; align-items: center; gap: .45em; }
+  svg { flex: none; }
+  .word { font-family: var(--font-display); font-weight: 700; letter-spacing: .14em; color: var(--gold); }
+</style>

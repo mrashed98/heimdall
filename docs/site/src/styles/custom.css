@@ -1,35 +1,33 @@
-/* Bifröst-inspired accents. Contrast checked against both backgrounds:
-   dark: #a5b4fc on #17181c (about 9:1); light: #3b4fc4 on #ffffff (about 7:1). */
+/* Starlight in the Heimdall palette (same tokens as the console). */
 :root {
-  --sl-color-accent-low: #1e2452;
-  --sl-color-accent: #5b6ee1;
-  --sl-color-accent-high: #b8c3fd;
-  --sl-color-white: #ffffff;
+  --sl-color-accent-low: #2a2216;
+  --sl-color-accent: #d6a24e;
+  --sl-color-accent-high: #f2cd85;
+  --sl-color-white: #ece6d8;
+  --sl-color-gray-1: #e0dacd;
+  --sl-color-gray-2: #b9bfc2;
+  --sl-color-gray-3: #98a6ad;
+  --sl-color-gray-4: #5b6a72;
+  --sl-color-gray-5: #223038;
+  --sl-color-gray-6: #11181c;
+  --sl-color-black: #0b1013;
 }
-
 :root[data-theme='light'] {
-  --sl-color-accent-low: #dde3ff;
-  --sl-color-accent: #3b4fc4;
-  --sl-color-accent-high: #2a398f;
+  --sl-color-accent-low: #f4e7cf;
+  --sl-color-accent: #8a5d14;
+  --sl-color-accent-high: #6e4a0f;
+  --sl-color-white: #1d2930;
+  --sl-color-gray-1: #24323a;
+  --sl-color-gray-2: #3d4c54;
+  --sl-color-gray-3: #5b6a72;
+  --sl-color-gray-4: #8b979d;
+  --sl-color-gray-5: #ddd4c3;
+  --sl-color-gray-6: #f1ece1;
+  --sl-color-gray-7: #f6f3ec;
+  --sl-color-black: #ffffff;
 }
-
-/* A thin rainbow line under the site header: the Bifröst. */
-header.header {
-  border-bottom: 0;
-  position: relative;
-}
-header.header::after {
-  content: '';
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 3px;
-  background: linear-gradient(
-    90deg,
-    #e5484d,
-    #f5a524,
-    #30a46c,
-    #3e63dd,
-    #8e4ec6
-  );
-  opacity: 0.85;
-}
+/* The wordmark, as in the console. */
+.site-title { text-transform: uppercase; font-family: 'Cinzel', Georgia, serif; font-weight: 700; letter-spacing: .14em; color: var(--sl-color-accent); }
+/* A thin Bifröst line under the site header: sky, gold, ember. */
+header.header { border-bottom: 0; position: relative; }
+header.header::after { content: ''; position: absolute; inset: auto 0 0 0; height: 2px; background: linear-gradient(90deg, #74aac0, #d6a24e, #f2872f); opacity: .9; }

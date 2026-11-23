@@ -1,2 +1,0 @@
-<figure><svg viewBox="0 0 240 175" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 155 Q120 10 220 155 M38 155 Q120 35 202 155 M95 155 V78 L120 55 L145 78 V155 M88 78 H152 M110 155 V120 H130 V155 M104 91 H112 M128 91 H136"/></svg><figcaption>The watcher at the Bifröst</figcaption></figure>
-<style>figure { margin: 0; color: var(--accent-high); } svg { width: min(100%, 280px); display: block; } figcaption { color: var(--muted); }</style>
