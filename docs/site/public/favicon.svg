@@ -1,16 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Heimdall">
-  <defs>
-    <linearGradient id="bifrost" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#e5484d"/>
-      <stop offset="0.25" stop-color="#f5a524"/>
-      <stop offset="0.5" stop-color="#30a46c"/>
-      <stop offset="0.75" stop-color="#3e63dd"/>
-      <stop offset="1" stop-color="#8e4ec6"/>
-    </linearGradient>
-  </defs>
-  <!-- the Bifrost arc -->
-  <path d="M6 44 A26 26 0 0 1 58 44" fill="none" stroke="url(#bifrost)" stroke-width="5" stroke-linecap="round"/>
-  <!-- the watching eye -->
-  <path d="M14 46 Q32 26 50 46 Q32 62 14 46 Z" fill="none" stroke="#5b6ee1" stroke-width="3.5" stroke-linejoin="round"/>
-  <circle cx="32" cy="46" r="5.5" fill="#5b6ee1"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path d="M9.2 15.2C5.2 12.4 4.4 6.4 7.6 2c-.2 4.2 1 7.6 4.4 9.8z" fill="#d6a24e"/><path d="M22.8 15.2c4-2.8 4.8-8.8 1.6-13.2.2 4.2-1 7.6-4.4 9.8z" fill="#d6a24e"/><path d="M9 15c0-4.2 3.1-6.6 7-6.6s7 2.4 7 6.6v4.6c0 4.2-3 7.2-7 9.4-4-2.2-7-5.2-7-9.4z" fill="#1d2930" stroke="#d6a24e" stroke-width="1.4"/><path d="M11.4 17.6h9.2" stroke="#f2cd85" stroke-width="1.8" stroke-linecap="round"/><path d="M16 18.6v6" stroke="#d6a24e" stroke-width="1.4" stroke-linecap="round"/></svg>
