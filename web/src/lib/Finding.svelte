@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError, type Grant } from './api';
-  import { advisoryLinks, canEdit, epssLabel, nearestFix, rowTitle, validateOath } from './findings';
+  import { advisoryLinks, canEdit, compareVersions, epssLabel, nearestFix, rowTitle, validateOath } from './findings';
   import { epssTone } from './ui/format';
   import { Badge, Button, EmptyState, EpssBar, ErrorState, Icon, Input, PageHeader, Panel, Pill, Select, Skeleton, Stat } from './ui';
   type Oath = { id: number; kind: string; reason: string; status: string; created_by: string; created_at: string; expires_at: string | null; review_at: string | null };
@@ -19,9 +19,11 @@
     return () => { active = false; };
   });
 
-  let pkg = $derived(detail?.purl ? detail.purl.replace(/^pkg:[^/]+\//, '').replace(/@.*$/, '') : null);
+  let target = $derived(typeof detail?.details?.target === 'string' ? detail.details.target as string : null);
+  let pkg = $derived(detail?.purl ? detail.purl.replace(/^pkg:[^/]+\//, '').replace(/@.*$/, '') : target ? target.replace(/^pkg:[^/]+\//, '') : null);
   let fixedList = $derived((detail?.name_key && detail.fixed?.[detail.name_key]) || []);
-  let fix = $derived(nearestFix(fixedList, detail?.version));
+  // A release-note CVE is fixed by the release whose notes name it.
+  let fix = $derived(nearestFix(fixedList, detail?.version) ?? (detail?.kind === 'releasenotecve' && typeof detail.details.version === 'string' ? detail.details.version : null));
   let cvss = $derived(detail?.scores && Object.keys(detail.scores).length ? Math.max(...Object.values(detail.scores)) : null);
   let links = $derived(detail ? advisoryLinks([detail.ref_id ?? '', ...detail.aliases]) : []);
   let editable = $derived(!!detail && canEdit(grants, detail.realm) && !!detail.ref_id && !!detail.purl && !!detail.service);
@@ -51,10 +53,9 @@
       {#snippet actions()}
         {#if editable}<Button variant="primary" href="#oath">Take an oath</Button>{/if}
         {#if fix && pkg}<Button onclick={copyFix}><Icon name="copy" size={16} />{copied ? 'Copied' : 'Copy fix'}</Button>{/if}
-        {#each links as link}<Button href={link.url} size="sm" variant="ghost" target="_blank" rel="noopener noreferrer">{link.id} <Icon name="external" size={14} /></Button>{/each}
       {/snippet}
     </PageHeader>
-    <div class="tags"><Badge severity={detail.severity} /><Pill>{detail.kind}</Pill><Pill>{detail.status}</Pill>{#if detail.service}<Pill>{detail.service}</Pill>{/if}<Pill>{detail.realm}</Pill></div>
+    <div class="tags"><Badge severity={detail.severity} /><Pill>{detail.kind}</Pill><Pill>{detail.status}</Pill>{#if detail.service}<Pill>{detail.service}</Pill>{/if}<Pill>{detail.realm}</Pill>{#if links.length}<span class="links">{#each links as link}<a href={link.url} target="_blank" rel="noopener noreferrer">{link.id} <Icon name="external" size={13} /></a>{/each}</span>{/if}</div>
     <div class="stats">
       <Stat label="Exploit likelihood (EPSS)" value={detail.epss == null ? '—' : epssLabel(detail.epss, detail.epss_percentile)} tone={epssTone(detail.epss) === 'critical' ? 'critical' : 'default'} />
       <Stat label="CVSS" value={cvss ?? '—'} />
@@ -65,14 +66,15 @@
       <div class="main">
         <Panel title="Highlights" flush>
           <dl>
-            <dt>Package</dt><dd class="mono">{pkg ?? '—'}</dd>
-            <dt>Installed</dt><dd class="mono">{detail.version ?? '—'}</dd>
-            <dt>Fixed versions</dt><dd class="mono">{fixedList.join(', ') || 'None recorded'}</dd>
-            <dt>Advisory</dt><dd class="mono">{detail.ref_id ?? '—'}</dd>
-            <dt>Aliases</dt><dd class="mono">{detail.aliases.join(', ') || 'None recorded'}</dd>
-            <dt>CVSS by source</dt><dd>{detail.scores && Object.keys(detail.scores).length ? Object.entries(detail.scores).map(([s, v]) => `${s.toUpperCase()} ${v}`).join(' · ') : 'Not recorded'}</dd>
-            <dt>Opened</dt><dd>{detail.opened_at.slice(0, 10)}</dd>
-            <dt>Package URL</dt><dd class="mono">{detail.purl ?? '—'}</dd>
+            {#snippet row(label: string, value: string | null | undefined)}<dt>{label}</dt><dd>{#if value}<span class="mono">{value}</span>{:else}<span class="muted">Not recorded</span>{/if}</dd>{/snippet}
+            {@render row('Package', pkg)}
+            {@render row('Installed', detail.version)}
+            {@render row('Fixed versions', fixedList.length ? [...fixedList].sort(compareVersions).join(', ') : fix)}
+            {@render row('Advisory', detail.ref_id)}
+            {@render row('Aliases', detail.aliases.join(', '))}
+            {@render row('CVSS by source', detail.scores && Object.keys(detail.scores).length ? Object.entries(detail.scores).map(([s, v]) => `${s.toUpperCase()} ${v}`).join(' · ') : null)}
+            {@render row('Opened', detail.opened_at.slice(0, 10))}
+            {@render row('Package URL', detail.purl)}
           </dl>
         </Panel>
         <Panel title="Where it runs" flush>
@@ -84,12 +86,12 @@
       </div>
       <aside class="rail" aria-label="Fix and decisions">
         <Panel title="Fix">
-          {#if fix}<p class="fix"><span class="mono">{pkg} {detail.version}</span> → <strong class="mono">{fix}</strong></p><p class="muted small">The lowest fixed version above what you run.</p>
+          {#if fix}<p class="fix">{#if pkg}<span class="mono">{pkg}{detail.version ? ` ${detail.version}` : ''}</span><span class="arrow">→</span>{/if}<strong class="mono">{fix}</strong></p><p class="muted small">{detail.version ? 'The lowest fixed version above what you run.' : 'The release that fixes this advisory.'}</p>
           {:else}<p class="muted">No fixed version recorded yet.</p>{/if}
         </Panel>
         <Panel title="Exploit likelihood">
-          <EpssBar score={detail.epss} percentile={detail.epss_percentile} />
-          <p class="muted small">{detail.epss == null ? 'No EPSS score for this advisory.' : 'Chance of exploitation in the next 30 days, from FIRST EPSS.'}</p>
+          {#if detail.epss != null}<EpssBar score={detail.epss} percentile={detail.epss_percentile} /><p class="muted small">Chance of exploitation in the next 30 days, from FIRST EPSS.</p>
+          {:else}<p class="muted">No EPSS score for this advisory.</p>{/if}
         </Panel>
         {#if editable}
           <div id="oath"><Panel title="Take an oath">
@@ -114,11 +116,13 @@
 </div>
 
 <style>
-  .page { padding: 18px 24px 32px; display: grid; gap: var(--s4); }
+  .page { padding: 18px 24px 32px; display: grid; gap: var(--s4); max-width: 1440px; }
   .page :global(.ph) { margin-bottom: 0; }
   .tags { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; }
+  .links { display: inline-flex; gap: var(--s3); margin-left: var(--s2); font-size: var(--text-sm); font-family: var(--font-mono); }
+  .links a { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); } .links a:hover { color: var(--gold); }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s3); }
-  .stats :global(.value) { font-size: 20px; }
+  .stats :global(.value) { font-size: var(--text-xl); }
   .grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: var(--s4); align-items: start; }
   .main, .rail { display: grid; gap: var(--s4); min-width: 0; }
   dl { display: grid; grid-template-columns: 160px minmax(0, 1fr); margin: 0; }
@@ -132,7 +136,7 @@
   .dim, .muted { color: var(--muted); } .small { font-size: var(--text-sm); }
   .pad { padding: var(--s3) var(--s4); margin: 0; }
   .pager { display: flex; gap: var(--s2); justify-content: flex-end; padding: var(--s2) var(--s4); }
-  .fix { font-size: var(--text-lg); margin: 0 0 4px; } .fix strong { color: var(--ok); }
+  .fix { font-size: var(--text-lg); margin: 0 0 4px; } .fix strong { color: var(--ok); } .arrow { margin: 0 .6ch; color: var(--muted); }
   p { margin: 6px 0 0; }
   form { display: grid; gap: var(--s3); }
   .field { display: grid; gap: 6px; font-size: var(--text-sm); font-weight: 600; color: var(--muted); }
