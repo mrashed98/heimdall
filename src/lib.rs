@@ -20,6 +20,7 @@ pub mod purl;
 pub mod retention;
 pub mod scan_images;
 pub mod scheduler;
+pub mod secrets;
 pub mod server;
 pub mod telemetry;
 pub mod ui;
@@ -45,6 +46,10 @@ pub struct AppState {
     pub oidc_rate:
         Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<std::time::Instant>>>>,
     pub oidc_metadata: Arc<tokio::sync::RwLock<Option<openidconnect::core::CoreProviderMetadata>>>,
+    /// Seals UI-entered channel secrets; `None` when `HEIMDALL_SECRET_KEY`
+    /// is unset or malformed.
+    pub secret_key: Option<Arc<secrets::SecretKey>>,
+    pub channel_tests: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 impl AppState {
@@ -70,6 +75,8 @@ impl AppState {
             grants_cache: Arc::new(local_auth::GrantCache::new(ttl)),
             oidc_rate: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             oidc_metadata: Arc::new(tokio::sync::RwLock::new(None)),
+            secret_key: secrets::SecretKey::from_env().map(Arc::new),
+            channel_tests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
