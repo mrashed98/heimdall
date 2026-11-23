@@ -18,6 +18,7 @@ pub mod channels;
 pub mod digest;
 mod group;
 pub mod outbox;
+pub mod store;
 pub mod teams;
 
 #[cfg(test)]
