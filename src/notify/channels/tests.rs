@@ -506,6 +506,40 @@ fn request_reads_secret_from_map_before_env() {
     assert_eq!(missing_env(&c, &empty).as_deref(), Some("ui:s:webhook"));
 }
 
+#[test]
+fn request_redacts_every_secret_it_uses() {
+    let url = "https://hooks.example/services/T/B/secret-path";
+    let secrets = Secrets::from([
+        ("ui:x:url".to_string(), url.to_string()),
+        ("ui:x:secret".to_string(), "hmac-key".to_string()),
+    ]);
+    for (yaml, want) in [
+        (
+            "{type: teams, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: slack, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: discord, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: webhook, name: x, url_env: 'ui:x:url', secret_env: 'ui:x:secret', min_severity: high}",
+            vec![url, "hmac-key"],
+        ),
+    ] {
+        let c = ch(yaml);
+        let Request::Http { redact, .. } = request(&c, &json!({}), now(), &secrets).unwrap() else {
+            panic!("not http")
+        };
+        assert_eq!(redact, want, "{yaml}");
+        assert_eq!(secret_values(&c, &secrets).len(), want.len(), "{yaml}");
+    }
+}
+
 // ---- delivery ----
 
 fn now() -> DateTime<Utc> {

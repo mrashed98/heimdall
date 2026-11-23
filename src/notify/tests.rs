@@ -1405,3 +1405,316 @@ async fn ui_channel_with_only_removed_realms_stays_listed(pool: PgPool) {
     .unwrap();
     assert!(outbox::orphaned(&pool, &ch).await.unwrap().is_empty());
 }
+
+// ---- delivery errors, health, delete ----
+
+/// `last_error_at` and `last_error` of the oldest row.
+async fn last_error(pool: &PgPool) -> (Option<DateTime<Utc>>, Option<String>) {
+    sqlx::query_as("SELECT last_error_at, last_error FROM outbox ORDER BY id LIMIT 1")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// One due row for channel `route` of type `kind`.
+async fn queued_for(pool: &PgPool, route: &str, kind: &str, card: Value) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO outbox (group_key, card, route, channel_type, next_attempt_at) \
+         VALUES ('alert|x', $1, $2, $3, '2000-01-01') RETURNING id",
+    )
+    .bind(card)
+    .bind(route)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn key_of(route: &str, kind: &str) -> (String, String) {
+    (route.to_string(), kind.to_string())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn retry_records_last_error(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let c = with_webhook("NOTIFY_HOOK_ERR503", &server);
+    queued(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+        .await
+        .unwrap();
+    assert_eq!(r.retry, 1);
+    let (at, err) = last_error(&pool).await;
+    assert_eq!(at, Some(now()));
+    let err = err.expect("last_error is set");
+    assert!(err.contains("503"), "{err}");
+    let h = outbox::health(&pool).await.unwrap();
+    let all = &h[&key_of("all", "teams")];
+    assert_eq!(all.queued, 1);
+    assert!(all.failing.as_deref().unwrap_or_default().contains("503"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rejected_records_last_error(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    let c = with_webhook("NOTIFY_HOOK_ERR400", &server);
+    queued(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+        .await
+        .unwrap();
+    assert_eq!(r.failed, 1);
+    let (at, err) = last_error(&pool).await;
+    assert_eq!(at, Some(now()));
+    assert!(err.unwrap_or_default().contains("400"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn last_error_is_redacted(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let c = ui_cfg("");
+    let k = key(7);
+    let token = "123456:AAH-telegram-TOKEN";
+    let new: store::NewChannel = serde_json::from_value(json!({
+        "type": "telegram", "name": "tg", "min_severity": "high",
+        "settings": {"chat_id": "1", "api_url": server.uri()},
+        "secrets": {"bot_token": token},
+    }))
+    .unwrap();
+    store::create(&pool, &c, Some(&k), "alice", &new)
+        .await
+        .unwrap();
+    let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
+    queued_for(
+        &pool,
+        "tg",
+        "telegram",
+        json!({"chat_id": "1", "text": "x"}),
+    )
+    .await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+        .await
+        .unwrap();
+    assert_eq!(r.retry, 1);
+    let err = last_error(&pool).await.1.expect("last_error is set");
+    assert!(err.contains("500"), "{err}");
+    assert!(!err.contains(token) && !err.contains("TOKEN"), "{err}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn last_error_never_holds_a_webhook_url(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let c = ui_cfg("");
+    let k = key(7);
+    // Nothing listens on port 9: the send fails with a network error.
+    let down = "http://127.0.0.1:9/services/T0/B0/SLACK-DOWN-SECRET";
+    let failing = format!("{}/services/T0/B0/SLACK-500-SECRET", server.uri());
+    ui_slack(&pool, &c, &k, "down", down).await;
+    ui_slack(&pool, &c, &k, "five", &failing).await;
+    let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
+    queued_for(&pool, "down", "slack", json!({})).await;
+    queued_for(&pool, "five", "slack", json!({})).await;
+    for _ in 0..2 {
+        let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+            .await
+            .unwrap();
+        assert_eq!(r.retry, 1);
+    }
+    let errs: Vec<Option<String>> = sqlx::query_scalar("SELECT last_error FROM outbox")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(errs.len(), 2);
+    for err in errs {
+        let err = err.expect("last_error is set");
+        assert!(
+            !err.contains("SECRET") && !err.contains("/services/"),
+            "{err}"
+        );
+    }
+    // The test send redacts the same way.
+    let mailer = outbox_mailer(&ch);
+    let d = outbox::Delivery {
+        http: &reqwest::Client::new(),
+        mailer: &mailer,
+    };
+    let s = ch.list.iter().find(|x| x.name() == "down").unwrap();
+    let err = outbox::send_now(&d, s, &ch.secrets, now())
+        .await
+        .unwrap_err();
+    assert!(
+        !err.contains("SECRET") && !err.contains("/services/"),
+        "{err}"
+    );
+}
+
+fn outbox_mailer(ch: &Channels) -> channels::email::SmtpMailer<'_> {
+    channels::email::SmtpMailer {
+        secrets: &ch.secrets,
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn health_reports_queue_and_last_sent(pool: PgPool) {
+    let sent = now() - Duration::hours(2);
+    sqlx::query(
+        "INSERT INTO outbox (group_key, card, route, channel_type, sent_at) VALUES \
+         ('a', '{}', 'x', 'slack', $1), \
+         ('b', '{\"failed\": true}', 'x', 'slack', $2), \
+         ('c', '{}', 'x', 'slack', NULL), \
+         ('d', '{}', 'x', 'slack', NULL), \
+         ('e', '{}', 'x', 'discord', NULL)",
+    )
+    .bind(sent)
+    .bind(now())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let h = outbox::health(&pool).await.unwrap();
+    let x = &h[&key_of("x", "slack")];
+    assert_eq!(x.queued, 2);
+    // The rejected row is not a send.
+    assert_eq!(x.last_sent_at, Some(sent));
+    assert_eq!(x.failing, None);
+    let d = &h[&key_of("x", "discord")];
+    assert_eq!((d.queued, d.last_sent_at), (1, None));
+    // Failing reflects the oldest queued row only.
+    sqlx::query("UPDATE outbox SET last_error = 'boom' WHERE group_key = 'd'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox::health(&pool).await.unwrap()[&key_of("x", "slack")].failing,
+        None
+    );
+    sqlx::query("UPDATE outbox SET last_error = 'down' WHERE group_key = 'c'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox::health(&pool).await.unwrap()[&key_of("x", "slack")]
+            .failing
+            .as_deref(),
+        Some("down")
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn delete_discards_queued_rows(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let c = ui_cfg("");
+    let k = key(7);
+    let url = format!("{}/hook", server.uri());
+    ui_slack(&pool, &c, &k, "s", &url).await;
+    let id = store::load(&pool, &c, Some(&k)).await.unwrap().ui[0].id;
+    queued_for(&pool, "s", "slack", json!({})).await;
+    queued_for(&pool, "s", "slack", json!({})).await;
+    // Another type under the same name is not this channel's.
+    queued_for(&pool, "s", "discord", json!({})).await;
+    assert_eq!(store::queued_count(&pool, id).await.unwrap(), 2);
+    assert_eq!(store::delete(&pool, "bob", id).await.unwrap(), 2);
+    type Discarded = (String, Option<DateTime<Utc>>, Value, Option<String>);
+    let rows: Vec<Discarded> =
+        sqlx::query_as("SELECT channel_type, sent_at, card, last_error FROM outbox ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for (kind, sent_at, card, err) in &rows[..2] {
+        assert_eq!(kind, "slack");
+        assert!(sent_at.is_some());
+        assert_eq!(card["failed"], json!(true));
+        assert_eq!(err.as_deref(), Some("channel deleted"));
+    }
+    assert!(rows[2].1.is_none(), "the discord row is untouched");
+    let (action, detail): (String, Value) =
+        sqlx::query_as("SELECT action, detail FROM audit_log WHERE action = 'channel_deleted'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(action, "channel_deleted");
+    assert_eq!(
+        detail,
+        json!({"name": "s", "type": "slack", "discarded": 2})
+    );
+    assert!(matches!(
+        store::delete(&pool, "bob", id).await,
+        Err(store::StoreError::NotFound)
+    ));
+    assert!(matches!(
+        store::queued_count(&pool, id).await,
+        Err(store::StoreError::NotFound)
+    ));
+
+    // Recreated with the same name and type, it inherits nothing.
+    ui_slack(&pool, &c, &k, "s", &url).await;
+    let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
+    make_due(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+        .await
+        .unwrap();
+    assert_eq!(r.sent, 0);
+    server.verify().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn send_now_reports_errors(pool: PgPool) {
+    let bad = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&bad)
+        .await;
+    let good = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&good)
+        .await;
+    let c = ui_cfg("");
+    let k = key(7);
+    ui_slack(&pool, &c, &k, "bad", &format!("{}/hook", bad.uri())).await;
+    ui_slack(&pool, &c, &k, "good", &format!("{}/hook", good.uri())).await;
+    let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
+    let mailer = outbox_mailer(&ch);
+    let http = reqwest::Client::new();
+    let d = outbox::Delivery {
+        http: &http,
+        mailer: &mailer,
+    };
+    let err = outbox::send_now(&d, &ch.list[0], &ch.secrets, now())
+        .await
+        .unwrap_err();
+    assert!(err.contains("400"), "{err}");
+    outbox::send_now(&d, &ch.list[1], &ch.secrets, now())
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&good.received_requests().await.unwrap()[0].body).unwrap();
+    assert!(body.to_string().contains("Heimdall test alert"), "{body}");
+    assert!(
+        body.to_string()
+            .contains("This is a test from Heimdall. No action is needed."),
+        "{body}"
+    );
+    // Not through the outbox.
+    assert!(outbox(&pool).await.is_empty());
+    good.verify().await;
+}

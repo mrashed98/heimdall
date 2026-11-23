@@ -50,10 +50,8 @@ pub(crate) fn secret(var: &str, secrets: &Secrets) -> Option<String> {
         .or_else(|| std::env::var(var).ok().filter(|v| !v.is_empty()))
 }
 
-/// The first required secret of `ch` that is not set, if any (its `*_env`
-/// value: a variable name or a UI ref). A channel with one missing keeps its
-/// rows queued.
-pub fn missing_env(ch: &ChannelConfig, secrets: &Secrets) -> Option<String> {
+/// The `*_env` values (variable names or UI refs) of every secret `ch` uses.
+fn secret_vars(ch: &ChannelConfig) -> Vec<&str> {
     let mut required: Vec<&str> = Vec::new();
     match ch {
         ChannelConfig::Teams(c) => required.push(&c.webhook_env),
@@ -75,9 +73,24 @@ pub fn missing_env(ch: &ChannelConfig, secrets: &Secrets) -> Option<String> {
         }
     }
     required
+}
+
+/// The first required secret of `ch` that is not set, if any (its `*_env`
+/// value: a variable name or a UI ref). A channel with one missing keeps its
+/// rows queued.
+pub fn missing_env(ch: &ChannelConfig, secrets: &Secrets) -> Option<String> {
+    secret_vars(ch)
         .into_iter()
         .find(|v| secret(v, secrets).is_none())
         .map(str::to_string)
+}
+
+/// The values of every secret of `ch` that is set, to redact from errors.
+pub fn secret_values(ch: &ChannelConfig, secrets: &Secrets) -> Vec<String> {
+    secret_vars(ch)
+        .into_iter()
+        .filter_map(|v| secret(v, secrets))
+        .collect()
 }
 
 /// HTTP authentication added to a request (never put in the URL).
@@ -95,8 +108,9 @@ pub enum Request {
         body: Vec<u8>,
         headers: Vec<(&'static str, String)>,
         auth: Option<HttpAuth>,
-        /// Secrets that must never appear in a logged error (the Telegram
-        /// token sits in the URL path).
+        /// Secrets that must never appear in a logged or stored error: the
+        /// URL when it is the credential (Teams, Slack, Discord, webhook),
+        /// the Telegram token in the URL path, keys and passwords.
         redact: Vec<String>,
     },
     Email(Box<lettre::Message>),
@@ -113,12 +127,13 @@ pub fn request(
 ) -> anyhow::Result<Request> {
     let need = |var: &str| secret(var, secrets).ok_or_else(|| anyhow::anyhow!("{var} is not set"));
     let json = |v: &Value| serde_json::to_vec(v).expect("JSON values serialize");
+    // The URL itself is the credential.
     let http = |url: String, body: Vec<u8>| Request::Http {
+        redact: vec![url.clone()],
         url,
         body,
         headers: Vec::new(),
         auth: None,
-        redact: Vec::new(),
     };
     Ok(match ch {
         ChannelConfig::Teams(c) => http(need(&c.webhook_env)?, json(payload)),
@@ -159,31 +174,39 @@ pub fn request(
                 (_, _, Some(t)) => Some(HttpAuth::Bearer(need(t)?)),
                 _ => None,
             };
+            let redact = match &auth {
+                Some(HttpAuth::Basic(u, p)) => vec![u.clone(), p.clone()],
+                Some(HttpAuth::Bearer(t)) => vec![t.clone()],
+                None => Vec::new(),
+            };
             Request::Http {
                 url: format!("{}/api/v2/alerts", c.url.trim_end_matches('/')),
                 body: json(&alerts),
                 headers: Vec::new(),
                 auth,
-                redact: Vec::new(),
+                redact,
             }
         }
         ChannelConfig::Webhook(c) => {
             let body = json(payload);
             let ts = now.timestamp();
             let mut headers = vec![(webhook::TIMESTAMP_HEADER, ts.to_string())];
+            let url = need(&c.url_env)?;
+            let mut redact = vec![url.clone()];
             if let Some(var) = &c.secret_env {
                 let secret = need(var)?;
                 headers.push((
                     webhook::SIGNATURE_HEADER,
                     webhook::signature(&secret, ts, &body),
                 ));
+                redact.push(secret);
             }
             Request::Http {
-                url: need(&c.url_env)?,
+                url,
                 body,
                 headers,
                 auth: None,
-                redact: Vec::new(),
+                redact,
             }
         }
         ChannelConfig::Email(c) => Request::Email(Box::new(email::message(c, payload)?)),

@@ -283,6 +283,19 @@ impl Alert {
         a
     }
 
+    /// The fixed alert a channel's test send delivers, shaped like the
+    /// first-run summary.
+    pub fn test() -> Alert {
+        let mut a = Alert::new(
+            "test|heimdall".to_string(),
+            AlertKind::FirstRun,
+            "Heimdall test alert".to_string(),
+            Severity::Unknown,
+        );
+        a.notes = vec!["This is a test from Heimdall. No action is needed.".to_string()];
+        a
+    }
+
     /// The weekly digest for one channel: the sections with only the rows it
     /// receives; empty sections are left out.
     pub fn digest(today: &str, sections: Vec<Section>) -> Alert {

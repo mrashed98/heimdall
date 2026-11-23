@@ -652,6 +652,61 @@ pub async fn update(
     Ok(())
 }
 
+/// The name and type of channel `id`, locked until the transaction ends.
+async fn name_and_type(conn: &mut PgConnection, id: i64) -> Result<(String, String), StoreError> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT name, type FROM alert_channels WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?;
+    row.ok_or(StoreError::NotFound)
+}
+
+/// How many alerts are queued for channel `id`: what deleting it discards.
+pub async fn queued_count(pool: &PgPool, id: i64) -> Result<i64, StoreError> {
+    let mut tx = pool.begin().await?;
+    let (name, kind) = name_and_type(&mut tx, id).await?;
+    let n = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
+    )
+    .bind(&name)
+    .bind(&kind)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(n)
+}
+
+/// Delete channel `id` and discard its queued alerts in the same
+/// transaction, so a later channel with the same name and type never sends
+/// them. Needs no key. Returns how many alerts were discarded.
+pub async fn delete(pool: &PgPool, actor: &str, id: i64) -> Result<u64, StoreError> {
+    let mut tx = pool.begin().await?;
+    let (name, kind) = name_and_type(&mut tx, id).await?;
+    sqlx::query("DELETE FROM alert_channels WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let discarded = sqlx::query(
+        "UPDATE outbox SET sent_at=now(), card=jsonb_set(card,'{failed}','true'), \
+         last_error='channel deleted' \
+         WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
+    )
+    .bind(&name)
+    .bind(&kind)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    crate::admin::record(
+        &mut tx,
+        actor,
+        "channel_deleted",
+        json!({"name": name, "type": kind, "discarded": discarded}),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(discarded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
