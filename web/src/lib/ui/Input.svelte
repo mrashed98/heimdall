@@ -1,8 +1,8 @@
 <script lang="ts">
   import type { HTMLInputAttributes } from 'svelte/elements';
   type Props = HTMLInputAttributes & { label: string; hint?: string; error?: string; hideLabel?: boolean; value?: string };
-  let { label, hint, error, hideLabel = false, value = $bindable(''), ...rest }: Props = $props();
-  const uid = $props.id();
+  let { label, hint, error, hideLabel = false, value = $bindable(''), id, ...rest }: Props = $props();
+  const generated = $props.id(); const uid = $derived(id ?? generated);
 </script>
 <div class="field"><label for={uid}><span class:sr={hideLabel}>{label}</span></label><input id={uid} bind:value aria-invalid={error ? true : undefined} aria-describedby={[hint && `${uid}-hint`, error && `${uid}-error`].filter(Boolean).join(' ') || undefined} {...rest} />{#if hint}<small id="{uid}-hint">{hint}</small>{/if}{#if error}<small id="{uid}-error" class="error" role="alert">{error}</small>{/if}</div>
 <style>
