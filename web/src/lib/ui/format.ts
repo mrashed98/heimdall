@@ -1,9 +1,11 @@
-export type Tone = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
-const tones: Tone[] = ['critical', 'high', 'medium', 'low'];
+/** Every severity, worst first. The one list: the rest of the app imports it. */
+export const SEVERITIES = ['critical', 'high', 'medium', 'low', 'unknown'] as const;
+export type Severity = typeof SEVERITIES[number];
+export type Tone = Severity;
 /** Any severity string to one of the five design-system tones. */
 export function severityTone(severity: string | null | undefined): Tone {
   const s = (severity ?? '').toLowerCase() as Tone;
-  return tones.includes(s) ? s : 'unknown';
+  return SEVERITIES.includes(s) ? s : 'unknown';
 }
 /** EPSS score (0 to 1) as a CSS width. */
 export function epssWidth(score: number | null | undefined): string {

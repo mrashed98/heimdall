@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from './api';
-  import { severities, statusUrl, type Severity } from './overview';
+  import { statusUrl } from './overview';
+  import { SEVERITIES as severities, type Severity } from './ui/format';
   import { packageLabel, rowTitle } from './findings';
   import { Badge, DataTable, EmptyState, EpssBar, ErrorState, Panel, Skeleton, Stat } from './ui';
   let { realms, navigate }: { realms: string[]; navigate: (to: string) => void } = $props();

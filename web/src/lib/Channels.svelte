@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, ApiError } from './api';
   import { CHANNEL_TYPES, channelBody, generateSecret, healthLabel, patchBody, type ChannelCommon, type ChannelHealth, type Field, type SecretChange } from './channels';
-  import { Badge, Button, DataTable, Dialog, EmptyState, ErrorState, Input, Menu, Panel, Pill, Select, Skeleton } from './ui';
+  import { Badge, Button, DataTable, Dialog, EmptyState, ErrorState, Input, Menu, Panel, Pill, SEVERITIES, Select, Skeleton } from './ui';
 
   type Channel = Omit<ChannelCommon, 'digest'> & {
     id: number | null;
@@ -32,7 +32,6 @@
   type TestResult = { pending: boolean; text: string; failed?: boolean };
 
   const endpoint = '/api/v1/channels';
-  const severities = ['critical', 'high', 'medium', 'low'];
   const stateLabels = {
     ok: '',
     key_missing: 'Key missing',
@@ -314,7 +313,7 @@
       </fieldset>
       <div class="form-pair">
         <Select label="Minimum severity" bind:value={draft.severity}>
-          {#each severities as severity}<option value={severity}>{severity}</option>{/each}
+          {#each SEVERITIES as severity}<option value={severity}>{severity}</option>{/each}
         </Select>
         <Select label="Digest" bind:value={draft.digest} onchange={() => draft.digestChanged = true}>
           <option value="default">Default</option><option value="on">On</option><option value="off">Off</option>
