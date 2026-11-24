@@ -24,7 +24,7 @@ describe('channel forms', () => {
       type: 'slack', name: 'ops', realms: ['prod'], min_severity: 'high', digest: null, settings: {}, secrets: { webhook: 'https://x' },
     });
     const tg = channelBody('telegram', { bot_token: 't', chat_id: ' 42 ', api_url: '  ' }, common) as Record<string, unknown>;
-    expect(tg.settings).toEqual({ chat_id: ' 42 ' });
+    expect(tg.settings).toEqual({ chat_id: '42' });
     expect(tg.secrets).toEqual({ bot_token: 't' });
   });
   it('channelBody parses numbers and lists', () => {
@@ -32,6 +32,15 @@ describe('channel forms', () => {
     expect(body.settings).toEqual({ host: 'smtp', port: 587, security: 'starttls', from: 'h@x', to: ['a@x', 'b@x', 'c@x'] });
     expect(body.secrets).toEqual({});
   });
+  it('trims outer whitespace from SMTP hosts on create', () => {
+    const body = channelBody('email', { host: ' \tsmtp.example.com\n ' }, common);
+    expect(body).toHaveProperty('settings', { host: 'smtp.example.com' });
+  });
+  it('trims outer whitespace from SMTP hosts on patch', () => {
+    const body = patchBody('email', { host: ' \tsmtp.example.com\n ' }, {}, common);
+    expect(body).toHaveProperty('settings', { host: 'smtp.example.com' });
+  });
+
   const createEmail = (port: string | number | undefined) => channelBody('email', { port }, common);
   const patchEmail = (port: string | number | undefined) => patchBody('email', { port }, {}, common);
 

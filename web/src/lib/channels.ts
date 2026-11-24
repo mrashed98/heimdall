@@ -57,8 +57,8 @@ function setting(field: Field, raw: FieldValue): SettingValue | undefined {
     if (!Number.isFinite(value)) throw new TypeError(`${field.label} must be a finite number.`);
     return value;
   }
-  const value = textValue(field, raw);
-  if (!value?.trim()) return undefined;
+  const value = textValue(field, raw)?.trim();
+  if (!value) return undefined;
   if (field.kind === 'list') {
     const items = value.split(/[,\n]/).map(item => item.trim()).filter(Boolean);
     return items.length ? items : undefined;
