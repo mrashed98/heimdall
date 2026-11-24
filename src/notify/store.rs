@@ -281,11 +281,11 @@ pub async fn create(
     if cfg.channels().iter().any(|ch| ch.name() == c.name) {
         return Err(StoreError::NameTaken);
     }
+    let key = key.ok_or(StoreError::NoKey)?;
     let mut tx = pool.begin().await?;
     if name_in_db(&mut tx, &c.name).await? {
         return Err(StoreError::NameTaken);
     }
-    let key = key.ok_or(StoreError::NoKey)?;
     let (sealed, names) = seal(key, &c.name, &secrets);
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO alert_channels (name, type, realms, min_severity, digest, settings, secrets, secret_names, created_by, updated_by) \
@@ -598,6 +598,13 @@ pub async fn update(
         };
     }
     let realms = p.realms.clone().unwrap_or_else(|| row.realms.clone());
+    // A realm removed from the config since it was saved doesn't block an
+    // unrelated edit; only a realm the edit adds must be configured.
+    let checked_realms: Vec<String> = realms
+        .iter()
+        .filter(|r| cfg.realms.contains(r) || !row.realms.contains(r))
+        .cloned()
+        .collect();
     let min_severity = p.min_severity.unwrap_or(row.min_severity);
     let digest = match &p.digest {
         None => row.digest,
@@ -611,7 +618,7 @@ pub async fn update(
         &Draft {
             kind: &row.kind,
             name: &row.name,
-            realms: &realms,
+            realms: &checked_realms,
             min_severity,
             digest,
             settings: &settings,
@@ -886,6 +893,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn patch_keeps_a_realm_removed_from_the_config(pool: PgPool) {
+        let k = key();
+        let id = create(
+            &pool,
+            &cfg(),
+            Some(&k),
+            "alice",
+            &new(
+                json!({"type":"slack","name":"s","min_severity":"high","realms":["prod","staging"],
+                "secrets":{"webhook":"https://hooks.example/x"}}),
+            ),
+        )
+        .await
+        .unwrap();
+        // staging is gone from the config now.
+        let narrowed = HeimdallConfig::from_yaml("realms: [prod]\n").unwrap();
+        update(
+            &pool,
+            &narrowed,
+            Some(&k),
+            "bob",
+            id,
+            &patch(json!({"min_severity":"critical"})),
+        )
+        .await
+        .unwrap();
+        let realms: Vec<String> =
+            sqlx::query_scalar("SELECT realms FROM alert_channels WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            realms,
+            ["prod", "staging"],
+            "the stored realm is kept, not dropped"
+        );
+        // Adding a realm the config doesn't have is still refused.
+        assert!(matches!(
+            update(
+                &pool,
+                &narrowed,
+                Some(&k),
+                "bob",
+                id,
+                &patch(json!({"realms":["prod","nope"]}))
+            )
+            .await,
+            Err(StoreError::Invalid(_))
+        ));
     }
 
     #[sqlx::test(migrations = "./migrations")]

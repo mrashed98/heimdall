@@ -210,14 +210,8 @@ pub async fn enqueue_first_run_summary(
 /// backlog is not flooded. The findings stay open in the UI, API and counts;
 /// one-shot kinds resolve as if sent. Afterwards only new findings and state
 /// changes (a fix appears, an oath expires, severity rises) alert. Audited.
-/// Returns how many findings were marked. `_chans` is unused: baseline
-/// queues nothing, it takes the list for symmetry with the other entry points.
-pub async fn baseline(
-    pool: &PgPool,
-    cfg: &HeimdallConfig,
-    _chans: &Channels,
-    realm: &str,
-) -> anyhow::Result<usize> {
+/// Returns how many findings were marked.
+pub async fn baseline(pool: &PgPool, cfg: &HeimdallConfig, realm: &str) -> anyhow::Result<usize> {
     anyhow::ensure!(
         cfg.realms.iter().any(|r| r == realm),
         "unknown realm {realm:?} (configured: {})",

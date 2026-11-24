@@ -274,7 +274,7 @@ pub async fn send_now(
     secrets: &Secrets,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    let payload = channels::render(ch, &Alert::test());
+    let payload = channels::render(ch, &Alert::test(now));
     match attempt(d, ch, &payload, now, secrets).await {
         Outcome::Sent => Ok(()),
         Outcome::Retry { why, .. } | Outcome::Hold(why) | Outcome::Rejected(why) => Err(why),

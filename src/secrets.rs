@@ -41,7 +41,16 @@ impl SecretKey {
 
     /// Unset or empty → `None`; malformed → logged (without the value), `None`.
     pub fn from_env() -> Option<SecretKey> {
-        let raw = std::env::var(ENV_VAR).ok()?;
+        let raw = match std::env::var(ENV_VAR) {
+            Ok(raw) => raw,
+            Err(std::env::VarError::NotPresent) => return None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                tracing::error!(
+                    "{ENV_VAR} is not valid UTF-8; UI-managed channel secrets are disabled"
+                );
+                return None;
+            }
+        };
         if raw.trim().is_empty() {
             return None;
         }

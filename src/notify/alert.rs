@@ -3,6 +3,7 @@
 //! an [`Alert`]; this file builds them from alert groups, the first-run
 //! summary and the weekly digest.
 
+use chrono::{DateTime, Utc};
 use std::collections::BTreeSet;
 
 use serde::{Serialize, Serializer};
@@ -285,9 +286,11 @@ impl Alert {
 
     /// The fixed alert a channel's test send delivers, shaped like the
     /// first-run summary.
-    pub fn test() -> Alert {
+    /// The key is unique per send, so PagerDuty never folds a test into an
+    /// earlier, still-open test incident.
+    pub fn test(now: DateTime<Utc>) -> Alert {
         let mut a = Alert::new(
-            "test|heimdall".to_string(),
+            format!("test|heimdall|{}", now.timestamp_millis()),
             AlertKind::FirstRun,
             "Heimdall test alert".to_string(),
             Severity::Unknown,

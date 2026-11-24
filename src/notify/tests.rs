@@ -1133,11 +1133,8 @@ async fn baseline_marks_the_backlog_without_alerting(pool: PgPool) {
     let other_realm = vuln(&pool, "dev", "api", "high").await;
     let cfg = one_route("NOTIFY_BASELINE");
 
-    assert!(baseline(&pool, &cfg, &chans(&cfg), "nope").await.is_err());
-    assert_eq!(
-        baseline(&pool, &cfg, &chans(&cfg), "prod").await.unwrap(),
-        3
-    );
+    assert!(baseline(&pool, &cfg, "nope").await.is_err());
+    assert_eq!(baseline(&pool, &cfg, "prod").await.unwrap(), 3);
 
     assert_eq!(notified_status(&pool, high).await, (true, "open".into()));
     assert_eq!(notified_status(&pool, fixed).await, (true, "open".into()));
@@ -1395,7 +1392,7 @@ async fn ui_channel_with_only_removed_realms_stays_listed(pool: PgPool) {
     enqueue_alerts(&pool, &c, &ch).await.unwrap();
     let routes: Vec<String> = outbox(&pool).await.into_iter().map(|r| r.route).collect();
     assert_eq!(routes, ["other"]);
-    // A row queued for it earlier still drains: it is not orphaned.
+    // A row queued for it earlier is not orphaned.
     sqlx::query(
         "INSERT INTO outbox (group_key, card, route, channel_type, next_attempt_at) \
          VALUES ('alert|old', '{}', 's', 'slack', '2000-01-01')",

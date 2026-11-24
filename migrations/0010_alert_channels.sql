@@ -1,9 +1,9 @@
 CREATE TABLE alert_channels (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    type TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('teams', 'slack', 'discord', 'telegram', 'pagerduty', 'alertmanager', 'webhook', 'email')),
     realms TEXT[] NOT NULL DEFAULT '{}',
-    min_severity TEXT NOT NULL,
+    min_severity TEXT NOT NULL CHECK (min_severity IN ('critical', 'high', 'medium', 'low', 'unknown')),
     digest BOOLEAN,
     settings JSONB NOT NULL DEFAULT '{}',
     secrets BYTEA,

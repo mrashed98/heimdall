@@ -335,7 +335,7 @@ async fn test(
         }
     };
     {
-        let mut tests = st.channel_tests.lock().expect("channel tests lock");
+        let mut tests = st.channel_tests.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         tests.retain(|_, at| now.duration_since(*at) < TEST_INTERVAL);
         if tests.contains_key(&name) {
