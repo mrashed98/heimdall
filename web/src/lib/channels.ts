@@ -41,12 +41,24 @@ function fields(type: string): Field[] {
   return CHANNEL_TYPES.find(t => t.id === type)?.fields ?? [];
 }
 
+type FieldValue = string | number | undefined;
+type ChannelValues = Record<string, FieldValue>;
 type SettingValue = string | number | string[];
 
-function setting(field: Field, raw: string | undefined): SettingValue | undefined {
-  const value = raw?.trim();
-  if (!value) return undefined;
-  if (field.kind === 'number') return Number(value);
+function textValue(field: Field, value: FieldValue): string | undefined {
+  if (typeof value === 'number') throw new TypeError(`${field.label} must be text.`);
+  return value;
+}
+
+function setting(field: Field, raw: FieldValue): SettingValue | undefined {
+  if (field.kind === 'number') {
+    if (raw === undefined || (typeof raw === 'string' && !raw.trim())) return undefined;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new TypeError(`${field.label} must be a finite number.`);
+    return value;
+  }
+  const value = textValue(field, raw);
+  if (!value?.trim()) return undefined;
   if (field.kind === 'list') {
     const items = value.split(/[,\n]/).map(item => item.trim()).filter(Boolean);
     return items.length ? items : undefined;
@@ -54,7 +66,7 @@ function setting(field: Field, raw: string | undefined): SettingValue | undefine
   return value;
 }
 
-function settings(type: string, values: Record<string, string>): Record<string, SettingValue> {
+function settings(type: string, values: ChannelValues): Record<string, SettingValue> {
   const result: Record<string, SettingValue> = {};
   for (const field of fields(type)) {
     if (field.kind === 'secret') continue;
@@ -64,23 +76,24 @@ function settings(type: string, values: Record<string, string>): Record<string, 
   return result;
 }
 
-/** `POST /api/v1/channels` body. Preserves secret strings exactly as entered. */
-export function channelBody(type: string, values: Record<string, string>, common: ChannelCommon): object {
+/** `POST /api/v1/channels` body. Omit blank optional secrets and preserve included values as entered. */
+export function channelBody(type: string, values: ChannelValues, common: ChannelCommon): object {
   const secrets: Record<string, string> = {};
   for (const field of fields(type)) {
-    const value = values[field.key];
-    if (field.kind === 'secret' && value) secrets[field.key] = value;
+    if (field.kind !== 'secret') continue;
+    const value = textValue(field, values[field.key]);
+    if (value && (field.required || value.trim())) secrets[field.key] = value;
   }
   return { type, ...common, settings: settings(type, values), secrets };
 }
 
 /** `PATCH /api/v1/channels/{id}` body. Omit kept secrets and clear removed secrets with `null`. */
-export function patchBody(type: string, values: Record<string, string>, replaced: Record<string, SecretChange>, common: ChannelCommon): object {
+export function patchBody(type: string, values: ChannelValues, replaced: Record<string, SecretChange>, common: ChannelCommon): object {
   const secrets: Record<string, string | null> = {};
   for (const field of fields(type)) {
     if (field.kind !== 'secret') continue;
     const change = replaced[field.key] ?? 'keep';
-    if (change === 'replace') secrets[field.key] = values[field.key] ?? '';
+    if (change === 'replace') secrets[field.key] = textValue(field, values[field.key]) ?? '';
     else if (change === 'remove') secrets[field.key] = null;
   }
   const { realms, min_severity, digest } = common;

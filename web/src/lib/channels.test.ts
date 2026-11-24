@@ -24,13 +24,36 @@ describe('channel forms', () => {
       type: 'slack', name: 'ops', realms: ['prod'], min_severity: 'high', digest: null, settings: {}, secrets: { webhook: 'https://x' },
     });
     const tg = channelBody('telegram', { bot_token: 't', chat_id: ' 42 ', api_url: '  ' }, common) as Record<string, unknown>;
-    expect(tg.settings).toEqual({ chat_id: '42' });
+    expect(tg.settings).toEqual({ chat_id: ' 42 ' });
     expect(tg.secrets).toEqual({ bot_token: 't' });
   });
   it('channelBody parses numbers and lists', () => {
     const body = channelBody('email', { host: 'smtp', port: '587', security: 'starttls', from: 'h@x', to: 'a@x, b@x\nc@x\n', password: '' }, common) as Record<string, unknown>;
     expect(body.settings).toEqual({ host: 'smtp', port: 587, security: 'starttls', from: 'h@x', to: ['a@x', 'b@x', 'c@x'] });
     expect(body.secrets).toEqual({});
+  });
+  const createEmail = (port: string | number | undefined) => channelBody('email', { port }, common);
+  const patchEmail = (port: string | number | undefined) => patchBody('email', { port }, {}, common);
+
+  describe.each([{ build: createEmail, verb: 'POST' }, { build: patchEmail, verb: 'PATCH' }])('$verb numeric settings', ({ build }) => {
+    it('accepts a bound number value', () => {
+      expect(build(587)).toMatchObject({ settings: { port: 587 } });
+    });
+    it.each(['', ' \t', undefined])('omits a blank or unset port (%j)', port => {
+      expect(build(port)).toHaveProperty('settings', {});
+    });
+    it.each(['587xyz', 'NaN', 'Infinity', '1e309', NaN, Infinity, -Infinity])('rejects an invalid port (%s)', port => {
+      expect(() => build(port)).toThrow('Port must be a finite number.');
+    });
+  });
+
+  it('channelBody omits whitespace-only optional secrets and preserves nonblank secret bytes', () => {
+    const body = channelBody('email', { username: ' \t', password: ' example ' }, common);
+    expect(body).toHaveProperty('secrets', { password: ' example ' });
+  });
+  it('patchBody includes an explicit whitespace-only secret replacement', () => {
+    const body = patchBody('email', { password: ' \t' }, { password: 'replace' }, common);
+    expect(body).toHaveProperty('secrets', { password: ' \t' });
   });
   it('patchBody keeps, replaces and removes secrets', () => {
     const body = patchBody('alertmanager', { url: 'https://am', expire_after_hours: '12', username: 'u', password: 'p', bearer_token: '' },
