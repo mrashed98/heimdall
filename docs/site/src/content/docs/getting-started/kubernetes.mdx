@@ -46,6 +46,7 @@ by default (its `appVersion`). A tag build fails unless the tag, the chart's
    | `GITHUB_TOKEN` | GitHub releases, release notes, and the gate's GitHub Advisory Database fallback. |
    | `NVD_API_KEY` | NVD (the variable name is set by `nvd.api_key_env`). |
    | `TEAMS_WEBHOOK_*` | One per `teams[].webhook_env`. |
+   | `HEIMDALL_SECRET_KEY` | Optional. Needed to add alert channels in the web console (`openssl rand -base64 32`); back it up. See [Managing channels in the console](/heimdall/guides/alert-channels/#managing-channels-in-the-console). |
    | `HEIMDALL_API_KEY` | An **ingest-scope** key, used by the image scanner CronJob. |
 
    ```bash

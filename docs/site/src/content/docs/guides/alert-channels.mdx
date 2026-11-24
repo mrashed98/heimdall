@@ -39,6 +39,9 @@ Webhook URLs, tokens, routing keys and passwords never go in `heimdall.yaml`.
 Each `*_env` key holds the **name** of an environment variable; in Kubernetes,
 put the values in the Secret named by `existingSecret`. Heimdall reads them when
 it sends, never stores them in the database, and keeps them out of its logs.
+Channels added in the web console are the exception: their secrets are stored
+encrypted in Postgres (see [Managing channels in the
+console](#managing-channels-in-the-console)).
 </Aside>
 
 ## Shared behaviour
@@ -256,6 +259,118 @@ permanent one (a 5xx reply such as an unknown recipient) is not. A failed login
 (530, 534, 535) is a problem with the channel, not the message: the whole
 channel's queue waits and retries with the usual backoff, so a wrong password
 delays mail but never discards it. Fix the credentials and the backlog goes out.
+
+## Managing channels in the console
+
+Admins can also see and manage channels in the web console, under
+**Settings → Alert channels**. The list shows every channel, from
+`heimdall.yaml` and from the console, with its type, realms, minimum severity,
+digest setting and delivery health (queued alerts, the last delivery, and the
+error when the queue is failing).
+
+- **Config channels** carry a `config` badge and are read-only: the file stays
+  their source of truth. A variable they need that is not set is listed by name,
+  never by value.
+- **Console channels** have the same types, fields and validation rules as the
+  config. **Add channel** opens a form for the chosen type; **Edit** and
+  **Delete** (in the ⋯ menu) are on console rows only. A saved channel takes
+  part in alerts, the weekly digest and the first-run summary straight away,
+  with no restart.
+- **Test** sends a fixed test alert to any channel at once, outside the outbox,
+  and shows whether it arrived (the error, with secrets redacted, if not). One
+  test per channel every 10 seconds.
+- Every create, edit, delete and test is written to the audit log
+  (`channel_created`, `channel_updated`, `channel_deleted`, `channel_tested`),
+  with the channel's name, type and the names of the changed fields, never their
+  values.
+
+### The secret key
+
+Secrets entered in the console (webhook URLs, tokens, routing keys, passwords)
+are encrypted with AES-256-GCM under `HEIMDALL_SECRET_KEY` before they are
+stored in Postgres. The key is 32 random bytes in standard base64:
+
+```bash
+openssl rand -base64 32
+```
+
+Add it to the Secret named by the chart's `existingSecret` (there is no
+separate Helm value), then restart the pod, because the key is read at startup:
+
+```bash
+kubectl -n heimdall patch secret heimdall-secrets --type merge \
+  -p "{\"stringData\":{\"HEIMDALL_SECRET_KEY\":\"$(openssl rand -base64 32)\"}}"
+kubectl -n heimdall rollout restart deployment heimdall
+```
+
+Outside Kubernetes, set `HEIMDALL_SECRET_KEY` in the server's environment.
+
+<Aside type="caution" title="Back the key up">
+Keep a copy of the key wherever you keep your other secrets, apart from the
+database backups. Without it, the secrets stored in the console cannot be
+decrypted and every one of them has to be entered again. Changing the key has
+the same effect: Heimdall has no key rotation.
+</Aside>
+
+**Without the key** (not set, or malformed: not base64 or not 32 bytes, which
+logs an error without the value), Heimdall still starts and the config channels
+deliver as usual. Management in the console is off: the page lists the
+channels and shows a notice instead of **Add channel**, and creating, editing or
+testing a console channel is refused. Existing console channels that hold a
+secret show **Key missing** and their alerts stay queued until the key is set;
+nothing is lost. A console channel with no secret at all (Alertmanager without
+authentication, email without a login) keeps delivering. Deleting a channel
+works without the key.
+
+**With a different key** than the one the secrets were saved under, the
+affected channels show **Secret unreadable: re-enter it** and a warning is
+logged once per channel. Their alerts stay queued; other channels are not
+affected. To repair a channel, edit it and **Replace** every saved secret, or
+**Remove** the optional ones you no longer need. The save is refused until each
+stored secret is re-entered or removed; the channel is then encrypted again
+under the current key and its queue drains. (The same label shows for a channel
+that no longer passes validation after an upgrade; the log line "alert channel
+`X` from the UI is skipped" gives the reason, and its alerts are not queued
+until it is fixed.)
+
+### Secrets
+
+A saved secret is never shown again, in the console, the API, the logs or the
+audit log. The form shows it as `•••••••• Saved` with **Replace**, and
+**Remove** for optional secrets. A field you leave alone keeps the stored value.
+For Teams, Slack, Discord and the generic webhook, **the URL is the secret**, so
+it is masked too. The generic webhook's signing secret has a **Generate** button
+that fills in 32 random bytes in hex: copy it into the receiving system before
+you save, because it cannot be read back afterwards.
+
+### Names and types
+
+- A console channel's name must not contain `:` or control characters, nor
+  start or end with a space, and must not be used by any other channel, from the
+  config or the console.
+- **Name and type cannot be changed** after the channel is created, because the
+  outbox keys queued alerts by name and type. To rename, create a new channel
+  and delete the old one.
+- **The config wins a name clash.** If `heimdall.yaml` later gains a channel
+  with the name of a console channel, the config one is used. The console
+  channel is skipped from delivery, listed with **Name clash with config: delete
+  this channel**, and a warning is logged; Heimdall still starts. Delete the
+  console channel. If both have the same type, the alerts queued under that name
+  belong to the config channel, and deleting the console channel leaves them
+  alone.
+- **A realm removed from the config** is dropped from a console channel's
+  delivery, with a warning in the logs; the channel keeps covering its other
+  realms. The list still shows the realms as saved, so edit the channel to tidy
+  them up.
+
+### Deleting a channel
+
+**Deleting a console channel discards the alerts queued for it**, in the same
+step: they are marked failed with the reason "channel deleted", so a later
+channel with the same name and type never sends them somewhere else. The
+confirmation says how many will be discarded. The exception is a name clash with
+a config channel of the same type, described above: those queued alerts are the
+config channel's and are kept.
 
 ## Troubleshooting
 

@@ -117,6 +117,11 @@ teams:
 ## `channels`
 
 Type: list of channels. Default: `[]`. See [Alert channels](/heimdall/guides/alert-channels/).
+Admins can also add channels in the web console; those are stored in Postgres,
+not in this file, and need `HEIMDALL_SECRET_KEY` (see [Managing channels in the
+console](/heimdall/guides/alert-channels/#managing-channels-in-the-console) and
+[Environment variables](/heimdall/reference/environment-variables/)). A config
+channel wins over a console channel of the same name.
 Every channel has:
 
 | Key | Type | Meaning |

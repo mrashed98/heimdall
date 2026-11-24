@@ -28,8 +28,11 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `400` | Bad input: unknown realm, malformed body or parameter, rule violation. |
 | `401` | Missing or unknown key. |
 | `403` | The key's scope is too low, or its admin name is not allowed. |
-| `404` | No such oath, key or service. |
+| `404` | No such oath, key, service or channel. |
+| `409` | Conflict: an alert channel name already used, or `HEIMDALL_SECRET_KEY` not set. |
 | `413` | Body too large (limit 20 MB on ingest and gate). |
+| `429` | Too many requests, such as a second channel test within 10 seconds. |
+| `502` | A channel test failed at the destination. |
 | `500` | Internal error. The detail is logged, never returned. |
 
 ## Summary
@@ -63,6 +66,12 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `GET /api/v1/keys` | admin | List keys. |
 | `POST /api/v1/keys` | admin | Create a key. |
 | `DELETE /api/v1/keys/{name}` | admin | Revoke a key. |
+| `GET /api/v1/channels` | admin | List alert channels, from the config and the console. |
+| `POST /api/v1/channels` | admin | Create a console alert channel. |
+| `PATCH /api/v1/channels/{id}` | admin | Edit a console alert channel. |
+| `GET /api/v1/channels/{id}/queued` | admin | Count the alerts deleting a channel would discard. |
+| `DELETE /api/v1/channels/{id}` | admin | Delete a console alert channel. |
+| `POST /api/v1/channels/{name}/test` | admin | Send a test alert to a channel. |
 
 ## Health and metrics
 
@@ -377,6 +386,129 @@ invalid, reserved (`bootstrap`), already used, or an `admin` name not listed in
 ### `DELETE /api/v1/keys/{name}`
 
 Scope `admin`. Returns `{ "revoked": "<name>" }`, or `404`.
+
+## Alert channels
+
+Scope `admin`: an admin API key, or a browser session of a global admin. These
+routes back **Settings → Alert channels**; see [Managing channels in the
+console](/heimdall/guides/alert-channels/#managing-channels-in-the-console). No
+response ever contains a secret value or the value of an environment variable.
+
+### `GET /api/v1/channels`
+
+```json
+{
+  "management_enabled": true,
+  "channels": [
+    {
+      "id": 3,
+      "source": "ui",
+      "type": "slack",
+      "name": "sec-slack",
+      "realms": ["prod"],
+      "min_severity": "critical",
+      "digest": true,
+      "settings": {},
+      "secrets": { "webhook": { "set": true } },
+      "missing_env": [],
+      "state": "ok",
+      "health": { "queued": 0, "last_sent_at": "2026-11-23T09:00:02Z", "failing": null }
+    }
+  ]
+}
+```
+
+- `management_enabled`: whether `HEIMDALL_SECRET_KEY` is set and valid.
+- `channels`: the config channels in config order, then the console channels by
+  name.
+- `id`: `null` for a config channel. `source`: `config` or `ui`.
+- `digest`: the effective value, after the type's default.
+- `settings`: the type's non-secret fields (for example `chat_id`, `host`,
+  `to`), without `type`, `name`, `realms`, `min_severity`, `digest` or any
+  `*_env` key.
+- `secrets`: each secret field of the type, as `{ "set": true | false }`. For
+  `teams`, `slack`, `discord` and `webhook` the URL is a secret.
+- `missing_env`: for a config channel, the names of its variables that are not
+  set. Always empty for a console channel.
+- `state`: `ok`; `key_missing` (the channel holds secrets and there is no key);
+  `unreadable` (its secrets were sealed under another key, or it no longer
+  validates); `name_clash` (a config channel has its name and is used instead).
+  Always `ok` for a config channel.
+- `realms`: for a console channel, as saved, including a realm since removed
+  from the config (which delivery ignores).
+- `health`: `queued` unsent alerts, `last_sent_at` of the last delivery (or
+  `null`), and `failing`, the redacted error of the oldest queued alert when it
+  has one.
+
+### `POST /api/v1/channels`
+
+```json
+{
+  "type": "telegram",
+  "name": "ops-chat",
+  "realms": ["prod"],
+  "min_severity": "high",
+  "digest": null,
+  "settings": { "chat_id": -1001234567890 },
+  "secrets": { "bot_token": "123456:ABC..." }
+}
+```
+
+`realms` (default `[]`, all realms), `digest` (default `null`, the type's
+default), `settings` and `secrets` are optional. `settings` takes the type's
+non-secret keys from the [configuration
+reference](/heimdall/reference/configuration/#channels); `secrets` maps each
+secret field (the `*_env` key without `_env`: `webhook`, `bot_token`,
+`routing_key`, `url` and `secret` for `webhook`, `username`, `password`,
+`bearer_token`) to its value. Validation is the same as for the config.
+
+Returns `201` with `{ "id": 3 }`. `400` for an invalid body: unknown type or
+realm, a name that is empty, contains `:` or control characters, or starts or
+ends with whitespace, a reserved or `*_env` key in `settings`, an unknown or
+empty secret, a missing required secret, or a setting that fails validation.
+`409` if the name is used by a config or console channel, or if
+`HEIMDALL_SECRET_KEY` is not set.
+
+### `PATCH /api/v1/channels/{id}`
+
+Every field is optional; an absent field keeps the saved value. `name` and
+`type` cannot be changed.
+
+| Field | Effect |
+|---|---|
+| `realms`, `min_severity` | Replace the saved value. |
+| `digest` | `true` or `false`; `null` resets to the type's default. |
+| `settings` | Replaces every non-secret setting. |
+| `secrets` | Per field: omitted keeps the stored secret, a string replaces it, `null` clears it (optional secrets only). |
+
+Validation runs on the merged result, so rules such as "username and password
+together" still hold; on any error nothing changes. If the stored secrets were
+sealed under another key, the request must re-enter or clear every stored
+secret. Returns `204`. `400` for an invalid result, `404` for an unknown id,
+`409` if `HEIMDALL_SECRET_KEY` is not set.
+
+### `GET /api/v1/channels/{id}/queued`
+
+`{ "queued": 2 }`: how many alerts deleting the channel would discard. `0` when
+a config channel with the same name and type owns them. `404` for an unknown id.
+
+### `DELETE /api/v1/channels/{id}`
+
+Deletes a console channel and, in the same transaction, discards its queued
+alerts (marked failed, "channel deleted"), except those owned by a config
+channel with the same name and type. Works without `HEIMDALL_SECRET_KEY`.
+Returns `{ "discarded": 2 }`, or `404`. Config channels have no id and cannot be
+deleted here.
+
+### `POST /api/v1/channels/{name}/test`
+
+Sends a fixed test alert to the channel named `name`, from the config or the
+console (the config one when both have the name), directly rather than through
+the outbox. Returns `204` when the destination accepted it, or `502` with
+`{ "error": "..." }`, secrets redacted. `404` if no channel has the name, `409`
+if it is a console channel whose state is not `ok` (`{"error": "channel state is
+key_missing"}`), `429` if the channel was tested less than 10 seconds ago. Each
+test is audited as `channel_tested` with `ok: true` or `false`.
 
 ## Browser authentication and access
 
