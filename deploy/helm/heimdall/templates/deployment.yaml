@@ -41,7 +41,8 @@ spec:
               containerPort: 8080
           envFrom:
             # DATABASE_URL, GITHUB_TOKEN, NVD_API_KEY,
-            # HEIMDALL_BOOTSTRAP_ADMIN_KEY and every TEAMS_WEBHOOK_*.
+            # HEIMDALL_BOOTSTRAP_ADMIN_KEY, HEIMDALL_SECRET_KEY and every
+            # TEAMS_WEBHOOK_*.
             - secretRef:
                 name: {{ .Values.existingSecret }}
           {{- if .Values.otlpEndpoint }}
