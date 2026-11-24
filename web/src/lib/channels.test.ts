@@ -9,7 +9,12 @@ describe('channel forms', () => {
   });
   it('marks every server-side secret as a secret field', () => {
     const secrets = (id: string) => CHANNEL_TYPES.find(t => t.id === id)!.fields.filter(f => f.kind === 'secret').map(f => f.key);
+    // Mirrors secret_fields in src/notify/store.rs, every type.
+    expect(secrets('teams')).toEqual(['webhook']);
     expect(secrets('slack')).toEqual(['webhook']);
+    expect(secrets('discord')).toEqual(['webhook']);
+    expect(secrets('telegram')).toEqual(['bot_token']);
+    expect(secrets('pagerduty')).toEqual(['routing_key']);
     expect(secrets('alertmanager')).toEqual(['username', 'password', 'bearer_token']);
     expect(secrets('email')).toEqual(['username', 'password']);
     expect(secrets('webhook')).toEqual(['url', 'secret']);
@@ -60,9 +65,11 @@ describe('channel forms', () => {
     const body = channelBody('email', { username: ' \t', password: ' example ' }, common);
     expect(body).toHaveProperty('secrets', { password: ' example ' });
   });
-  it('patchBody includes an explicit whitespace-only secret replacement', () => {
-    const body = patchBody('email', { password: ' \t' }, { password: 'replace' }, common);
-    expect(body).toHaveProperty('secrets', { password: ' \t' });
+  it.each(['', ' \t', undefined])('patchBody refuses a blank secret replacement (%j)', password => {
+    expect(() => patchBody('email', { password }, { password: 'replace' }, common)).toThrow('Password must not be empty.');
+  });
+  it('patchBody sends a nonblank secret replacement byte for byte', () => {
+    expect(patchBody('email', { password: ' p ' }, { password: 'replace' }, common)).toHaveProperty('secrets', { password: ' p ' });
   });
   it('patchBody keeps, replaces and removes secrets', () => {
     const body = patchBody('alertmanager', { url: 'https://am', expire_after_hours: '12', username: 'u', password: 'p', bearer_token: '' },
@@ -82,9 +89,9 @@ describe('channel forms', () => {
   });
   it('healthLabel prefers failing, then last sent, then none', () => {
     const now = new Date('2026-11-24T12:00:00Z');
-    expect(healthLabel({ queued: 0, last_sent_at: '2026-11-24T11:00:00Z', failing: 'HTTP 500' }, now)).toEqual({ text: 'Failing', tone: 'warn' });
+    expect(healthLabel({ queued: 0, last_sent_at: '2026-11-24T11:00:00Z', failing: 'HTTP 500' }, now)).toEqual({ text: 'Failing: HTTP 500', tone: 'warn' });
     expect(healthLabel({ queued: 0, last_sent_at: '2026-11-24T11:55:00Z', failing: null }, now)).toEqual({ text: 'Sent 5m ago', tone: 'ok' });
     expect(healthLabel({ queued: 0, last_sent_at: null, failing: null }, now)).toEqual({ text: 'No deliveries yet', tone: 'muted' });
-    expect(healthLabel({ queued: 3, last_sent_at: null, failing: 'x' }, now)).toEqual({ text: 'Failing · 3 queued', tone: 'warn' });
+    expect(healthLabel({ queued: 3, last_sent_at: null, failing: 'x' }, now)).toEqual({ text: 'Failing: x · 3 queued', tone: 'warn' });
   });
 });

@@ -64,6 +64,7 @@
   });
 
   function errorText(error: unknown, fallback: string) {
+    if (error instanceof TypeError) return error.message;
     return error instanceof ApiError && error.code ? error.code : fallback;
   }
 
@@ -278,7 +279,7 @@
                 <div class="row-actions">
                   <Button size="sm" aria-label={`Test ${channel.name}`} disabled={channel.state === 'name_clash' || result?.pending} onclick={() => testChannel(channel)}>Test</Button>
                   {#if channel.source === 'ui'}
-                    {#if type}<Button size="sm" aria-label={`Edit ${channel.name}`} disabled={busy} onclick={() => openEditor(type, channel)}>Edit</Button>{/if}
+                    {#if type}<Button size="sm" aria-label={`Edit ${channel.name}`} disabled={busy || !list?.management_enabled} onclick={() => openEditor(type, channel)}>Edit</Button>{/if}
                     <div class="row-menu">
                       <Menu label={`More actions for ${channel.name}`} align="end">
                         {#snippet trigger()}<span class="more-trigger" aria-hidden="true">⋯</span>{/snippet}
@@ -391,7 +392,7 @@
 {#if removal}
   {@const target = removal}
   <Dialog open={true} title={`Delete ${target.name}?`} onclose={() => removal = null}>
-    <p>Alerts for these realms will no longer go to this channel.{target.queued !== null ? ` ${target.queued} queued alerts will be discarded.` : ''}</p>
+    <p>Alerts for these realms will no longer go to this channel.{target.queued !== null ? ` ${target.queued} queued ${target.queued === 1 ? 'alert' : 'alerts'} will be discarded.` : ''}</p>
     {#if target.error}
       <p class="warn" role="alert">{target.error}</p>
       {#if target.queued === null}<div><Button size="sm" onclick={() => loadQueued(target)}>Try again</Button></div>{/if}

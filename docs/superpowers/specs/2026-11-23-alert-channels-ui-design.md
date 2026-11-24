@@ -48,14 +48,17 @@ here, but it is out of scope for this design.
 - A missing or wrong `HEIMDALL_SECRET_KEY` stops Heimdall from starting or
   stops the config channels from delivering.
 - Alerts are lost or sent twice because a channel was edited, renamed or
-  deleted while alerts were queued for it.
+  deleted while alerts were queued for it. The one deliberate exception:
+  deleting a channel discards its own queued alerts (the confirmation shows
+  how many), so they never reach another channel's destination.
 - A non-admin can see or change channels.
 
 ## Constraints
 
 - Postgres is the only state. The pod has 1 GB of memory and 1 CPU.
 - Existing API-key response shapes stay backwards compatible. The new
-  endpoints are UI-only (`/api/ui/...`, session and admin role).
+  endpoints are `/api/v1/channels/...`, admin role (sessions and admin API
+  keys).
 - No new crypto dependency: use `ring::aead` (already in the tree via
   rustls) for AES-256-GCM.
 - Secrets follow the existing rule: never inline in config, never in URLs
@@ -97,8 +100,8 @@ The owner picked 1.
 - **Wrong** (decryption fails for a row): that channel shows "Secret
   unreadable: re-enter it". Its queued alerts stay queued, as with a
   missing env var today. Other channels are unaffected.
-- The Helm chart gets an optional `secretKey.existingSecret` value, mounted
-  as the env var. The docs say how to generate the key
+- No new Helm value: the key goes in the Secret named by the chart's
+  existing `existingSecret`, which is mounted as env vars. The docs say how to generate the key
   (`openssl rand -base64 32`) and that it must be backed up.
 
 ### Storage
@@ -169,16 +172,16 @@ Migration `0010_alert_channels.sql`:
 
 ### API (admin role, session auth)
 
-- `GET /api/ui/channels`: every channel with its source, type, name,
+- `GET /api/v1/channels`: every channel with its source, type, name,
   settings, realms, `min_severity`, `digest`, and health.
   - Secret fields come back only as `{"set": true|false}`.
   - Config channels show which env var names are missing, never their
     values.
   - The response includes `management_enabled` (whether the key is
     present).
-- `POST /api/ui/channels`: create. Validated with the same rules as the
+- `POST /api/v1/channels`: create. Validated with the same rules as the
   config (`validate` reused per type), including the realms check.
-- `PATCH /api/ui/channels/{id}`: edit the settings. For each secret field:
+- `PATCH /api/v1/channels/{id}`: edit the settings. For each secret field:
   - omitted: keep the stored value;
   - a string: replace it;
   - `null`: clear it (optional secrets only).
@@ -188,8 +191,8 @@ Migration `0010_alert_channels.sql`:
   alongside basic auth" still hold. This lets an admin switch
   authentication modes or turn webhook signing off without recreating the
   channel.
-- `DELETE /api/ui/channels/{id}`.
-- `POST /api/ui/channels/{name}/test`: sends a fixed test alert directly,
+- `DELETE /api/v1/channels/{id}`.
+- `POST /api/v1/channels/{name}/test`: sends a fixed test alert directly,
   not through the outbox, and returns success, or the error with secrets
   redacted. It is rate-limited per channel, to 1 every 10 seconds.
   - The limit is kept in memory. The chart runs a single replica.

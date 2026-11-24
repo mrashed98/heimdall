@@ -93,7 +93,11 @@ export function patchBody(type: string, values: ChannelValues, replaced: Record<
   for (const field of fields(type)) {
     if (field.kind !== 'secret') continue;
     const change = replaced[field.key] ?? 'keep';
-    if (change === 'replace') secrets[field.key] = textValue(field, values[field.key]) ?? '';
+    if (change === 'replace') {
+      const value = textValue(field, values[field.key]) ?? '';
+      if (!value.trim()) throw new TypeError(`${field.label} must not be empty.`);
+      secrets[field.key] = value;
+    }
     else if (change === 'remove') secrets[field.key] = null;
   }
   const { realms, min_severity, digest } = common;
@@ -109,7 +113,7 @@ export interface ChannelHealth { queued: number; last_sent_at: string | null; fa
 
 /** One line of channel health for the list. */
 export function healthLabel(h: ChannelHealth, now: Date): { text: string; tone: 'ok' | 'warn' | 'muted' } {
-  const base = h.failing !== null ? { text: 'Failing', tone: 'warn' as const }
+  const base = h.failing !== null ? { text: `Failing: ${h.failing}`, tone: 'warn' as const }
     : h.last_sent_at ? { text: `Sent ${relativeTime(h.last_sent_at, now)}`, tone: 'ok' as const }
     : { text: 'No deliveries yet', tone: 'muted' as const };
   return h.queued > 0 ? { ...base, text: `${base.text} · ${h.queued} queued` } : base;

@@ -298,9 +298,11 @@ Add it to the Secret named by the chart's `existingSecret` (there is no
 separate Helm value), then restart the pod, because the key is read at startup:
 
 ```bash
-kubectl -n heimdall patch secret heimdall-secrets --type merge \
+# Use your release's namespace, its existingSecret name and its deployment name.
+NS=heimdall SECRET=heimdall-secrets DEPLOY=heimdall
+kubectl -n "$NS" patch secret "$SECRET" --type merge \
   -p "{\"stringData\":{\"HEIMDALL_SECRET_KEY\":\"$(openssl rand -base64 32)\"}}"
-kubectl -n heimdall rollout restart deployment heimdall
+kubectl -n "$NS" rollout restart deployment "$DEPLOY"
 ```
 
 Outside Kubernetes, set `HEIMDALL_SECRET_KEY` in the server's environment.
@@ -315,8 +317,9 @@ the same effect: Heimdall has no key rotation.
 **Without the key** (not set, or malformed: not base64 or not 32 bytes, which
 logs an error without the value), Heimdall still starts and the config channels
 deliver as usual. Management in the console is off: the page lists the
-channels and shows a notice instead of **Add channel**, and creating, editing or
-testing a console channel is refused. Existing console channels that hold a
+channels and shows a notice instead of **Add channel**, and creating or editing
+a console channel is refused. Testing is refused for a console channel whose
+saved secrets can't be read. Existing console channels that hold a
 secret show **Key missing** and their alerts stay queued until the key is set;
 nothing is lost. A console channel with no secret at all (Alertmanager without
 authentication, email without a login) keeps delivering. Deleting a channel

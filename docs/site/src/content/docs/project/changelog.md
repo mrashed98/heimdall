@@ -15,7 +15,8 @@ each version, with the binaries and container image tags.
   restart. Secrets entered in the console are encrypted in Postgres under the
   new `HEIMDALL_SECRET_KEY` (32 random bytes, base64; add it to the Secret named
   by `existingSecret` and back it up). Without the key Heimdall runs as before
-  and the console only lists channels. The same operations are available as
+  and adding or editing console channels is off; existing ones can still be
+  deleted. The same operations are available as
   `/api/v1/channels` for admin keys. See [Managing channels in the
   console](/heimdall/guides/alert-channels/#managing-channels-in-the-console)
   and [ADR 0005](/heimdall/decisions/0005-encrypted-channel-secrets/).
