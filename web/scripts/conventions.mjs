@@ -3,7 +3,7 @@
 // of `npm run check`, locally and in CI. Rules match the whole file, so a
 // list or tag split across lines is caught too.
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -38,7 +38,7 @@ function* files(dir) {
 let failures = 0;
 for (const dir of dirs) {
   for (const file of files(resolve(root, dir))) {
-    const rel = relative(root, file);
+    const rel = relative(root, file).split(sep).join('/');
     const text = readFileSync(file, 'utf8');
     for (const r of rules) {
       if (r.skip?.(rel)) continue;
