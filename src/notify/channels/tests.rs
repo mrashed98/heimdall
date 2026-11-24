@@ -1210,3 +1210,41 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
             .unwrap();
     assert!(pending.is_none());
 }
+
+/// The scrub step itself: a mail server that echoes the login back in its
+/// reply. The HTTP tests cannot cover this, since their errors never hold a
+/// secret to begin with.
+#[sqlx::test(migrations = "./migrations")]
+async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
+    let c = cfg(
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+                 security: starttls, username_env: SCRUB_USER, password_env: SCRUB_PW, \
+                 from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
+    );
+    let mut ch = chans(&c);
+    ch.secrets.insert("SCRUB_USER".into(), "ops-mailer".into());
+    ch.secrets.insert("SCRUB_PW".into(), "hunter2-pw".into());
+    let echo = mailer(Err(MailError::Auth(
+        "535 rejected ops-mailer / hunter2-pw".into(),
+    )));
+    let http = reqwest::Client::new();
+    let d = Delivery {
+        http: &http,
+        mailer: &echo,
+    };
+    let id = queue(&pool, "mail", "email", &email::render(&vuln_alert())).await;
+    assert_eq!(
+        drain_with(&pool, &d, &c, &ch, now()).await.unwrap().retry,
+        1
+    );
+    let err: String = sqlx::query_scalar("SELECT last_error FROM outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(err.contains("535"), "{err}");
+    assert!(
+        !err.contains("hunter2") && !err.contains("ops-mailer"),
+        "{err}"
+    );
+}
