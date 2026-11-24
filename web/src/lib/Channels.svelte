@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from './api';
-  import { CHANNEL_TYPES, channelBody, generateSecret, healthLabel, patchBody, type ChannelCommon, type ChannelHealth, type Field, type SecretChange } from './channels';
+  import { CHANNEL_TYPES, FormError, channelBody, generateSecret, healthLabel, patchBody, type ChannelCommon, type ChannelHealth, type Field, type SecretChange } from './channels';
   import { Badge, Button, DataTable, Dialog, EmptyState, ErrorState, Input, Menu, Panel, Pill, SEVERITIES, Select, Skeleton } from './ui';
 
   type Channel = Omit<ChannelCommon, 'digest'> & {
@@ -64,7 +64,7 @@
   });
 
   function errorText(error: unknown, fallback: string) {
-    if (error instanceof TypeError) return error.message;
+    if (error instanceof FormError) return error.message;
     return error instanceof ApiError && error.code ? error.code : fallback;
   }
 

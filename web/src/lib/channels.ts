@@ -37,6 +37,9 @@ export const CHANNEL_TYPES: { id: string; label: string; fields: Field[] }[] = [
   ] },
 ];
 
+/** A form value the API would reject; its message names the field. */
+export class FormError extends Error {}
+
 function fields(type: string): Field[] {
   return CHANNEL_TYPES.find(t => t.id === type)?.fields ?? [];
 }
@@ -46,7 +49,7 @@ type ChannelValues = Record<string, FieldValue>;
 type SettingValue = string | number | string[];
 
 function textValue(field: Field, value: FieldValue): string | undefined {
-  if (typeof value === 'number') throw new TypeError(`${field.label} must be text.`);
+  if (typeof value === 'number') throw new FormError(`${field.label} must be text.`);
   return value;
 }
 
@@ -54,7 +57,7 @@ function setting(field: Field, raw: FieldValue): SettingValue | undefined {
   if (field.kind === 'number') {
     if (raw === undefined || (typeof raw === 'string' && !raw.trim())) return undefined;
     const value = Number(raw);
-    if (!Number.isFinite(value)) throw new TypeError(`${field.label} must be a finite number.`);
+    if (!Number.isFinite(value)) throw new FormError(`${field.label} must be a finite number.`);
     return value;
   }
   const value = textValue(field, raw)?.trim();
@@ -95,7 +98,7 @@ export function patchBody(type: string, values: ChannelValues, replaced: Record<
     const change = replaced[field.key] ?? 'keep';
     if (change === 'replace') {
       const value = textValue(field, values[field.key]) ?? '';
-      if (!value.trim()) throw new TypeError(`${field.label} must not be empty.`);
+      if (!value.trim()) throw new FormError(`${field.label} must not be empty.`);
       secrets[field.key] = value;
     }
     else if (change === 'remove') secrets[field.key] = null;

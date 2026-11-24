@@ -1,4 +1,4 @@
-/** Every severity, worst first. The one list: the rest of the app imports it. */
+/** Every severity, in display order (`unknown` last; the server ranks it above `low`). The one list: the rest of the app imports it. */
 export const SEVERITIES = ['critical', 'high', 'medium', 'low', 'unknown'] as const;
 export type Severity = typeof SEVERITIES[number];
 export type Tone = Severity;
