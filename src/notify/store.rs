@@ -255,7 +255,8 @@ fn check_name(name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Validate and insert a UI channel; returns its id.
+/// Validate and insert a UI channel; returns its id. Undelivered alerts
+/// still queued under the same name and type are discarded.
 pub async fn create(
     pool: &PgPool,
     cfg: &HeimdallConfig,
@@ -306,6 +307,19 @@ pub async fn create(
         sqlx::Error::Database(d) if d.is_unique_violation() => StoreError::NameTaken,
         e => StoreError::Db(e),
     })?;
+    // Unsent rows already under this name and type are orphans (a tick that
+    // raced a delete, or a removed config channel; config names were rejected
+    // above). Discard them so the new destination never inherits them.
+    let discarded = sqlx::query(
+        "UPDATE outbox SET sent_at=now(), card=jsonb_set(card,'{failed}','true'), \
+         last_error='channel recreated' \
+         WHERE route=$1 AND channel_type=$2 AND sent_at IS NULL",
+    )
+    .bind(&c.name)
+    .bind(&c.kind)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     let fields: BTreeSet<&str> = c
         .settings
         .keys()
@@ -316,7 +330,7 @@ pub async fn create(
         &mut tx,
         actor,
         "channel_created",
-        json!({"name": c.name, "type": c.kind, "fields": fields}),
+        json!({"name": c.name, "type": c.kind, "fields": fields, "discarded": discarded}),
     )
     .await?;
     tx.commit().await?;
@@ -1172,7 +1186,7 @@ mod tests {
         );
         assert_eq!(
             rows[0].2,
-            json!({"name":"w","type":"webhook","fields":["url"]})
+            json!({"name":"w","type":"webhook","fields":["url"],"discarded":0})
         );
         assert_eq!(
             (rows[1].0.as_str(), rows[1].1.as_str()),

@@ -372,6 +372,13 @@ confirmation says how many will be discarded. The exception is a name clash with
 a config channel of the same type, described above: those queued alerts are the
 config channel's and are kept.
 
+**Creating a console channel discards any undelivered alerts still queued under
+the same name and type**, for example those of a removed config channel or ones
+queued while an earlier channel of that name was being deleted. They are marked
+failed with the reason "channel recreated", so a new channel never sends old
+alerts to its new destination. The `channel_created` audit entry records how
+many were discarded.
+
 ## Troubleshooting
 
 Watch `heimdall_outbox_pending` (messages waiting) and
@@ -385,7 +392,8 @@ Queued messages belong to a channel name and type. If you remove a channel,
 rename it, or change its `type`, its unsent messages are never sent, and
 Heimdall logs one warning per name and type naming them ("outbox has unsent
 … alerts for channel `X`, which is no longer configured"). Either restore the
-channel, or clear them in the database:
+channel in `heimdall.yaml` (recreating it in the console discards them instead),
+or clear them in the database:
 
 ```sql
 -- See what is stuck.

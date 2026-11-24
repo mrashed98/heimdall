@@ -1676,6 +1676,50 @@ async fn delete_discards_queued_rows(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn create_discards_orphaned_rows_for_same_name_and_type(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let c = ui_cfg("");
+    let k = key(7);
+    // Orphans: no channel named `s` exists (a lost race with delete, or a
+    // removed config channel).
+    queued_for(&pool, "s", "slack", json!({})).await;
+    queued_for(&pool, "s", "discord", json!({})).await;
+    ui_slack(&pool, &c, &k, "s", &format!("{}/hook", server.uri())).await;
+    type Row = (String, Option<DateTime<Utc>>, Value, Option<String>);
+    let rows: Vec<Row> =
+        sqlx::query_as("SELECT channel_type, sent_at, card, last_error FROM outbox ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let (kind, sent_at, card, err) = &rows[0];
+    assert_eq!(kind, "slack");
+    assert!(sent_at.is_some());
+    assert_eq!(card["failed"], json!(true));
+    assert_eq!(err.as_deref(), Some("channel recreated"));
+    assert!(rows[1].1.is_none(), "the discord row is untouched");
+    assert!(rows[1].3.is_none());
+    let detail: Value =
+        sqlx::query_scalar("SELECT detail FROM audit_log WHERE action = 'channel_created'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(detail["discarded"], json!(1));
+
+    let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
+    make_due(&pool).await;
+    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+        .await
+        .unwrap();
+    assert_eq!(r.sent, 0);
+    server.verify().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn delete_ui_channel_clashing_with_config_keeps_queued_rows(pool: PgPool) {
     let c = ui_cfg(
         "channels:\n  - {type: slack, name: s, webhook_env: NOTIFY_CLASH_URL, min_severity: high}\n",
