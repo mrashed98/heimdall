@@ -1276,6 +1276,23 @@ async fn ui_channel_rows_stay_queued_without_key(pool: PgPool) {
     server.verify().await;
 }
 
+/// A stored channel that no longer validates is reported as invalid, not as
+/// unreadable: re-entering its secrets would not fix it.
+#[sqlx::test(migrations = "./migrations")]
+async fn channel_that_no_longer_builds_is_invalid(pool: PgPool) {
+    let c = ui_cfg("");
+    sqlx::query(
+        "INSERT INTO alert_channels (name, type, min_severity, settings, created_by, updated_by) \
+         VALUES ('tg', 'telegram', 'high', '{}', 'alice', 'alice')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ch = store::load(&pool, &c, Some(&key(7))).await.unwrap();
+    assert_eq!(ch.ui[0].state, UiState::Invalid);
+    assert!(ch.list.iter().all(|x| x.name() != "tg"));
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn unreadable_secret_keeps_rows_queued(pool: PgPool) {
     let server = MockServer::start().await;

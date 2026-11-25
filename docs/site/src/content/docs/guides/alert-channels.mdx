@@ -331,10 +331,13 @@ logged once per channel. Their alerts stay queued; other channels are not
 affected. To repair a channel, edit it and **Replace** every saved secret, or
 **Remove** the optional ones you no longer need. The save is refused until each
 stored secret is re-entered or removed; the channel is then encrypted again
-under the current key and its queue drains. (The same label shows for a channel
-that no longer passes validation after an upgrade; the log line "alert channel
-`X` from the UI is skipped" gives the reason, and its alerts are not queued
-until it is fixed.)
+under the current key and its queue drains.
+
+**A console channel that no longer passes validation**, for example after an
+upgrade tightens a rule, shows **Invalid: see the server log**. The log line
+"alert channel `X` from the UI is skipped" gives the reason. Alerts raised while
+it is invalid are not queued for it and are not sent to it later; alerts it had
+already queued stay queued. Edit the channel to fix it, or delete it.
 
 ### Secrets
 

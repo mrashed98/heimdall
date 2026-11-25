@@ -30,7 +30,9 @@ fn link(text: &str, url: &str) -> String {
 
 pub(crate) const MARKUP: Markup = Markup { escape, bold, link };
 
-pub fn render(a: &Alert, chat_id: &str) -> Value {
+/// The message without its `chat_id`: `request` adds the channel's current
+/// one at send time, so an edited `chat_id` reaches rows already queued.
+pub fn render(a: &Alert) -> Value {
     let mut lines = vec![bold(&a.title)];
     if matches!(a.kind, AlertKind::Finding(_)) {
         lines.push(format!("Severity: {}", severity_name(a.severity)));
@@ -48,7 +50,6 @@ pub fn render(a: &Alert, chat_id: &str) -> Value {
         );
     }
     json!({
-        "chat_id": chat_id,
         "parse_mode": "HTML",
         "link_preview_options": {"is_disabled": true},
         "text": join_capped(&lines, MESSAGE_CHARS, "…"),

@@ -357,10 +357,12 @@ pub enum UiState {
     /// `HEIMDALL_SECRET_KEY` is not set: delivered without secrets, so its
     /// rows stay queued.
     KeyMissing,
-    /// Its secrets can't be opened (another key), or it no longer validates
-    /// (a realm was removed). In the first case it is still in the list
-    /// without secrets; in the second it is left out.
+    /// Its secrets can't be opened (sealed under another key). It stays in
+    /// the list without secrets, so its rows queue and wait.
     Unreadable,
+    /// It no longer builds (stored settings fail validation). It is left
+    /// out of the list, so alerts raised meanwhile are not queued for it.
+    Invalid,
     /// A config channel has the same name: the config one wins.
     NameClash,
 }
@@ -496,7 +498,7 @@ pub async fn load(
                     &format!("ui-invalid|{}", row.name),
                     &format!("alert channel `{}` from the UI is skipped: {e}", row.name),
                 );
-                ui.state = UiState::Unreadable;
+                ui.state = UiState::Invalid;
                 chans.ui.push(ui);
                 continue;
             }
