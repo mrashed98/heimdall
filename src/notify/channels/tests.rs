@@ -243,17 +243,16 @@ fn discord_escapes_markdown_and_mentions() {
 
 #[test]
 fn telegram_snapshot_and_limits() {
-    let got = telegram::render(&vuln_alert(), "-100123");
+    let got = telegram::render(&vuln_alert());
     snapshot("telegram_vuln", &got);
     assert_eq!(got["parse_mode"], "HTML");
-    assert_eq!(got["chat_id"], "-100123");
-    let huge = telegram::render(&huge_alert(), "1");
+    let huge = telegram::render(&huge_alert());
     assert!(huge["text"].as_str().unwrap().chars().count() <= 4096);
 }
 
 #[test]
 fn telegram_escapes_html() {
-    let text = telegram::render(&hostile_alert(), "1")["text"]
+    let text = telegram::render(&hostile_alert())["text"]
         .as_str()
         .unwrap()
         .to_string();
@@ -279,7 +278,7 @@ fn telegram_escapes_html() {
             .all(|t| matches!(*t, "b" | "/b" | "/a") || t.starts_with("a href=")),
         "{tags:?}"
     );
-    let d = telegram::render(&digest_alert(), "1").to_string();
+    let d = telegram::render(&digest_alert()).to_string();
     assert!(
         d.contains(r#"<a href=\"https://example.com/17.2\">postgres 17.2</a>: fixes [click](https://evil.example/x) &amp; more"#),
         "{d}"
@@ -504,6 +503,22 @@ fn request_reads_secret_from_map_before_env() {
     // An empty value counts as unset.
     let empty = Secrets::from([("ui:s:webhook".to_string(), String::new())]);
     assert_eq!(missing_env(&c, &empty).as_deref(), Some("ui:s:webhook"));
+}
+
+/// A row queued before the channel's `chat_id` changed goes to the new chat.
+#[test]
+fn telegram_request_uses_the_current_chat_id() {
+    let c =
+        ch("{type: telegram, name: tg, bot_token_env: TG_T, chat_id: '@new', min_severity: high}");
+    let mut secrets = Secrets::new();
+    secrets.insert("TG_T".into(), "T".into());
+    let queued = json!({"chat_id": "@old", "text": "x"});
+    let Request::Http { body, .. } = request(&c, &queued, now(), &secrets).unwrap() else {
+        unreachable!()
+    };
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(sent["chat_id"], "@new");
+    assert_eq!(sent["text"], "x");
 }
 
 #[test]
@@ -1242,6 +1257,37 @@ async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
+    assert!(err.contains("535"), "{err}");
+    assert!(
+        !err.contains("hunter2") && !err.contains("ops-mailer"),
+        "{err}"
+    );
+}
+
+/// A console channel's decrypted secrets (held under `ui:` refs, not env
+/// vars) are scrubbed too, and so is the Test button's error.
+#[tokio::test]
+async fn test_send_scrubs_a_console_secret_the_server_echoed() {
+    let mail = ch(
+        "{type: email, name: mail, host: smtp.example.com, security: starttls, \
+         username_env: 'ui:mail:username', password_env: 'ui:mail:password', \
+         from: heimdall@example.com, to: [ops@example.com], min_severity: high}",
+    );
+    let secrets = Secrets::from([
+        ("ui:mail:username".to_string(), "ops-mailer".to_string()),
+        ("ui:mail:password".to_string(), "hunter2-pw".to_string()),
+    ]);
+    let echo = mailer(Err(MailError::Auth(
+        "535 rejected ops-mailer / hunter2-pw".into(),
+    )));
+    let http = reqwest::Client::new();
+    let d = Delivery {
+        http: &http,
+        mailer: &echo,
+    };
+    let err = crate::notify::outbox::send_now(&d, &mail, &secrets, now())
+        .await
+        .unwrap_err();
     assert!(err.contains("535"), "{err}");
     assert!(
         !err.contains("hunter2") && !err.contains("ops-mailer"),

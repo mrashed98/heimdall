@@ -135,11 +135,20 @@ fn health_of(all: &HashMap<(String, String), Health>, name: &str, kind: &str) ->
         .unwrap_or_default()
 }
 
+/// `h` without a delivery older than `created`: that one went to an
+/// earlier channel with the same name and type. (Creating a channel
+/// discards the unsent rows, so `queued` and `failing` are already its own.)
+fn since(mut h: HealthView, created: DateTime<Utc>) -> HealthView {
+    h.last_sent_at = h.last_sent_at.filter(|at| *at >= created);
+    h
+}
+
 fn state_name(s: UiState) -> &'static str {
     match s {
         UiState::Ok => "ok",
         UiState::KeyMissing => "key_missing",
         UiState::Unreadable => "unreadable",
+        UiState::Invalid => "invalid",
         UiState::NameClash => "name_clash",
     }
 }
@@ -196,16 +205,18 @@ struct UiRow {
     min_severity: Severity,
     digest: Option<bool>,
     settings: sqlx::types::Json<Map<String, Value>>,
+    created_at: DateTime<Utc>,
 }
 
 async fn list(State(st): State<AppState>, p: Principal) -> Result<Json<List>, Fail> {
     require_admin(&p)?;
     let chans = store::load(&st.pool, &st.cfg, st.secret_key.as_deref()).await?;
     let health = outbox::health(&st.pool).await?;
-    let rows: Vec<UiRow> =
-        sqlx::query_as("SELECT id, realms, min_severity, digest, settings FROM alert_channels")
-            .fetch_all(&st.pool)
-            .await?;
+    let rows: Vec<UiRow> = sqlx::query_as(
+        "SELECT id, realms, min_severity, digest, settings, created_at FROM alert_channels",
+    )
+    .fetch_all(&st.pool)
+    .await?;
     let rows: HashMap<i64, UiRow> = rows.into_iter().map(|r| (r.id, r)).collect();
 
     let mut channels: Vec<ChannelView> = st
@@ -225,7 +236,7 @@ async fn list(State(st): State<AppState>, p: Principal) -> Result<Json<List>, Fa
         channels.push(ChannelView {
             id: Some(u.id),
             source: "ui",
-            health: health_of(&health, &u.name, &u.kind),
+            health: since(health_of(&health, &u.name, &u.kind), row.created_at),
             digest: match &u.config {
                 Some(c) => c.wants_digest(),
                 None => row
@@ -775,5 +786,50 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A re-created channel does not show the last delivery of the deleted
+    /// channel it replaced.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn recreated_channel_shows_only_its_own_deliveries(pool: PgPool) {
+        let app = app(&pool, Some(key()));
+        let admin = admin(&pool).await;
+        call(
+            &app,
+            "POST",
+            "/api/v1/channels",
+            &admin,
+            Some(slack("ui-slack", "https://hooks.example/x")),
+        )
+        .await;
+        let sent = |offset: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO outbox (group_key, card, route, channel_type, sent_at) \
+                     SELECT 'g', '{}', 'ui-slack', 'slack', created_at + $1::interval \
+                     FROM alert_channels WHERE name = 'ui-slack'",
+                )
+                .bind(offset)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        let last_sent = || async {
+            let (_, body) = call(&app, "GET", "/api/v1/channels", &admin, None).await;
+            let v: Value = serde_json::from_str(&body).unwrap();
+            v["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == "ui-slack")
+                .unwrap()["health"]["last_sent_at"]
+                .clone()
+        };
+        sent("-1 day").await;
+        assert_eq!(last_sent().await, Value::Null);
+        sent("1 minute").await;
+        assert!(last_sent().await.is_string());
     }
 }

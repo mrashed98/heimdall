@@ -11,7 +11,7 @@
     settings: Record<string, string | number | string[] | null>;
     secrets: Record<string, { set: boolean }>;
     missing_env: string[];
-    state: 'ok' | 'key_missing' | 'unreadable' | 'name_clash';
+    state: 'ok' | 'key_missing' | 'unreadable' | 'invalid' | 'name_clash';
     health: ChannelHealth;
   };
   type ChannelList = { management_enabled: boolean; channels: Channel[] };
@@ -36,6 +36,7 @@
     ok: '',
     key_missing: 'Key missing',
     unreadable: 'Secret unreadable: re-enter it',
+    invalid: 'Invalid: see the server log',
     name_clash: 'Name clash with config: delete this channel',
   };
   const formId = $props.id();

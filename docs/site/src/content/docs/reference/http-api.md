@@ -431,8 +431,9 @@ response ever contains a secret value or the value of an environment variable.
 - `missing_env`: for a config channel, the names of its variables that are not
   set. Always empty for a console channel.
 - `state`: `ok`; `key_missing` (the channel holds secrets and there is no key);
-  `unreadable` (its secrets were sealed under another key, or it no longer
-  validates); `name_clash` (a config channel has its name and is used instead).
+  `unreadable` (its secrets were sealed under another key); `invalid` (its
+  stored settings no longer validate; alerts raised meanwhile are not queued
+  for it); `name_clash` (a config channel has its name and is used instead).
   Always `ok` for a config channel.
 - `realms`: for a console channel, as saved, including a realm since removed
   from the config (which delivery ignores).

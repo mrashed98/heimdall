@@ -29,7 +29,7 @@ pub fn render(ch: &ChannelConfig, a: &Alert) -> Value {
         ChannelConfig::Teams(_) => teams::render(a),
         ChannelConfig::Slack(_) => slack::render(a),
         ChannelConfig::Discord(_) => discord::render(a),
-        ChannelConfig::Telegram(c) => telegram::render(a, &c.chat_id.as_string()),
+        ChannelConfig::Telegram(_) => telegram::render(a),
         ChannelConfig::PagerDuty(_) => pagerduty::render(a),
         ChannelConfig::Alertmanager(_) => alertmanager::render(a),
         ChannelConfig::Webhook(_) => webhook::render(a),
@@ -147,9 +147,11 @@ pub fn request(
                 .as_deref()
                 .unwrap_or(telegram::API_URL)
                 .trim_end_matches('/');
+            let mut message = payload.clone();
+            message["chat_id"] = Value::String(c.chat_id.as_string());
             Request::Http {
                 url: format!("{base}/bot{token}/sendMessage"),
-                body: json(payload),
+                body: json(&message),
                 headers: Vec::new(),
                 auth: None,
                 redact: vec![token],
