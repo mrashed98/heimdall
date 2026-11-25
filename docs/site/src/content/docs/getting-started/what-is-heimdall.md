@@ -62,9 +62,9 @@ Heimdall is built to fit a small, shared cluster:
 
 ## What Heimdall does not do (yet)
 
-Phase 1 is a backend and a CLI. There is no web UI, no multi-tenant or SSO
-support, no license compliance and no policy engine beyond the severity gate.
-Teams is the only notifier.
+Heimdall has no multi-tenancy (one instance, one organisation, with realms
+inside it), no license compliance and no policy engine beyond the severity
+gate. License tracking and policies are planned.
 
 ## Next steps
 

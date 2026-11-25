@@ -39,7 +39,8 @@ Alerts, the web console, oaths, the CI gate and the API are unchanged.
 ## Docker Compose
 
 The compose file runs Heimdall and Postgres 17 on one host. It is in the
-repository at `deploy/compose/`.
+repository at `deploy/compose/` and needs Docker Compose 2.24 or later
+(`docker compose version`).
 
 <Steps>
 
@@ -54,13 +55,17 @@ repository at `deploy/compose/`.
 2. Fill in `.env`. Each line says how to generate its value:
 
    ```bash
-   POSTGRES_PASSWORD=<a long random password>
-   HEIMDALL_BOOTSTRAP_ADMIN_KEY=hd_...   # echo "hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
-   HEIMDALL_SECRET_KEY=...               # openssl rand -base64 32
+   cat > .env <<EOF
+   POSTGRES_PASSWORD=$(openssl rand -hex 24)
+   HEIMDALL_BOOTSTRAP_ADMIN_KEY=hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+   HEIMDALL_SECRET_KEY=$(openssl rand -base64 32)
+   EOF
    ```
 
-   Keep a copy of `HEIMDALL_SECRET_KEY`: without it, secrets saved in the
-   console cannot be read back.
+   All three are required; `docker compose up` names any that is missing.
+   Use only URL-safe characters in `POSTGRES_PASSWORD`, since it goes into the
+   database URL as is. Keep a copy of `HEIMDALL_SECRET_KEY`: without it,
+   secrets saved in the console cannot be read back.
 
 3. Write `heimdall.yaml` next to the compose file. The smallest one names
    your realms:
@@ -102,14 +107,19 @@ Postgres 17); it creates its own tables.
 
 <Steps>
 
-1. Install the binary:
+1. Download the binary, check it, and install it:
 
    ```bash
    ARCH=amd64   # or arm64
-   sudo curl -fsSL -o /usr/local/bin/heimdall \
-     https://github.com/mrashed98/heimdall/releases/latest/download/heimdall-linux-$ARCH
-   sudo chmod +x /usr/local/bin/heimdall
+   BASE=https://github.com/mrashed98/heimdall/releases/latest/download
+   curl -fsSLO "$BASE/heimdall-linux-$ARCH"
+   curl -fsSLO "$BASE/SHA256SUMS"
+   sha256sum --check --ignore-missing SHA256SUMS
+   sudo install -m 755 "heimdall-linux-$ARCH" /usr/local/bin/heimdall
    ```
+
+   `SHA256SUMS` is published with every release after 0.3.2. For 0.3.2 and
+   earlier, compare against the checksum shown on the release page instead.
 
 2. Write the config and the environment file:
 
@@ -118,14 +128,19 @@ Postgres 17); it creates its own tables.
    sudo tee /etc/heimdall/heimdall.yaml >/dev/null <<'EOF'
    realms: [prod]
    EOF
-   sudo tee /etc/heimdall/heimdall.env >/dev/null <<'EOF'
-   DATABASE_URL=postgres://heimdall:<password>@localhost:5432/heimdall
-   HEIMDALL_BOOTSTRAP_ADMIN_KEY=hd_...
-   HEIMDALL_SECRET_KEY=...
+   ADMIN_KEY="hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+   sudo tee /etc/heimdall/heimdall.env >/dev/null <<EOF
+   DATABASE_URL=postgres://heimdall:CHANGE_ME@localhost:5432/heimdall
+   HEIMDALL_BOOTSTRAP_ADMIN_KEY=$ADMIN_KEY
+   HEIMDALL_SECRET_KEY=$(openssl rand -base64 32)
    EOF
    sudo chmod 600 /etc/heimdall/heimdall.env
+   echo "Admin key: $ADMIN_KEY"   # sign in with this; it is also in the file
    heimdall serve --check-config /etc/heimdall/heimdall.yaml   # prints "config ok"
    ```
+
+   Replace `CHANGE_ME` in `/etc/heimdall/heimdall.env` with the database
+   password (URL-safe characters, or percent-encode the others).
 
 3. Install the service. The unit in the repository at
    `deploy/systemd/heimdall.service` runs Heimdall as a dynamic user with

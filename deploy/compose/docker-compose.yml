@@ -1,5 +1,6 @@
 # Heimdall and Postgres on one Docker host. See the "Install without
-# Kubernetes" guide. Put heimdall.yaml and .env next to this file, then:
+# Kubernetes" guide. Needs Docker Compose 2.24 or later. Put heimdall.yaml
+# and .env next to this file, then:
 #   docker compose up -d
 services:
   postgres:
@@ -25,8 +26,10 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://heimdall:${POSTGRES_PASSWORD}@postgres:5432/heimdall
-      HEIMDALL_BOOTSTRAP_ADMIN_KEY: ${HEIMDALL_BOOTSTRAP_ADMIN_KEY:-}
-      HEIMDALL_SECRET_KEY: ${HEIMDALL_SECRET_KEY:-}
+      # Required: without them a fresh install has no admin and cannot store
+      # console channel secrets.
+      HEIMDALL_BOOTSTRAP_ADMIN_KEY: ${HEIMDALL_BOOTSTRAP_ADMIN_KEY:?set HEIMDALL_BOOTSTRAP_ADMIN_KEY in .env}
+      HEIMDALL_SECRET_KEY: ${HEIMDALL_SECRET_KEY:?set HEIMDALL_SECRET_KEY in .env}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     env_file:
       # Variables your heimdall.yaml names (webhook URLs, SMTP passwords, ...).
@@ -40,6 +43,9 @@ services:
       - "127.0.0.1:8080:8080"
     mem_limit: 1g
     cpus: 1
+    # Time to finish in-flight requests on stop (a CI gate call can take
+    # up to 60 s); Docker's default is 10 s.
+    stop_grace_period: 75s
 
 volumes:
   postgres:

@@ -198,8 +198,8 @@ You need Rust (stable), Docker and, optionally, an alert channel (a Teams or Sla
 Docker Compose (Heimdall and Postgres on one host) and a hardened systemd unit
 for the static release binary are in `deploy/compose/` and `deploy/systemd/`.
 See [Install without Kubernetes](https://mrashed98.github.io/heimdall/getting-started/without-kubernetes/);
-outside a cluster, the inventory comes from SBOM uploads and declared
-components instead of Sight.
+outside a cluster, the inventory comes from SBOM uploads, declared components,
+and `heimdall sight --push` from any cluster you also run.
 
 ## Deploy on Kubernetes (Helm)
 

@@ -214,9 +214,13 @@ jobs:
         with:
           pattern: heimdall-linux-*
           merge-multiple: true
+      - name: Checksums
+        run: sha256sum heimdall-linux-* > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
-          files: heimdall-linux-*
+          files: |
+            heimdall-linux-*
+            SHA256SUMS
           fail_on_unmatched_files: true
 
   # Images copy in the binaries the binaries job built natively, so no Rust

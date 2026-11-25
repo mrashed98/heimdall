@@ -13,6 +13,9 @@ EnvironmentFile=/etc/heimdall/heimdall.env
 DynamicUser=yes
 Restart=on-failure
 RestartSec=5
+# Time to finish in-flight requests on stop (a CI gate call can take up
+# to 60 s).
+TimeoutStopSec=75
 MemoryMax=1G
 CPUQuota=100%
 NoNewPrivileges=yes
