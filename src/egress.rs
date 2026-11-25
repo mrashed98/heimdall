@@ -135,8 +135,15 @@ fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
     if (s[0], s[1]) == (0x64, 0xff9b) {
         out.push(last);
         if s[2] == 1 {
-            // Bits 64-71 (octet 8) are the RFC 6052 "u" octet, skipped.
-            out.extend([v4([6, 7, 9, 10]), v4([7, 9, 10, 11]), v4([9, 10, 11, 12])]);
+            // Bits 64-71 (octet 8) are the RFC 6052 "u" octet, skipped. Which
+            // prefix length was used can't be told, so the other positions are
+            // only guesses: one starting with 0 is the zero padding of a /96
+            // address (`64:ff9b:1::a00:1` holds 10.0.0.1), not an address.
+            out.extend(
+                [v4([6, 7, 9, 10]), v4([7, 9, 10, 11]), v4([9, 10, 11, 12])]
+                    .into_iter()
+                    .filter(|a| a.octets()[0] != 0),
+            );
         }
     }
     out
@@ -299,6 +306,9 @@ mod tests {
             "::1",
             "fd00::1",
             "64:ff9b::808:808",
+            // Local-use NAT64 to internal addresses stays allowed.
+            "64:ff9b:1::a00:1",
+            "64:ff9b:1::c0a8:101",
             "2002:808:808::1",
         ] {
             assert!(!forbidden(ip.parse().unwrap()), "{ip}");
