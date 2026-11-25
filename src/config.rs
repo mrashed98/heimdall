@@ -41,6 +41,9 @@ pub struct HeimdallConfig {
     #[serde(default)]
     pub sight: SightConfig,
     pub auth: Option<AuthConfig>,
+    /// Limits on channels created in the console.
+    #[serde(default)]
+    pub console_channels: crate::egress::ConsoleChannels,
 }
 
 impl HeimdallConfig {

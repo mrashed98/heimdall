@@ -254,7 +254,8 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
         }
         Job::Outbox => {
             let chans = channels(st).await?;
-            let r = outbox::drain_once(&st.pool, &st.http, &st.cfg, &chans, now).await?;
+            let egress = crate::egress::Egress::new(&st.cfg.console_channels);
+            let r = outbox::drain_once(&st.pool, &egress, &st.cfg, &chans, now).await?;
             meters::record_drain(&r);
             // Every 2 s: quiet unless something happened.
             if r.sent + r.retry + r.failed > 0 {

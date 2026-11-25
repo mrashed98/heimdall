@@ -15,6 +15,7 @@ use super::channels::email::{MailError, Mailer, SmtpMailer};
 use super::channels::{self, HttpAuth, Request, Secrets};
 use super::store::Channels;
 use crate::config::{ChannelConfig, HeimdallConfig};
+use crate::egress::{Egress, Origin};
 
 /// First retry delay; doubled per failed attempt.
 const BACKOFF_BASE_SECS: i64 = 30;
@@ -58,9 +59,10 @@ pub(crate) async fn push(
     Ok(id)
 }
 
-/// How messages leave: HTTP for the webhook types, a mailer for email.
+/// How messages leave: HTTP for the webhook types, a mailer for email,
+/// each only to an address `egress` allows.
 pub struct Delivery<'a> {
-    pub http: &'a reqwest::Client,
+    pub egress: &'a Egress,
     pub mailer: &'a dyn Mailer,
 }
 
@@ -68,7 +70,7 @@ pub struct Delivery<'a> {
 /// see `drain_with`.
 pub async fn drain_once(
     pool: &PgPool,
-    http: &reqwest::Client,
+    egress: &Egress,
     cfg: &HeimdallConfig,
     chans: &Channels,
     now: DateTime<Utc>,
@@ -77,7 +79,7 @@ pub async fn drain_once(
         secrets: &chans.secrets,
     };
     let d = Delivery {
-        http,
+        egress,
         mailer: &mailer,
     };
     drain_with(pool, &d, cfg, chans, now).await
@@ -94,7 +96,7 @@ pub async fn drain_once(
 pub async fn drain_with(
     pool: &PgPool,
     d: &Delivery<'_>,
-    _cfg: &HeimdallConfig,
+    cfg: &HeimdallConfig,
     chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
@@ -151,7 +153,12 @@ pub async fn drain_with(
     let kind = ch.type_name();
     result.channel_type = Some(kind);
 
-    match attempt(d, ch, &card, now, &chans.secrets).await {
+    let origin = if cfg.channels().iter().any(|c| c.name() == ch.name()) {
+        Origin::Config
+    } else {
+        Origin::Console
+    };
+    match attempt(d, ch, origin, &card, now, &chans.secrets).await {
         Outcome::Sent => {
             sqlx::query("UPDATE outbox SET sent_at = $2 WHERE id = $1")
                 .bind(id)
@@ -236,6 +243,7 @@ async fn record_retry(
 async fn attempt(
     d: &Delivery<'_>,
     ch: &ChannelConfig,
+    origin: Origin,
     payload: &Value,
     now: DateTime<Utc>,
     secrets: &Secrets,
@@ -246,7 +254,7 @@ async fn attempt(
             if let Request::Http { redact, .. } = &req {
                 hide.extend(redact.iter().cloned());
             }
-            send(d, ch, req).await
+            send(d, ch, origin, req).await
         }
         Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
     };
@@ -271,11 +279,12 @@ async fn attempt(
 pub async fn send_now(
     d: &Delivery<'_>,
     ch: &ChannelConfig,
+    origin: Origin,
     secrets: &Secrets,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
     let payload = channels::render(ch, &Alert::test(now));
-    match attempt(d, ch, &payload, now, secrets).await {
+    match attempt(d, ch, origin, &payload, now, secrets).await {
         Outcome::Sent => Ok(()),
         Outcome::Retry { why, .. } | Outcome::Hold(why) | Outcome::Rejected(why) => Err(why),
     }
@@ -351,7 +360,7 @@ enum Outcome {
     Rejected(String),
 }
 
-async fn send(d: &Delivery<'_>, ch: &ChannelConfig, req: Request) -> Outcome {
+async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request) -> Outcome {
     match req {
         Request::Http {
             url,
@@ -359,12 +368,31 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, req: Request) -> Outcome {
             headers,
             auth,
             redact,
-        } => send_http(d.http, &url, body, &headers, auth.as_ref(), &redact).await,
+        } => {
+            let Ok(parsed) = reqwest::Url::parse(&url) else {
+                return Outcome::Rejected("the channel URL is not a valid URL".to_string());
+            };
+            let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default())
+            else {
+                return Outcome::Rejected("the channel URL has no host".to_string());
+            };
+            // A destination it may not reach is the channel's problem, not
+            // the alert's: hold the queue so nothing is lost.
+            let addrs = match d.egress.resolve(host, port, origin).await {
+                Ok(a) => a,
+                Err(why) => return Outcome::Hold(why),
+            };
+            send_http(&parsed, &addrs, body, &headers, auth.as_ref(), &redact).await
+        }
         Request::Email(msg) => {
             let ChannelConfig::Email(c) = ch else {
                 return Outcome::Rejected("an email for a non-email channel".to_string());
             };
-            match d.mailer.send(c, *msg).await {
+            let addr = match d.egress.resolve(&c.host, c.port(), origin).await {
+                Ok(a) => a[0],
+                Err(why) => return Outcome::Hold(why),
+            };
+            match d.mailer.send(c, addr, *msg).await {
                 Ok(()) => Outcome::Sent,
                 Err(MailError::Transient(why)) => Outcome::Retry {
                     retry_after_secs: None,
@@ -385,16 +413,32 @@ fn scrub(mut s: String, secrets: &[String]) -> String {
     s
 }
 
+/// POST `body` to `url`, connecting only to `addrs` (checked by `Egress`)
+/// and never following a redirect, which could lead anywhere.
 async fn send_http(
-    http: &reqwest::Client,
-    url: &str,
+    url: &reqwest::Url,
+    addrs: &[std::net::SocketAddr],
     body: Vec<u8>,
     headers: &[(&'static str, String)],
     auth: Option<&HttpAuth>,
     redact: &[String],
 ) -> Outcome {
+    let http = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .resolve_to_addrs(url.host_str().unwrap_or_default(), addrs)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Outcome::Retry {
+                retry_after_secs: None,
+                why: format!("building the http client: {e}"),
+            }
+        }
+    };
     let mut rb = http
-        .post(url)
+        .post(url.clone())
         .timeout(std::time::Duration::from_secs(SEND_TIMEOUT_SECS))
         .header(CONTENT_TYPE, "application/json")
         .body(body);
@@ -420,6 +464,12 @@ async fn send_http(
     let status = resp.status();
     if status.is_success() {
         return Outcome::Sent;
+    }
+    if status.is_redirection() {
+        // Kept queued, so the admin can set the final URL without losing it.
+        return Outcome::Hold(format!(
+            "{status}: redirects are not followed; use the URL it redirects to"
+        ));
     }
     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
         // Retry-After in seconds, at most the backoff cap so a huge value
@@ -476,15 +526,30 @@ mod tests {
     }
 
     async fn post(url: &str, redact: &[String]) -> Outcome {
-        send_http(
-            &reqwest::Client::new(),
-            url,
-            b"{}".to_vec(),
-            &[],
-            None,
-            redact,
-        )
-        .await
+        let url = reqwest::Url::parse(url).unwrap();
+        let host = url.host_str().unwrap().to_string();
+        let addrs = Egress::default()
+            .resolve(&host, url.port_or_known_default().unwrap(), Origin::Config)
+            .await
+            .unwrap();
+        send_http(&url, &addrs, b"{}".to_vec(), &[], None, redact).await
+    }
+
+    /// The connection goes to the checked addresses, not to whatever the
+    /// host name resolves to later: here it resolves to nothing at all.
+    #[tokio::test]
+    async fn send_connects_only_to_the_checked_addresses() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let addr = *server.address();
+        let url = reqwest::Url::parse(&format!("http://pinned.invalid:{}/", addr.port())).unwrap();
+        let out = send_http(&url, &[addr], b"{}".to_vec(), &[], None, &[]).await;
+        assert_eq!(out, Outcome::Sent);
+        server.verify().await;
     }
 
     #[tokio::test]

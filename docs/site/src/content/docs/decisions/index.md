@@ -18,6 +18,7 @@ repository; these pages are generated from those files when the site is built.
 | [0003: Sight never reads Kubernetes Secrets](/heimdall/decisions/0003-no-secret-access/) | Chart versions come from workload labels and ArgoCD, not Helm Secrets. |
 | [0004: API keys hashed with SHA-256](/heimdall/decisions/0004-sha256-api-keys/) | Keys are random, so a fast hash is safe and cheap on one CPU. |
 | [0005: Console channel secrets encrypted in Postgres](/heimdall/decisions/0005-encrypted-channel-secrets/) | AES-256-GCM under `HEIMDALL_SECRET_KEY`; no restart per channel and no RBAC to write Secrets. |
+| [0006: Channel destinations checked at connect time](/heimdall/decisions/0006-channel-destinations/) | Metadata and link-local refused, no redirects, optional allowlist for console channels. |
 
 If you change something an ADR covers, update or supersede the ADR in the same
 pull request. See [Contributing](/heimdall/project/contributing/).

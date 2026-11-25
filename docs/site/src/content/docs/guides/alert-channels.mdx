@@ -71,6 +71,8 @@ console](#managing-channels-in-the-console)).
   honoured (clamped to 1 h), exactly once even across restarts. A message the
   channel rejects (a 4xx other than 429, a permanent SMTP error) is not retried
   and counts in `heimdall_notify_failures_total{channel_type}`.
+- **Destinations are checked** before every send: see
+  [Where channels may send](#where-channels-may-send).
 - **A missing variable** keeps that channel's messages queued until it is set.
   Renaming a channel to another `type` leaves messages queued for the old type
   where they are, rather than sending them in the wrong format.
@@ -386,6 +388,51 @@ queued while an earlier channel of that name was being deleted. They are marked
 failed with the reason "channel recreated", so a new channel never sends old
 alerts to its new destination. The `channel_created` audit entry records how
 many were discarded.
+
+## Where channels may send
+
+Before each send, Heimdall looks up the channel's host and connects only to
+the addresses it checked, so the check and the connection always agree.
+
+- **Never sent to, by any channel:** link-local addresses (`169.254.0.0/16`,
+  `fe80::/10`), which include the cloud metadata service at
+  `169.254.169.254` on AWS, Google Cloud, Azure and OpenStack; Alibaba
+  Cloud's `100.100.100.200`; AWS's IPv6 `fd00:ec2::254`; and unspecified,
+  multicast and broadcast addresses. No alert destination lives there.
+- **Redirects are not followed.** A channel whose server answers with a
+  redirect keeps its alerts queued and shows the reason; set the URL it
+  redirects to.
+- **Private and loopback addresses are allowed**, because Alertmanager, an
+  internal webhook or an SMTP relay usually live there.
+
+A destination that is refused keeps the channel's alerts queued with the
+reason (shown as **Failing** in the console), so nothing is lost when you fix
+it. Saving a console channel with a refused destination fails with the same
+reason.
+
+### Limiting console channels to some hosts
+
+An admin can point a console channel at any host Heimdall reaches, which
+includes internal services. To limit that, list the allowed destinations in
+`heimdall.yaml`:
+
+```yaml
+console_channels:
+  allowed_hosts:
+    - "*.slack.com"            # any subdomain, not slack.com itself
+    - hooks.example.com        # this host only
+    - alertmanager.monitoring.svc
+    - 10.20.0.0/16             # any address in the network
+```
+
+When the list is set, a console channel may only send to a host matching an
+entry by name, or resolving to an address in a listed network. Channels in
+`heimdall.yaml` are not limited by it. The list can only be set in the config
+file, not in the console, because it limits what console admins can reach.
+
+If Heimdall sends through a proxy (`HTTPS_PROXY`), the proxy connects to the
+destination: the checks above still apply to the URL's host and the
+addresses it resolves to on the Heimdall side.
 
 ## Troubleshooting
 

@@ -24,3 +24,10 @@ each version, with the binaries and container image tags.
   channel when an alert is sent, not when it is queued. This applies to
   channels in `heimdall.yaml` as well as console channels: alerts waiting in the
   queue go to the new chat after you change `chat_id`.
+- **Channel destinations are checked.** No channel sends to link-local or
+  cloud metadata addresses, redirects are no longer followed (a channel whose
+  server redirects keeps its alerts queued and says why), and each send
+  connects only to the addresses it checked. The new
+  `console_channels.allowed_hosts` limits where console channels may send. See
+  [Where channels may send](/heimdall/guides/alert-channels/#where-channels-may-send)
+  and [ADR 0006](/heimdall/decisions/0006-channel-destinations/).

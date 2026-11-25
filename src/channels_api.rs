@@ -17,6 +17,7 @@ use serde_json::{json, Map, Value};
 
 use crate::admin::require_admin;
 use crate::config::ChannelConfig;
+use crate::egress::{Egress, Origin};
 use crate::error::ApiError;
 use crate::local_auth::Principal;
 use crate::model::Severity;
@@ -326,8 +327,8 @@ async fn test(
 ) -> Result<StatusCode, Fail> {
     require_admin(&p)?;
     let chans = store::load(&st.pool, &st.cfg, st.secret_key.as_deref()).await?;
-    let ch = match st.cfg.channels().into_iter().find(|c| c.name() == name) {
-        Some(c) => c,
+    let (ch, origin) = match st.cfg.channels().into_iter().find(|c| c.name() == name) {
+        Some(c) => (c, Origin::Config),
         None => {
             let u = chans
                 .ui
@@ -335,7 +336,7 @@ async fn test(
                 .find(|u| u.name == name)
                 .ok_or(ApiError::NotFound)?;
             match (&u.config, u.state) {
-                (Some(c), UiState::Ok) => c.clone(),
+                (Some(c), UiState::Ok) => (c.clone(), Origin::Console),
                 (_, s) => {
                     return Err(Fail::Status(
                         StatusCode::CONFLICT,
@@ -357,12 +358,13 @@ async fn test(
     let mailer = SmtpMailer {
         secrets: &chans.secrets,
     };
+    let egress = Egress::new(&st.cfg.console_channels);
     let d = Delivery {
-        http: &st.http,
+        egress: &egress,
         mailer: &mailer,
     };
     // The error is already redacted.
-    let sent = outbox::send_now(&d, &ch, &chans.secrets, Utc::now()).await;
+    let sent = outbox::send_now(&d, &ch, origin, &chans.secrets, Utc::now()).await;
     let mut conn = st.pool.acquire().await?;
     crate::admin::record(
         &mut conn,

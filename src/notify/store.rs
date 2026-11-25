@@ -15,6 +15,7 @@ use sqlx::{PgConnection, PgPool};
 
 use super::channels::Secrets;
 use crate::config::{ChannelConfig, HeimdallConfig};
+use crate::egress::Egress;
 use crate::model::Severity;
 use crate::secrets::SecretKey;
 
@@ -174,7 +175,7 @@ struct Draft<'a> {
 
 /// The checks shared by create and update, on the final state. The name is
 /// checked by `create` only: it cannot change afterwards.
-fn check(cfg: &HeimdallConfig, d: &Draft) -> Result<(), StoreError> {
+fn check(cfg: &HeimdallConfig, d: &Draft) -> Result<ChannelConfig, StoreError> {
     let fields = secret_fields(d.kind)
         .ok_or_else(|| invalid(format!("unknown channel type `{}`", d.kind)))?;
     for k in d.settings.keys() {
@@ -211,8 +212,27 @@ fn check(cfg: &HeimdallConfig, d: &Draft) -> Result<(), StoreError> {
         d.digest,
         d.settings,
         &present,
-    )?;
-    Ok(())
+    )
+}
+
+/// Refuse a destination the channel could never send to: a link-local or
+/// metadata address, or one outside `console_channels.allowed_hosts`.
+async fn check_destination(
+    cfg: &HeimdallConfig,
+    ch: &ChannelConfig,
+    secrets: &BTreeMap<String, String>,
+) -> Result<(), StoreError> {
+    let refs: Secrets = secrets
+        .iter()
+        .map(|(field, v)| (ui_secret_ref(ch.name(), field), v.clone()))
+        .collect();
+    let Some((host, port)) = super::channels::destination(ch, &refs) else {
+        return Ok(());
+    };
+    Egress::new(&cfg.console_channels)
+        .check_console(&host, port)
+        .await
+        .map_err(invalid)
 }
 
 /// The `secrets` and `secret_names` column values for `secrets`.
@@ -266,7 +286,7 @@ pub async fn create(
 ) -> Result<i64, StoreError> {
     check_name(&c.name)?;
     let secrets: BTreeMap<String, String> = c.secrets.clone().into_iter().collect();
-    check(
+    let built = check(
         cfg,
         &Draft {
             kind: &c.kind,
@@ -278,6 +298,7 @@ pub async fn create(
             secrets: &secrets,
         },
     )?;
+    check_destination(cfg, &built, &secrets).await?;
     if cfg.channels().iter().any(|ch| ch.name() == c.name) {
         return Err(StoreError::NameTaken);
     }
@@ -615,7 +636,7 @@ pub async fn update(
         Some(_) => return Err(invalid("digest must be true, false or null")),
     };
     let settings = p.settings.clone().unwrap_or_else(|| row.settings.0.clone());
-    check(
+    let built = check(
         cfg,
         &Draft {
             kind: &row.kind,
@@ -627,6 +648,7 @@ pub async fn update(
             secrets: &secrets,
         },
     )?;
+    check_destination(cfg, &built, &secrets).await?;
 
     let mut changed: BTreeSet<&str> = BTreeSet::new();
     if realms != row.realms {

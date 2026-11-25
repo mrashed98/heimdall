@@ -39,6 +39,11 @@ teams:
 #     to: [security@example.com]
 #     min_severity: high
 
+# Optional: where channels created in the web console may send (host names,
+# *.subdomain wildcards, IPs or CIDR networks). Unset means no limit.
+# console_channels:
+#   allowed_hosts: ["*.slack.com", alertmanager.monitoring.svc, 10.0.0.0/8]
+
 watchers:
   github:
     - { repo: kubernetes/kubernetes, inventory_name: kubernetes, major_component: 1 }

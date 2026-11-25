@@ -22,6 +22,8 @@ pub mod store;
 pub mod teams;
 
 #[cfg(test)]
+mod egress_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeSet;

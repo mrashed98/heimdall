@@ -33,6 +33,7 @@ realm in `teams[].realms`, `channels[].realms`, `declared[].realm` or
 | [`own_registries`](#own_registries) | list of strings | `[]` |
 | [`teams`](#teams) | list of routes | `[]` |
 | [`channels`](#channels) | list of channels | `[]` |
+| [`console_channels`](#console_channels) | object | no limit |
 | [`watchers`](#watchers) | object | empty |
 | [`declared`](#declared) | list | `[]` |
 | [`registries`](#registries) | list | `[]` |
@@ -167,6 +168,18 @@ channels:
     url: http://alertmanager.monitoring:9093
     min_severity: high
 ```
+
+## `console_channels`
+
+Limits on channels created in the web console.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `allowed_hosts` | list of strings | `[]` | When set, console channels may only send to these destinations. Each entry is a host name (`hooks.example.com`), a subdomain wildcard (`*.example.com`, which does not match `example.com`), an IP address or a CIDR network (`10.0.0.0/8`). An invalid entry is a config error. |
+
+Channels in this file are not limited by it. Link-local and cloud metadata
+addresses are refused for every channel whatever this says. See [Where
+channels may send](/heimdall/guides/alert-channels/#where-channels-may-send).
 
 ## `watchers`
 
