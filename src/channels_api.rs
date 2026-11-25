@@ -834,4 +834,54 @@ mod tests {
         sent("1 minute").await;
         assert!(last_sent().await.is_string());
     }
+
+    /// Test on a console channel obeys `console_channels.allowed_hosts`, as
+    /// delivery does; a config channel to the same host is not limited.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn test_send_of_a_console_channel_obeys_the_allowlist(pool: PgPool) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let admin = admin(&pool).await;
+        let hook = format!("{}/hook", server.uri());
+        // Saved while nothing limited console channels.
+        call(
+            &app(&pool, Some(key())),
+            "POST",
+            "/api/v1/channels",
+            &admin,
+            Some(slack("ui-slack", &hook)),
+        )
+        .await;
+        std::env::set_var("HEIMDALL_TEST_ALLOWLIST_HOOK", &hook);
+        let limited = HeimdallConfig::from_yaml(
+            "realms: [prod, dev]\nadmins: [admin]\nchannels:\n  \
+             - type: slack\n    name: cfg-slack\n    webhook_env: HEIMDALL_TEST_ALLOWLIST_HOOK\n    \
+             min_severity: high\n\
+             console_channels:\n  allowed_hosts: ['10.0.0.0/8']\n",
+        )
+        .unwrap();
+        let mut st = AppState::new(pool.clone(), Arc::new(limited), reqwest::Client::new());
+        st.secret_key = Some(Arc::new(key()));
+        let app = router(st);
+        let (status, body) =
+            call(&app, "POST", "/api/v1/channels/ui-slack/test", &admin, None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert!(body.contains("allowed_hosts"), "{body}");
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/v1/channels/cfg-slack/test",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        server.verify().await;
+    }
 }

@@ -215,8 +215,11 @@ fn check(cfg: &HeimdallConfig, d: &Draft) -> Result<ChannelConfig, StoreError> {
     )
 }
 
-/// Refuse a destination the channel could never send to: a link-local or
-/// metadata address, or one outside `console_channels.allowed_hosts`.
+/// Refuse a destination the channel could never send to, as far as it can
+/// be told without a lookup: a refused IP address, or, when
+/// `console_channels.allowed_hosts` is set, a host outside it (looked up).
+/// A host name that resolves to a refused address is only refused at send
+/// time.
 async fn check_destination(
     cfg: &HeimdallConfig,
     ch: &ChannelConfig,

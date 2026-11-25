@@ -185,11 +185,23 @@ impl Mailer for SmtpMailer<'_> {
         msg: Message,
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>> {
         Box::pin(async move {
+            // One deadline for the whole send, however many addresses: a
+            // blackholed first address must not stall the outbox per address.
+            let deadline = tokio::time::Instant::now() + SEND_TIMEOUT;
             let mut last = MailError::Transient("no address to connect to".to_string());
             for &addr in addrs {
-                let transport = transport(ch, addr, self.secrets)
-                    .map_err(|e| MailError::Transient(e.to_string()))?;
-                match transport.send(msg.clone()).await {
+                let transport = match transport(ch, addr, self.secrets) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        last = MailError::Transient(e.to_string());
+                        continue;
+                    }
+                };
+                let sent = tokio::time::timeout_at(deadline, transport.send(msg.clone())).await;
+                let Ok(sent) = sent else {
+                    return Err(MailError::Transient("timed out".to_string()));
+                };
+                match sent {
                     Ok(_) => return Ok(()),
                     // No SMTP reply: this address did not answer; try the next.
                     Err(e) if e.status().is_none() && !e.is_permanent() => {

@@ -313,3 +313,49 @@ async fn email_falls_back_to_the_next_address() {
     let mailer = SmtpMailer { secrets: &secrets };
     mailer.send(&c, &[dead, live], msg).await.unwrap();
 }
+
+/// One deadline covers every address: two servers that accept but never
+/// greet cost one send timeout (30 s), not one per address.
+#[tokio::test(start_paused = true)]
+async fn email_has_one_deadline_for_all_addresses() {
+    use super::channels::email::{self, Mailer, SmtpMailer};
+    use crate::config::ChannelConfig;
+    let mut silent = Vec::new();
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        silent.push(l.local_addr().unwrap());
+        held.push(tokio::spawn(async move {
+            // Accept and hold the connection open without a word.
+            let mut socks = Vec::new();
+            while let Ok((s, _)) = l.accept().await {
+                socks.push(s);
+            }
+        }));
+    }
+    let ChannelConfig::Email(c) = serde_saphyr::from_str::<ChannelConfig>(
+        "{type: email, name: mail, host: localhost, security: none, \
+         from: heimdall@example.com, to: [ops@example.com], min_severity: high}",
+    )
+    .unwrap() else {
+        unreachable!()
+    };
+    let msg = email::message(&c, &email::render(&super::alert::Alert::test(now()))).unwrap();
+    let secrets = super::channels::Secrets::new();
+    let started = tokio::time::Instant::now();
+    // A send with no overall deadline would wait on the silent servers for
+    // good; fail the test at 45 s instead of hanging.
+    let sent = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        SmtpMailer { secrets: &secrets }.send(&c, &silent, msg),
+    )
+    .await;
+    let took = started.elapsed();
+    assert!(
+        matches!(sent, Ok(Err(_))) && took <= std::time::Duration::from_secs(31),
+        "{took:?} {sent:?}"
+    );
+    for h in held {
+        h.abort();
+    }
+}

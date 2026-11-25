@@ -98,7 +98,7 @@ pub fn forbidden(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => forbidden_v4(v4),
         IpAddr::V6(v6) => {
-            if embedded_v4(v6).is_some_and(forbidden_v4) {
+            if embedded_v4(v6).into_iter().any(forbidden_v4) {
                 return true;
             }
             let seg = v6.segments();
@@ -112,31 +112,34 @@ pub fn forbidden(ip: IpAddr) -> bool {
     }
 }
 
-/// The IPv4 address an IPv6 address carries, in every form that can reach
-/// it: mapped (`::ffff:a.b.c.d`), compatible (`::a.b.c.d`), NAT64
-/// (`64:ff9b::/96`, `64:ff9b:1::/48`, last 32 bits) and 6to4 (`2002::/16`,
-/// bits 16-47).
-fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+/// The IPv4 addresses an IPv6 address may carry, in every form that can
+/// reach one: mapped (`::ffff:a.b.c.d`), compatible (`::a.b.c.d`), 6to4
+/// (`2002::/16`, bits 16-47), the well-known NAT64 prefix (`64:ff9b::/96`)
+/// and the local-use one (`64:ff9b:1::/48`, at each position RFC 6052 allows
+/// for prefixes of /48, /56, /64 and /96).
+fn embedded_v4(v6: Ipv6Addr) -> Vec<Ipv4Addr> {
+    let b = v6.octets();
+    let v4 = |i: [usize; 4]| Ipv4Addr::new(b[i[0]], b[i[1]], b[i[2]], b[i[3]]);
+    let last = v4([12, 13, 14, 15]);
     let s = v6.segments();
-    let last = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
-    if let Some(v4) = v6.to_ipv4_mapped() {
-        return Some(v4);
+    let mut out = Vec::new();
+    if let Some(m) = v6.to_ipv4_mapped() {
+        out.push(m);
     }
     if s[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback() {
-        return Some(last);
-    }
-    if (s[0], s[1]) == (0x64, 0xff9b) {
-        return Some(last);
+        out.push(last);
     }
     if s[0] == 0x2002 {
-        return Some(Ipv4Addr::new(
-            (s[1] >> 8) as u8,
-            s[1] as u8,
-            (s[2] >> 8) as u8,
-            s[2] as u8,
-        ));
+        out.push(v4([2, 3, 4, 5]));
     }
-    None
+    if (s[0], s[1]) == (0x64, 0xff9b) {
+        out.push(last);
+        if s[2] == 1 {
+            // Bits 64-71 (octet 8) are the RFC 6052 "u" octet, skipped.
+            out.extend([v4([6, 7, 9, 10]), v4([7, 9, 10, 11]), v4([9, 10, 11, 12])]);
+        }
+    }
+    out
 }
 
 fn forbidden_v4(ip: Ipv4Addr) -> bool {
@@ -216,11 +219,11 @@ impl Egress {
             .collect();
         if ok.is_empty() {
             return Err(match blocked {
-                // Never the host name: for some webhooks it is part of the
-                // secret URL.
-                Some(ip) if forbidden(ip) => {
-                    format!("the destination is {ip}, a link-local or metadata address")
-                }
+                // Never the host name or address: for some webhooks they are
+                // part of the secret URL.
+                Some(ip) if forbidden(ip) => "the destination is a forbidden address \
+                     (link-local, cloud metadata, unspecified, multicast or broadcast)"
+                    .to_string(),
                 Some(_) => "the destination is not in console_channels.allowed_hosts".to_string(),
                 None => "the destination host has no address".to_string(),
             });
@@ -279,6 +282,10 @@ mod tests {
             "::169.254.169.254",
             "64:ff9b::a9fe:a9fe",
             "64:ff9b:1::a9fe:a9fe",
+            // 169.254.169.254 in 64:ff9b:1::/48 at the /48, /56 and /64 positions.
+            "64:ff9b:1:a9fe:a9:fe00::",
+            "64:ff9b:1:a9:fe:a9fe::",
+            "64:ff9b:1::a9:fea9:fe00:0",
             "2002:a9fe:a9fe::1",
             "168.63.129.16",
         ] {
