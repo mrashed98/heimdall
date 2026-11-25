@@ -15,7 +15,13 @@ use crate::config::{EmailChannel, HeimdallConfig};
 use crate::model::{FindingKind, Severity};
 use crate::notify::alert::{Alert, Line, Link, Section};
 use crate::notify::outbox::{drain_with, Delivery, DrainResult};
+use crate::notify::store::Channels;
 use crate::notify::{AdvisoryInfo, AlertGroup, AlertItem, ReleaseInfo};
+
+/// The config channels alone.
+fn chans(c: &HeimdallConfig) -> Channels {
+    Channels::from_config(c)
+}
 
 // ---- fixtures ----
 
@@ -469,9 +475,69 @@ fn missing_env_names_the_variable() {
         "{type: webhook, name: w, url_env: CHANNELS_TEST_UNSET_URL, \
                 secret_env: CHANNELS_TEST_UNSET_SECRET, min_severity: high}",
     );
-    assert_eq!(missing_env(&c).as_deref(), Some("CHANNELS_TEST_UNSET_URL"));
+    assert_eq!(
+        missing_env(&c, &Secrets::new()).as_deref(),
+        Some("CHANNELS_TEST_UNSET_URL")
+    );
     let am = ch("{type: alertmanager, name: am, url: 'http://am:9093', min_severity: high}");
-    assert_eq!(missing_env(&am), None, "no secret needed without auth");
+    assert_eq!(
+        missing_env(&am, &Secrets::new()),
+        None,
+        "no secret needed without auth"
+    );
+}
+
+#[test]
+fn request_reads_secret_from_map_before_env() {
+    let c = ch("{type: slack, name: s, webhook_env: 'ui:s:webhook', min_severity: high}");
+    let url = "https://hooks.example/services/T/B/ui";
+    let secrets = Secrets::from([("ui:s:webhook".to_string(), url.to_string())]);
+    assert_eq!(
+        missing_env(&c, &Secrets::new()).as_deref(),
+        Some("ui:s:webhook")
+    );
+    assert_eq!(missing_env(&c, &secrets), None);
+    let Request::Http { url: got, .. } = request(&c, &json!({}), now(), &secrets).unwrap() else {
+        panic!("not http")
+    };
+    assert_eq!(got, url);
+    // An empty value counts as unset.
+    let empty = Secrets::from([("ui:s:webhook".to_string(), String::new())]);
+    assert_eq!(missing_env(&c, &empty).as_deref(), Some("ui:s:webhook"));
+}
+
+#[test]
+fn request_redacts_every_secret_it_uses() {
+    let url = "https://hooks.example/services/T/B/secret-path";
+    let secrets = Secrets::from([
+        ("ui:x:url".to_string(), url.to_string()),
+        ("ui:x:secret".to_string(), "hmac-key".to_string()),
+    ]);
+    for (yaml, want) in [
+        (
+            "{type: teams, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: slack, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: discord, name: x, webhook_env: 'ui:x:url', min_severity: high}",
+            vec![url],
+        ),
+        (
+            "{type: webhook, name: x, url_env: 'ui:x:url', secret_env: 'ui:x:secret', min_severity: high}",
+            vec![url, "hmac-key"],
+        ),
+    ] {
+        let c = ch(yaml);
+        let Request::Http { redact, .. } = request(&c, &json!({}), now(), &secrets).unwrap() else {
+            panic!("not http")
+        };
+        assert_eq!(redact, want, "{yaml}");
+        assert_eq!(secret_values(&c, &secrets).len(), want.len(), "{yaml}");
+    }
 }
 
 // ---- delivery ----
@@ -547,7 +613,7 @@ async fn drain(pool: &PgPool, c: &HeimdallConfig) -> DrainResult {
         http: &http,
         mailer: &m,
     };
-    drain_with(pool, &d, c, now()).await.unwrap()
+    drain_with(pool, &d, c, &chans(c), now()).await.unwrap()
 }
 
 async fn requests(server: &MockServer) -> Vec<WireRequest> {
@@ -862,7 +928,13 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
         http: &http,
         mailer: &ok,
     };
-    assert_eq!(drain_with(&pool, &d, &c, now()).await.unwrap().sent, 1);
+    assert_eq!(
+        drain_with(&pool, &d, &c, &chans(&c), now())
+            .await
+            .unwrap()
+            .sent,
+        1
+    );
     let sent = ok.sent.lock().unwrap().clone();
     assert_eq!(sent.len(), 1);
     let raw = String::from_utf8(sent[0].clone()).unwrap();
@@ -875,7 +947,13 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
         http: &http,
         mailer: &flaky,
     };
-    assert_eq!(drain_with(&pool, &d, &c, now()).await.unwrap().retry, 1);
+    assert_eq!(
+        drain_with(&pool, &d, &c, &chans(&c), now())
+            .await
+            .unwrap()
+            .retry,
+        1
+    );
     assert!(row(&pool, id).await.sent_at.is_none());
 
     let refusing = mailer(Err(MailError::Permanent("550 no such user".into())));
@@ -888,7 +966,13 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(drain_with(&pool, &d, &c, now()).await.unwrap().failed, 1);
+    assert_eq!(
+        drain_with(&pool, &d, &c, &chans(&c), now())
+            .await
+            .unwrap()
+            .failed,
+        1
+    );
     assert_eq!(row(&pool, id).await.card["failed"], json!(true));
 }
 
@@ -909,7 +993,7 @@ async fn smtp_auth_failure_holds_the_backlog(pool: PgPool) {
         queue(&pool, "mail", "email", &email::render(&vuln_alert())).await,
         queue(&pool, "mail", "email", &email::render(&vuln_alert())).await,
     ];
-    let r = drain_with(&pool, &d, &c, now()).await.unwrap();
+    let r = drain_with(&pool, &d, &c, &chans(&c), now()).await.unwrap();
     assert_eq!((r.retry, r.failed), (1, 0));
     for id in ids {
         let row = row(&pool, id).await;
@@ -918,7 +1002,7 @@ async fn smtp_auth_failure_holds_the_backlog(pool: PgPool) {
     }
     // The whole channel waits: nothing else is tried until then.
     assert_eq!(
-        drain_with(&pool, &d, &c, now()).await.unwrap(),
+        drain_with(&pool, &d, &c, &chans(&c), now()).await.unwrap(),
         DrainResult::default()
     );
     assert_eq!(bad_login.sent.lock().unwrap().len(), 1);
@@ -936,7 +1020,9 @@ async fn orphaned_rows_are_found(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let o = crate::notify::outbox::orphaned(&pool, &c).await.unwrap();
+    let o = crate::notify::outbox::orphaned(&pool, &chans(&c))
+        .await
+        .unwrap();
     assert_eq!(
         o,
         vec![
@@ -1006,7 +1092,12 @@ async fn teams_and_slack_routes_in_different_realms(pool: PgPool) {
     let dev = open_vuln(&pool, "dev", "web", "e2e|dev").await;
     let stage = open_vuln(&pool, "stage", "db", "e2e|stage").await;
 
-    assert_eq!(crate::notify::enqueue_alerts(&pool, &c).await.unwrap(), 2);
+    assert_eq!(
+        crate::notify::enqueue_alerts(&pool, &c, &chans(&c))
+            .await
+            .unwrap(),
+        2
+    );
     let rows: Vec<(String, String, Value)> =
         sqlx::query_as("SELECT route, channel_type, card FROM outbox ORDER BY route")
             .fetch_all(&pool)
@@ -1077,12 +1168,16 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
     .await
     .unwrap();
     let monday = Utc.with_ymd_and_hms(2026, 11, 16, 9, 30, 0).unwrap();
-    assert!(crate::notify::digest::maybe_send(&pool, &c, monday)
-        .await
-        .unwrap());
-    assert!(crate::notify::enqueue_first_run_summary(&pool, &c, "dev")
-        .await
-        .unwrap());
+    assert!(
+        crate::notify::digest::maybe_send(&pool, &c, &chans(&c), monday)
+            .await
+            .unwrap()
+    );
+    assert!(
+        crate::notify::enqueue_first_run_summary(&pool, &c, &chans(&c), "dev")
+            .await
+            .unwrap()
+    );
     let rows: Vec<(String, String, String)> =
         sqlx::query_as("SELECT group_key, route, channel_type FROM outbox ORDER BY id")
             .fetch_all(&pool)
@@ -1102,7 +1197,7 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
         .collect();
     assert_eq!(first, vec!["m", "am2"]);
     assert!(
-        !crate::notify::enqueue_first_run_summary(&pool, &c, "stage")
+        !crate::notify::enqueue_first_run_summary(&pool, &c, &chans(&c), "stage")
             .await
             .unwrap(),
         "no summary for a realm only a paging channel covers"
@@ -1114,4 +1209,42 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
             .await
             .unwrap();
     assert!(pending.is_none());
+}
+
+/// The scrub step itself: a mail server that echoes the login back in its
+/// reply. The HTTP tests cannot cover this, since their errors never hold a
+/// secret to begin with.
+#[sqlx::test(migrations = "./migrations")]
+async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
+    let c = cfg(
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+                 security: starttls, username_env: SCRUB_USER, password_env: SCRUB_PW, \
+                 from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
+    );
+    let mut ch = chans(&c);
+    ch.secrets.insert("SCRUB_USER".into(), "ops-mailer".into());
+    ch.secrets.insert("SCRUB_PW".into(), "hunter2-pw".into());
+    let echo = mailer(Err(MailError::Auth(
+        "535 rejected ops-mailer / hunter2-pw".into(),
+    )));
+    let http = reqwest::Client::new();
+    let d = Delivery {
+        http: &http,
+        mailer: &echo,
+    };
+    let id = queue(&pool, "mail", "email", &email::render(&vuln_alert())).await;
+    assert_eq!(
+        drain_with(&pool, &d, &c, &ch, now()).await.unwrap().retry,
+        1
+    );
+    let err: String = sqlx::query_scalar("SELECT last_error FROM outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(err.contains("535"), "{err}");
+    assert!(
+        !err.contains("hunter2") && !err.contains("ops-mailer"),
+        "{err}"
+    );
 }

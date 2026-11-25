@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use chrono::Weekday;
 use chrono_tz::Tz;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::Severity;
 
@@ -325,7 +325,7 @@ fn default_timezone() -> Tz {
     Tz::UTC
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TeamsRoute {
     pub name: String,
@@ -380,7 +380,7 @@ fn check_url(key: &str, raw: &str) -> anyhow::Result<()> {
 /// One alert channel. `type` picks the kind; every kind has `name`,
 /// `realms` (empty: all) and `min_severity`. Secrets are never written
 /// inline: `*_env` keys name the environment variable that holds them.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ChannelConfig {
     Teams(TeamsRoute),
@@ -454,7 +454,7 @@ impl ChannelConfig {
     }
 
     /// Type-specific checks; `key` is `channels[i]`.
-    fn validate(&self, key: &str) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self, key: &str) -> anyhow::Result<()> {
         use anyhow::bail;
         match self {
             ChannelConfig::Teams(c) => check_env(&format!("{key}.webhook_env"), &c.webhook_env),
@@ -533,7 +533,7 @@ impl ChannelConfig {
 }
 
 /// Slack or Discord: an incoming webhook whose URL is the secret.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookChannel {
     pub name: String,
@@ -548,7 +548,7 @@ pub struct WebhookChannel {
 }
 
 /// A Telegram chat id: a number (`-1001234567890`) or `@channelname`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ChatId {
     Number(i64),
@@ -564,7 +564,7 @@ impl ChatId {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramChannel {
     pub name: String,
@@ -581,7 +581,7 @@ pub struct TelegramChannel {
     pub digest: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PagerDutyChannel {
     pub name: String,
@@ -599,7 +599,7 @@ pub struct PagerDutyChannel {
     pub digest: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertmanagerChannel {
     pub name: String,
@@ -626,7 +626,7 @@ fn default_expire_after_hours() -> u32 {
     24
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenericWebhookChannel {
     pub name: String,
@@ -644,7 +644,7 @@ pub struct GenericWebhookChannel {
 }
 
 /// How the SMTP connection is secured.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpSecurity {
     /// Plain connection upgraded with STARTTLS (required). Default port 587.
@@ -655,7 +655,7 @@ pub enum SmtpSecurity {
     None,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmailChannel {
     pub name: String,

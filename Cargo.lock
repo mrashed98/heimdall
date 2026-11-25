@@ -1360,6 +1360,7 @@ dependencies = [
  "rand 0.8.8",
  "regex",
  "reqwest 0.12.28",
+ "ring",
  "rpassword",
  "rsa",
  "rust-embed",

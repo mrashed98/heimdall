@@ -2,17 +2,19 @@
  import { api, ApiError, type Grant } from './api';
  import { accessUrl, auditFilters } from './access';
  import { nextSort } from './data-pages';
+ import Channels from './Channels.svelte';
  import { Button, DataTable, EmptyState, ErrorState, Input, Pagination, Panel, Pill, Select, Skeleton, Tabs } from './ui';
  let {availableRealms}:{availableRealms:string[]}=$props();
  type User={id:number,kind:string,name:string,email:string|null,last_login_at:string|null,disabled:boolean,grants:Grant[]};
  type Key={name:string,scope:string,created_at:string};
  type Audit={id:number,occurred_at:string,actor:string|null,action:string,method:string|null,ip:string|null,detail:unknown};
- let tab=$state<'users'|'keys'|'audit'>('users'), rows=$state<(User|Key|Audit)[]>([]), offset=$state(0), sort=$state('name'), order=$state('asc'), loading=$state(true), failed=$state(false), revision=$state(0);
+ type Tab='users'|'keys'|'channels'|'audit';
+ let tab=$state<Tab>('users'), rows=$state<(User|Key|Audit)[]>([]), offset=$state(0), sort=$state('name'), order=$state('asc'), loading=$state(true), failed=$state(false), revision=$state(0);
  let actor=$state(''), actionFilter=$state(''), since=$state(''), until=$state('');
  let target=$state<User|null>(null), draft=$state<Grant[]>([]), error=$state(''), busy=$state(false), keyName=$state(''), scope=$state('read'), createdKey=$state(''), copied=$state(false), revoke=$state<Key|null>(null);
- let url=$derived(accessUrl(tab,offset,sort,order,tab==='audit'?auditFilters(actor,actionFilter,since,until):{}));
- $effect(()=>{const path=url;revision;let active=true;loading=true;failed=false;api<(User|Key|Audit)[]>(path).then(data=>{if(active){rows=data;loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}});return ()=>{active=false;};});
- function switchTab(value:'users'|'keys'|'audit'){tab=value;offset=0;sort=value==='audit'?'date':'name';order=value==='audit'?'desc':'asc';target=null;revoke=null;error='';createdKey='';}
+ let url=$derived(tab==='channels'?null:accessUrl(tab,offset,sort,order,tab==='audit'?auditFilters(actor,actionFilter,since,until):{}));
+ $effect(()=>{const path=url;if(!path)return;revision;let active=true;loading=true;failed=false;api<(User|Key|Audit)[]>(path).then(data=>{if(active){rows=data;loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}});return ()=>{active=false;};});
+ function switchTab(value:Tab){tab=value;offset=0;sort=value==='audit'?'date':'name';order=value==='audit'?'desc':'asc';target=null;revoke=null;error='';createdKey='';}
  function changeSort(field:string){[sort,order]=nextSort(sort,order,field);offset=0;}
  function sortState(field:string):'ascending'|'descending'|'none'{return sort===field?(order==='asc'?'ascending':'descending'):'none';}
  function edit(user:User){target=user;draft=user.grants.map(g=>({...g}));error='';}
@@ -25,7 +27,10 @@
  function date(value:string|null){return value?new Date(value).toLocaleString():'Never';}
 </script>
 <div class="page">
- <Tabs label="Settings sections" current={tab} change={(id)=>switchTab(id as 'users'|'keys'|'audit')} items={[{id:'users',label:'Members & access'},{id:'keys',label:'API keys'},{id:'audit',label:'Audit log'}]} />
+ <Tabs label="Settings sections" current={tab} change={(id)=>switchTab(id as Tab)} items={[{id:'users',label:'Members & access'},{id:'keys',label:'API keys'},{id:'channels',label:'Alert channels'},{id:'audit',label:'Audit log'}]} />
+ {#if tab==='channels'}
+ <Channels {availableRealms} />
+ {:else}
  <p class="hint">Access is global; grants set each member’s realms. The realm picker only filters inventory pages.</p>
  {#if tab==='audit'}<div class="row"><Input label="Actor" bind:value={actor} onchange={()=>offset=0}/><Input label="Action" bind:value={actionFilter} onchange={()=>offset=0}/><Input label="From" type="date" bind:value={since} onchange={()=>offset=0}/><Input label="Through" type="date" bind:value={until} onchange={()=>offset=0}/></div>{/if}
  {#if tab==='keys'}<Panel title="Create an API key"><form class="row" onsubmit={createKey}><Input label="Key name" bind:value={keyName} required /><Select label="Scope" bind:value={scope}><option value="read">Read</option><option value="ingest">Ingest</option><option value="admin">Admin</option></Select><Button type="submit" variant="primary" disabled={busy}>Create key</Button></form>
@@ -44,6 +49,7 @@
  </Panel>
  {#if target}<Panel title={`Grants for ${target.name}`}><p class="muted">These are individual grants. Configured group grants may also apply.</p><DataTable label="Grant editor"><thead><tr><th>Role</th>{#each ['*',...availableRealms.filter(r=>r!=='*')] as realm}<th>{realm==='*'?'All realms (*)':realm}</th>{/each}</tr></thead><tbody>{#each ['viewer','editor'] as role}<tr><th scope="row">{role}</th>{#each ['*',...availableRealms.filter(r=>r!=='*')] as realm}<td><input type="checkbox" aria-label={`${role} for ${realm}`} checked={draft.some(g=>g.role===role&&g.realm===realm)} onchange={(e)=>toggle(role,realm,e.currentTarget.checked)}/></td>{/each}</tr>{/each}<tr><th scope="row">admin (all realms)</th><td><input type="checkbox" aria-label="admin for all realms" checked={draft.some(g=>g.role==='admin'&&g.realm==='*')} onchange={(e)=>toggle('admin','*',e.currentTarget.checked)}/></td>{#each availableRealms.filter(r=>r!=='*') as _}<td></td>{/each}</tr></tbody></DataTable>{#if error}<p class="error" role="alert">{error}</p>{/if}<div class="actions top"><Button variant="primary" disabled={busy} onclick={saveGrants}>Save grants</Button><Button variant="ghost" disabled={busy} onclick={()=>{target=null;error='';}}>Cancel</Button></div></Panel>{/if}
  {#if revoke}<Panel title={`Revoke ${revoke.name}?`}><p class="muted">Clients using this key will lose access.</p><div class="actions top"><Button variant="danger" disabled={busy} onclick={revokeKey}>Confirm revoke</Button><Button variant="ghost" disabled={busy} onclick={()=>revoke=null}>Cancel</Button></div></Panel>{/if}
+ {/if}
 </div>
 <style>
  .page{display:grid;gap:var(--s3)}.row,.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:end}.top{margin-top:var(--s3)}.hint,.muted{color:var(--muted)}.hint{font-size:var(--text-sm);margin:0}.error{color:var(--sev-high);margin:0}.ok{color:var(--ok)}.grant{display:inline-block;margin:2px 0 0 6px}.mono{font-family:var(--font-mono);font-size:var(--text-sm)}

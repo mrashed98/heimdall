@@ -15,6 +15,7 @@ use serde_json::Value;
 use sqlx::{FromRow, PgConnection, PgPool};
 
 use super::alert::{self, clip, package_name, severity_name, Alert, Line, Link};
+use super::store::Channels;
 use super::{channels, outbox, warn_once, FIX_ALERTS_AT_ONCE};
 use crate::config::{ChannelConfig, HeimdallConfig};
 use crate::model::Severity;
@@ -74,14 +75,16 @@ fn latest_slot(
 pub async fn maybe_send(
     pool: &PgPool,
     cfg: &HeimdallConfig,
+    chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<bool> {
     let d = &cfg.digest;
     // Paging channels (PagerDuty, Alertmanager) skip the digest by default.
-    let chans: Vec<ChannelConfig> = cfg
-        .channels()
-        .into_iter()
-        .filter(ChannelConfig::wants_digest)
+    let chans: Vec<ChannelConfig> = chans
+        .list
+        .iter()
+        .filter(|c| c.wants_digest())
+        .cloned()
         .collect();
     if chans.is_empty() {
         return Ok(false);

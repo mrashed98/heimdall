@@ -70,7 +70,9 @@ config:
 #   one key per `*_env` of each `config.channels[]` entry (webhook URLs, the
 #   Telegram bot token, the PagerDuty routing key, the webhook HMAC secret,
 #   SMTP or Alertmanager credentials),
-#   HEIMDALL_API_KEY (an ingest-scope key, used by the scanner CronJob).
+#   HEIMDALL_API_KEY (an ingest-scope key, used by the scanner CronJob),
+#   HEIMDALL_SECRET_KEY (optional; `openssl rand -base64 32`, back it up),
+#   which encrypts secrets of alert channels added in the console.
 existingSecret: heimdall-secrets
 
 # Optional: send traces to an OTel collector (OTLP/HTTP).

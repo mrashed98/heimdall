@@ -2,14 +2,18 @@
 //! channel, and sent one at a time. Queued rows survive restarts; a sent row
 //! is never sent again.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Duration, Utc};
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
 
+use super::alert::Alert;
 use super::channels::email::{MailError, Mailer, SmtpMailer};
-use super::channels::{self, HttpAuth, Request};
+use super::channels::{self, HttpAuth, Request, Secrets};
+use super::store::Channels;
 use crate::config::{ChannelConfig, HeimdallConfig};
 
 /// First retry delay; doubled per failed attempt.
@@ -66,18 +70,23 @@ pub async fn drain_once(
     pool: &PgPool,
     http: &reqwest::Client,
     cfg: &HeimdallConfig,
+    chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
+    let mailer = SmtpMailer {
+        secrets: &chans.secrets,
+    };
     let d = Delivery {
         http,
-        mailer: &SmtpMailer,
+        mailer: &mailer,
     };
-    drain_with(pool, &d, cfg, now).await
+    drain_with(pool, &d, cfg, chans, now).await
 }
 
 /// Send at most one due payload (oldest first); the caller loops every 2 s,
 /// which paces the channels. Rows of a channel whose secret variables are
-/// unset stay queued untouched until they are set, as do rows queued for a
+/// unset (or a UI channel whose secrets can't be read) stay queued untouched
+/// until they are set, as do rows queued for a
 /// channel that has since changed type.
 ///
 /// The row is locked `FOR UPDATE SKIP LOCKED` for the whole send, so a second
@@ -85,10 +94,11 @@ pub async fn drain_once(
 pub async fn drain_with(
     pool: &PgPool,
     d: &Delivery<'_>,
-    cfg: &HeimdallConfig,
+    _cfg: &HeimdallConfig,
+    chans: &Channels,
     now: DateTime<Utc>,
 ) -> anyhow::Result<DrainResult> {
-    for (route, kind) in orphaned(pool, cfg).await? {
+    for (route, kind) in orphaned(pool, chans).await? {
         super::warn_once(
             &format!("orphan|{route}|{kind}"),
             &format!(
@@ -98,9 +108,9 @@ pub async fn drain_with(
             ),
         );
     }
-    let mut ready: Vec<ChannelConfig> = Vec::new();
-    for ch in cfg.channels() {
-        match channels::missing_env(&ch) {
+    let mut ready: Vec<&ChannelConfig> = Vec::new();
+    for ch in &chans.list {
+        match channels::missing_env(ch, &chans.secrets) {
             None => ready.push(ch),
             Some(var) => super::warn_once(
                 &format!("webhook|{}", ch.name()),
@@ -135,17 +145,13 @@ pub async fn drain_with(
     let Some((id, route, card, attempts)) = row else {
         return Ok(result);
     };
-    let Some(ch) = ready.iter().find(|c| c.name() == route) else {
+    let Some(ch) = ready.iter().copied().find(|c| c.name() == route) else {
         return Ok(result);
     };
     let kind = ch.type_name();
     result.channel_type = Some(kind);
 
-    let outcome = match channels::request(ch, &card, now) {
-        Ok(req) => send(d, ch, req).await,
-        Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
-    };
-    match outcome {
+    match attempt(d, ch, &card, now, &chans.secrets).await {
         Outcome::Sent => {
             sqlx::query("UPDATE outbox SET sent_at = $2 WHERE id = $1")
                 .bind(id)
@@ -161,13 +167,7 @@ pub async fn drain_with(
             let next = now + backoff(attempts, retry_after_secs);
             tracing::warn!(route = %route, channel_type = kind, outbox_id = id, retry_at = %next,
                            "{kind} send failed: {why}");
-            sqlx::query(
-                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = $2 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(next)
-            .execute(&mut *tx)
-            .await?;
+            record_retry(&mut tx, id, next, now, &why).await?;
             result.retry = 1;
         }
         Outcome::Hold(why) => {
@@ -177,13 +177,7 @@ pub async fn drain_with(
             let next = now + backoff(attempts, None);
             tracing::warn!(route = %route, channel_type = kind, outbox_id = id, retry_at = %next,
                            "{kind} channel {route} is failing; holding its queue: {why}");
-            sqlx::query(
-                "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = $2 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(next)
-            .execute(&mut *tx)
-            .await?;
+            record_retry(&mut tx, id, next, now, &why).await?;
             sqlx::query(
                 "UPDATE outbox SET next_attempt_at = GREATEST(next_attempt_at, $2) \
                  WHERE route = $1 AND channel_type = $3 AND sent_at IS NULL",
@@ -200,11 +194,12 @@ pub async fn drain_with(
             tracing::error!(route = %route, channel_type = kind, outbox_id = id,
                             "{kind} rejected the alert; giving up: {why}");
             sqlx::query(
-                "UPDATE outbox SET sent_at = $2, card = jsonb_set(card, '{failed}', 'true') \
-                 WHERE id = $1",
+                "UPDATE outbox SET sent_at = $2, card = jsonb_set(card, '{failed}', 'true'), \
+                 last_error_at = $2, last_error = $3 WHERE id = $1",
             )
             .bind(id)
             .bind(now)
+            .bind(&why)
             .execute(&mut *tx)
             .await?;
             result.failed = 1;
@@ -214,15 +209,123 @@ pub async fn drain_with(
     Ok(result)
 }
 
+/// Back row `id` off until `next` and record why it failed.
+async fn record_retry(
+    tx: &mut PgConnection,
+    id: i64,
+    next: DateTime<Utc>,
+    now: DateTime<Utc>,
+    why: &str,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE outbox SET attempts = attempts + 1, next_attempt_at = $2, \
+         last_error_at = $3, last_error = $4 WHERE id = $1",
+    )
+    .bind(id)
+    .bind(next)
+    .bind(now)
+    .bind(why)
+    .execute(tx)
+    .await?;
+    Ok(())
+}
+
+/// Build and send `payload` to `ch`. Every reason in the outcome is
+/// redacted: the request's `redact` list and every secret value `ch` uses
+/// are replaced with `[redacted]`, so it is safe to log and to store.
+async fn attempt(
+    d: &Delivery<'_>,
+    ch: &ChannelConfig,
+    payload: &Value,
+    now: DateTime<Utc>,
+    secrets: &Secrets,
+) -> Outcome {
+    let mut hide = channels::secret_values(ch, secrets);
+    let outcome = match channels::request(ch, payload, now, secrets) {
+        Ok(req) => {
+            if let Request::Http { redact, .. } = &req {
+                hide.extend(redact.iter().cloned());
+            }
+            send(d, ch, req).await
+        }
+        Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
+    };
+    // Longest first, so a URL goes before a token inside it.
+    hide.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    match outcome {
+        Outcome::Sent => Outcome::Sent,
+        Outcome::Retry {
+            retry_after_secs,
+            why,
+        } => Outcome::Retry {
+            retry_after_secs,
+            why: scrub(why, &hide),
+        },
+        Outcome::Hold(why) => Outcome::Hold(scrub(why, &hide)),
+        Outcome::Rejected(why) => Outcome::Rejected(scrub(why, &hide)),
+    }
+}
+
+/// Send a fixed test alert to `ch` now, not through the outbox. Any outcome
+/// but sent is an error, with secrets redacted.
+pub async fn send_now(
+    d: &Delivery<'_>,
+    ch: &ChannelConfig,
+    secrets: &Secrets,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let payload = channels::render(ch, &Alert::test(now));
+    match attempt(d, ch, &payload, now, secrets).await {
+        Outcome::Sent => Ok(()),
+        Outcome::Retry { why, .. } | Outcome::Hold(why) | Outcome::Rejected(why) => Err(why),
+    }
+}
+
+/// The delivery state of one `(route, channel_type)` in the outbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Health {
+    /// Unsent rows.
+    pub queued: i64,
+    /// The latest delivered row (rejected rows do not count).
+    pub last_sent_at: Option<DateTime<Utc>>,
+    /// The `last_error` of the oldest unsent row, if it has one.
+    pub failing: Option<String>,
+}
+
+/// One `health` row: route, channel type, then the `Health` fields.
+type HealthRow = (String, String, i64, Option<DateTime<Utc>>, Option<String>);
+
+/// Health of every `(route, channel_type)` that has outbox rows.
+pub async fn health(pool: &PgPool) -> anyhow::Result<HashMap<(String, String), Health>> {
+    let rows: Vec<HealthRow> = sqlx::query_as(
+        "SELECT route, channel_type, \
+               count(*) FILTER (WHERE sent_at IS NULL), \
+               max(sent_at) FILTER (WHERE card->>'failed' IS NULL), \
+               (array_agg(last_error ORDER BY id) FILTER (WHERE sent_at IS NULL))[1] \
+             FROM outbox GROUP BY route, channel_type",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(route, kind, queued, last_sent_at, failing)| {
+            (
+                (route, kind),
+                Health {
+                    queued,
+                    last_sent_at,
+                    failing,
+                },
+            )
+        })
+        .collect())
+}
+
 /// `(route, channel_type)` of unsent rows no configured channel matches
 /// (removed, renamed, or changed type). They are never sent.
-pub async fn orphaned(
-    pool: &PgPool,
-    cfg: &HeimdallConfig,
-) -> anyhow::Result<Vec<(String, String)>> {
-    let chans = cfg.channels();
-    let names: Vec<&str> = chans.iter().map(|c| c.name()).collect();
-    let types: Vec<&str> = chans.iter().map(|c| c.type_name()).collect();
+pub async fn orphaned(pool: &PgPool, chans: &Channels) -> anyhow::Result<Vec<(String, String)>> {
+    let names: Vec<&str> = chans.list.iter().map(|c| c.name()).collect();
+    let types: Vec<&str> = chans.list.iter().map(|c| c.type_name()).collect();
     let rows = sqlx::query_as(
         "SELECT DISTINCT route, channel_type FROM outbox \
          WHERE sent_at IS NULL \
@@ -274,10 +377,10 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, req: Request) -> Outcome {
     }
 }
 
-/// Replace every secret in `s` with `***`.
+/// Replace every secret in `s` with `[redacted]`.
 fn scrub(mut s: String, secrets: &[String]) -> String {
     for secret in secrets.iter().filter(|x| !x.is_empty()) {
-        s = s.replace(secret.as_str(), "***");
+        s = s.replace(secret.as_str(), "[redacted]");
     }
     s
 }
@@ -405,6 +508,6 @@ mod tests {
             panic!("a refused connection is retried");
         };
         assert!(!why.contains("SECRET"), "{why}");
-        assert_eq!(scrub(format!("x {token} y"), &[token]), "x *** y");
+        assert_eq!(scrub(format!("x {token} y"), &[token]), "x [redacted] y");
     }
 }

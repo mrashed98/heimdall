@@ -1,6 +1,6 @@
 <script lang="ts">
   // Living catalogue of the component library. Served at /design in dev builds only.
-  import { Badge, Button, DataTable, EmptyState, EpssBar, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, Pill, RealmPicker, Select, Skeleton, Stat, Tabs } from './lib/ui';
+  import { Badge, Button, DataTable, EmptyState, EpssBar, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, Pill, RealmPicker, SEVERITIES, Select, Skeleton, Stat, Tabs } from './lib/ui';
   let tab = $state('active'); let text = $state(''); let sel = $state(''); let realms = $state<string[]>([]);
   const swatches = ['bg', 'rail', 'panel', 'panel-2', 'border', 'text', 'muted', 'gold', 'gold-soft', 'sky', 'ok', 'sev-critical', 'sev-high', 'sev-medium', 'sev-low', 'sev-unknown'];
 </script>
@@ -12,7 +12,7 @@
   <div class="swatches">{#each swatches as s}<div><span style:background="var(--{s})"></span><code>--{s}</code></div>{/each}</div>
   <h2>Button · Badge · Pill</h2>
   <div class="row"><Button variant="primary">Primary</Button><Button>Secondary</Button><Button variant="ghost">Ghost</Button><Button variant="danger">Danger</Button><Button size="sm">Small</Button><Button disabled>Disabled</Button></div>
-  <div class="row">{#each ['critical', 'high', 'medium', 'low', 'unknown'] as s}<Badge severity={s} />{/each}<Pill tone="gold">admin · all realms</Pill><Pill>homelab</Pill><Pill mono>is:open</Pill></div>
+  <div class="row">{#each SEVERITIES as s}<Badge severity={s} />{/each}<Pill tone="gold">admin · all realms</Pill><Pill>homelab</Pill><Pill mono>is:open</Pill></div>
   <h2>Inputs</h2>
   <div class="row"><Input label="Search" placeholder="Advisory, alias or package" bind:value={text} /><Input label="With error" error="Give a reason for this oath." /><Select label="Severity" bind:value={sel}><option value="">All</option><option>critical</option></Select><RealmPicker realms={['homelab', 'prod']} selected={realms} change={(r) => realms = r} /></div>
   <h2>Data</h2>

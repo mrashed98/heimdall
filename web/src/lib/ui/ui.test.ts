@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { epssTone, epssWidth, severityTone } from './format';
+import { createRawSnippet } from 'svelte';
+import { render } from 'svelte/server';
+import Dialog from './Dialog.svelte';
+import { epssTone, epssWidth, relativeTime, severityTone } from './format';
 
 describe('format helpers', () => {
   it('normalises severities', () => {
@@ -17,6 +20,27 @@ describe('format helpers', () => {
     expect(epssTone(0.05)).toBe('high');
     expect(epssTone(0.001)).toBe('low');
     expect(epssTone(null)).toBe('unknown');
+  });
+  it('says how long ago a time was', () => {
+    const now = new Date('2026-11-24T12:00:00Z');
+    expect(relativeTime('2026-11-24T11:59:30Z', now)).toBe('just now');
+    expect(relativeTime('2026-11-24T12:00:10Z', now)).toBe('just now');
+    expect(relativeTime('2026-11-24T11:55:00Z', now)).toBe('5m ago');
+    expect(relativeTime('2026-11-24T10:00:00Z', now)).toBe('2h ago');
+    expect(relativeTime('2026-11-21T12:00:00Z', now)).toBe('3d ago');
+    expect(relativeTime('not a date', now)).toBe('');
+  });
+});
+
+describe('Dialog', () => {
+  const text = (s: string) => createRawSnippet(() => ({ render: () => `<p>${s}</p>` }));
+  it('renders title and is labelled by it', () => {
+    const { body } = render(Dialog, { props: { open: false, title: 'Add channel', children: text('Form'), actions: text('Save') } });
+    const dialog = body.match(/<dialog[^>]*aria-labelledby="([^"]+)"/);
+    expect(dialog).not.toBeNull();
+    expect(body).toMatch(new RegExp(`<h2[^>]*id="${dialog![1]}"[^>]*>Add channel</h2>`));
+    expect(body).toContain('<p>Form</p>');
+    expect(body).toContain('<p>Save</p>');
   });
 });
 

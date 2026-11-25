@@ -2,7 +2,7 @@
   import { onMount, untrack, type Snippet } from 'svelte';
   import { api } from './api';
   import { defaultFilters, initialFilters, filtersSearch, findingsUrl, packageLabel, rowTitle, views, viewFilters, type Filters } from './findings';
-  import { EmptyState, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, Select, Skeleton, SubNav } from './ui';
+  import { EmptyState, ErrorState, Input, IssueRow, Logo, PageHeader, Pagination, Panel, SEVERITIES, Select, Skeleton, SubNav } from './ui';
   type Row = { id:number; kind:string; realm:string; service:string|null; purl:string|null; component_name?:string; component_version?:string; epss?:number; epss_percentile?:number; ref_id:string|null; severity:string; opened_at:string; summary?:string; fix?:string; details:Record<string, unknown> };
   let { realms, navigate, realmPicker }: { realms:string[]; navigate:(to:string)=>void; realmPicker:Snippet } = $props();
 
@@ -41,9 +41,9 @@
   </SubNav>
   <div class="feed">
     <PageHeader title={current.label} description={current.group === 'Watch' ? 'What the watchers found for components you run' : 'Open vulnerabilities and risks across your realms'}>{#snippet actions()}{@render realmPicker()}{/snippet}</PageHeader>
-    <div class="filters" aria-label="Finding filters">
+    <div class="filters" role="group" aria-label="Finding filters">
       <div class="search"><Input label="Search" hideLabel type="search" placeholder="Search advisory, alias or package" bind:value={filters.search} oninput={changeFilter} /></div>
-      <Select label="Severity" hideLabel bind:value={filters.severity} onchange={changeFilter}><option value="">All severities</option><option value="critical,high">Critical & high</option>{#each ['critical', 'high', 'medium', 'low', 'unknown'] as s}<option value={s}>{s[0]!.toUpperCase() + s.slice(1)}</option>{/each}</Select>
+      <Select label="Severity" hideLabel bind:value={filters.severity} onchange={changeFilter}><option value="">All severities</option><option value="critical,high">Critical & high</option>{#each SEVERITIES as s}<option value={s}>{s[0]!.toUpperCase() + s.slice(1)}</option>{/each}</Select>
       <Select label="Kind" hideLabel bind:value={filters.kind} onchange={changeFilter}><option value="">All kinds</option>{#each [['vuln', 'Vulnerability'], ['fixavailable', 'Fix available'], ['k8scve', 'Kubernetes CVE'], ['majorrelease', 'Major release'], ['releasenotecve', 'CVE in release notes'], ['eol', 'End of life'], ['oathexpired', 'Oath expired']] as [value, label]}<option {value}>{label}</option>{/each}</Select>
       <div class="service"><Input label="Service" hideLabel placeholder="Service" bind:value={filters.service} oninput={changeFilter} /></div>
       <Select label="Fix" hideLabel bind:value={filters.has_fix} onchange={changeFilter}><option value="">Fix: any</option><option value="true">Fix available</option><option value="false">No fix yet</option></Select>
