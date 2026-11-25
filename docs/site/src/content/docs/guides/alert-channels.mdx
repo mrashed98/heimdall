@@ -337,7 +337,9 @@ under the current key and its queue drains.
 upgrade tightens a rule, shows **Invalid: see the server log**. The log line
 "alert channel `X` from the UI is skipped" gives the reason. Alerts raised while
 it is invalid are not queued for it and are not sent to it later; alerts it had
-already queued stay queued. Edit the channel to fix it, or delete it.
+already queued stay queued, and until it is fixed they also trigger the
+"no longer configured" warning described in [Orphaned
+messages](#orphaned-messages). Edit the channel to fix it, or delete it.
 
 ### Secrets
 

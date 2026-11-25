@@ -21,5 +21,6 @@ each version, with the binaries and container image tags.
   console](/heimdall/guides/alert-channels/#managing-channels-in-the-console)
   and [ADR 0005](/heimdall/decisions/0005-encrypted-channel-secrets/).
 - **Telegram `chat_id` changes reach queued alerts.** The chat is read from the
-  channel when an alert is sent, not when it is queued, so alerts waiting in the
+  channel when an alert is sent, not when it is queued. This applies to
+  channels in `heimdall.yaml` as well as console channels: alerts waiting in the
   queue go to the new chat after you change `chat_id`.
