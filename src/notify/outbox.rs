@@ -476,6 +476,14 @@ async fn send_http(
             "{status}: redirects are not followed; use the URL it redirects to"
         ));
     }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        // A credential or permission problem of the channel, not of this
+        // alert: hold the queue until it is fixed, as for a refused SMTP
+        // login, instead of discarding every alert meanwhile.
+        return Outcome::Hold(format!(
+            "{status}: check the channel's credentials and permissions"
+        ));
+    }
     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
         // Retry-After in seconds, at most the backoff cap so a huge value
         // can neither overflow the date nor park the row for days. The

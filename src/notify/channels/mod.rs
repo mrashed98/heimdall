@@ -6,6 +6,8 @@
 pub mod alertmanager;
 pub mod discord;
 pub mod email;
+pub mod jira;
+pub mod mattermost;
 pub mod pagerduty;
 pub mod slack;
 pub mod telegram;
@@ -29,6 +31,8 @@ pub fn render(ch: &ChannelConfig, a: &Alert) -> Value {
         ChannelConfig::Teams(_) => teams::render(a),
         ChannelConfig::Slack(_) => slack::render(a),
         ChannelConfig::Discord(_) => discord::render(a),
+        ChannelConfig::Mattermost(_) => mattermost::render(a),
+        ChannelConfig::Jira(_) => jira::render(a),
         ChannelConfig::Telegram(_) => telegram::render(a),
         ChannelConfig::PagerDuty(_) => pagerduty::render(a),
         ChannelConfig::Alertmanager(_) => alertmanager::render(a),
@@ -55,7 +59,13 @@ fn secret_vars(ch: &ChannelConfig) -> Vec<&str> {
     let mut required: Vec<&str> = Vec::new();
     match ch {
         ChannelConfig::Teams(c) => required.push(&c.webhook_env),
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => required.push(&c.webhook_env),
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
+            required.push(&c.webhook_env)
+        }
+        ChannelConfig::Jira(c) => {
+            required.push(&c.token_env);
+            required.extend(c.username_env.as_deref());
+        }
         ChannelConfig::Telegram(c) => required.push(&c.bot_token_env),
         ChannelConfig::PagerDuty(c) => required.push(&c.routing_key_env),
         ChannelConfig::Alertmanager(c) => {
@@ -98,7 +108,10 @@ pub fn secret_values(ch: &ChannelConfig, secrets: &Secrets) -> Vec<String> {
 pub fn destination(ch: &ChannelConfig, secrets: &Secrets) -> Option<(String, u16)> {
     let url = match ch {
         ChannelConfig::Teams(c) => secret(&c.webhook_env, secrets)?,
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => secret(&c.webhook_env, secrets)?,
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
+            secret(&c.webhook_env, secrets)?
+        }
+        ChannelConfig::Jira(c) => c.url.clone(),
         ChannelConfig::Telegram(c) => c.api_url.clone().unwrap_or(telegram::API_URL.to_string()),
         ChannelConfig::PagerDuty(c) => c.url.clone().unwrap_or(pagerduty::EVENTS_URL.to_string()),
         ChannelConfig::Alertmanager(c) => c.url.clone(),
@@ -153,8 +166,31 @@ pub fn request(
     };
     Ok(match ch {
         ChannelConfig::Teams(c) => http(need(&c.webhook_env)?, json(payload)),
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => {
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
             http(need(&c.webhook_env)?, json(payload))
+        }
+        ChannelConfig::Jira(c) => {
+            let token = need(&c.token_env)?;
+            let auth = match &c.username_env {
+                Some(u) => HttpAuth::Basic(need(u)?, token),
+                None => HttpAuth::Bearer(token),
+            };
+            let redact = match &auth {
+                HttpAuth::Basic(u, p) => vec![u.clone(), p.clone()],
+                HttpAuth::Bearer(t) => vec![t.clone()],
+            };
+            let mut issue = payload.clone();
+            issue["fields"]["project"] = serde_json::json!({"key": c.project});
+            issue["fields"]["issuetype"] = serde_json::json!({
+                "name": c.issue_type.as_deref().unwrap_or(jira::DEFAULT_ISSUE_TYPE)
+            });
+            Request::Http {
+                url: format!("{}/rest/api/2/issue", c.url.trim_end_matches('/')),
+                body: json(&issue),
+                headers: Vec::new(),
+                auth: Some(auth),
+                redact,
+            }
         }
         ChannelConfig::Telegram(c) => {
             let token = need(&c.bot_token_env)?;

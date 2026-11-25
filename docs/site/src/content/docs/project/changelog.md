@@ -9,6 +9,14 @@ each version, with the binaries and container image tags.
 
 ## Unreleased
 
+- **Mattermost and Jira channels.** `type: mattermost` posts to an incoming
+  webhook; `type: jira` opens one issue per alert (Jira Cloud or Data Center),
+  in `heimdall.yaml` or the console. See
+  [Mattermost](/heimdall/guides/alert-channels/#mattermost) and
+  [Jira](/heimdall/guides/alert-channels/#jira).
+- **A 401 or 403 no longer discards alerts.** It means the channel's
+  credentials or permissions are wrong, so the channel's queue now waits and
+  retries until they are fixed, as a failed SMTP login already did.
 - **Alert channels in the console.** Settings → Alert channels lists every
   channel, from `heimdall.yaml` and from the console, with its delivery health.
   Admins can add, edit, delete and test channels of every type there, with no

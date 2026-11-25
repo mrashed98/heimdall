@@ -1,6 +1,6 @@
 ---
 title: Alert channels
-description: Send Gjallarhorn's alerts to Teams, Slack, Discord, Telegram, PagerDuty, Alertmanager, a webhook or email, routed by realm and severity.
+description: Send Gjallarhorn's alerts to Teams, Slack, Discord, Mattermost, Telegram, PagerDuty, Alertmanager, Jira, a webhook or email, routed by realm and severity.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -69,8 +69,11 @@ console](#managing-channels-in-the-console)).
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
-  channel rejects (a 4xx other than 429, a permanent SMTP error) is not retried
-  and counts in `heimdall_notify_failures_total{channel_type}`.
+  channel rejects (a 4xx other than 401, 403 and 429, a permanent SMTP error)
+  is not retried and counts in `heimdall_notify_failures_total{channel_type}`.
+  A 401 or 403 means the channel's credentials or permissions are wrong, not
+  the message: the channel's queue waits and retries with the usual backoff
+  until they are fixed, and nothing is discarded.
 - **Destinations are checked** before every send: see
   [Where channels may send](#where-channels-may-send).
 - **A missing variable** keeps that channel's messages queued until it is set.
@@ -261,6 +264,55 @@ permanent one (a 5xx reply such as an unknown recipient) is not. A failed login
 (530, 534, 535) is a problem with the channel, not the message: the whole
 channel's queue waits and retries with the usual backoff, so a wrong password
 delays mail but never discards it. Fix the credentials and the backlog goes out.
+
+## Mattermost
+
+`type: mattermost`, `webhook_env` (an [incoming
+webhook](https://developers.mattermost.com/integrate/webhooks/incoming/) URL:
+*Integrations → Incoming Webhooks*). One message attachment per alert,
+coloured by severity, with the severity and realm as fields. Text is
+Markdown-escaped, and an `@` that starts a word is broken with an invisible
+character, so an advisory saying `@channel` or `@all` never notifies anyone.
+
+```yaml
+- type: mattermost
+  name: security
+  webhook_env: MATTERMOST_WEBHOOK_SECURITY
+  min_severity: high
+```
+
+## Jira
+
+`type: jira` opens one issue per alert with the REST API v2, which Jira Cloud
+and Jira Data Center both accept.
+
+| Key | Meaning |
+|---|---|
+| `url` | The site, for example `https://example.atlassian.net`. **Required.** |
+| `project` | Project key, for example `SEC`. **Required.** |
+| `issue_type` | Issue type name. Default `Task`. |
+| `token_env` | Variable holding the API token (Cloud) or personal access token (Data Center). **Required.** |
+| `username_env` | Variable holding the account email. Set it for Jira Cloud, where the token goes with basic auth; leave it out for Data Center, where the token is sent as a bearer token. |
+
+```yaml
+- type: jira
+  name: sec-issues
+  url: https://example.atlassian.net
+  project: SEC
+  issue_type: Bug
+  username_env: JIRA_EMAIL
+  token_env: JIRA_API_TOKEN
+  realms: [prod]
+  min_severity: high
+```
+
+The summary is the alert's title; the description lists the findings in wiki
+markup, with links to the advisory. Each issue gets the labels `heimdall` and
+`severity-<level>`. The project and issue type are read when the issue is
+created, so changing them also moves issues still in the queue. The weekly
+digest is off by default (it would open an issue every week); set
+`digest: true` to have it. The account needs permission to create issues in
+the project: a 401 or 403 keeps the issues queued until that is fixed.
 
 ## Managing channels in the console
 
