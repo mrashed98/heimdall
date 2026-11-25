@@ -1,0 +1,152 @@
+---
+title: Install without Kubernetes
+description: Run Heimdall with Docker Compose or as a systemd service, and what changes outside a cluster.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Heimdall is one binary and a Postgres database, so it runs anywhere Linux and
+Postgres do. This page covers two ways: Docker Compose on one host, and the
+release binary as a systemd service. Both use the same `heimdall.yaml` as the
+[Helm chart](/heimdall/getting-started/kubernetes/).
+
+## What changes outside Kubernetes
+
+Everything works the same except reading a cluster:
+
+- **No cluster inventory.** Sight, which lists pods, nodes, Helm releases and
+  ArgoCD Applications, needs a cluster. Without one, Heimdall logs `no cluster
+  client` at startup and skips it. If you also run a cluster elsewhere, run
+  `heimdall sight --realm <realm> --push <this server's URL>` there (with
+  `HEIMDALL_API_KEY` set) and it sends that cluster's inventory here.
+- **What you run comes from:**
+  - SBOMs uploaded from CI, by [`heimdall gate`](/heimdall/guides/ci-gate/) or
+    by `POST /api/v1/ingest/sbom` (see the
+    [HTTP API](/heimdall/reference/http-api/#post-apiv1ingestsbom)). Generate
+    one for a server or an image with `syft <image or dir> -o cyclonedx-json`.
+  - Components you list under
+    [`declared`](/heimdall/reference/configuration/#declared), such as a
+    database on a VM.
+  - The release watchers in
+    [`watchers`](/heimdall/reference/configuration/#watchers), which need no
+    inventory at all.
+- **No image scanner job.** `heimdall scan-images` scans the images Sight
+  found, so without a cluster it has nothing to do. Upload image SBOMs from CI
+  instead.
+
+Alerts, the web console, oaths, the CI gate and the API are unchanged.
+
+## Docker Compose
+
+The compose file runs Heimdall and Postgres 17 on one host. It is in the
+repository at `deploy/compose/`.
+
+<Steps>
+
+1. Get the compose file and the example environment:
+
+   ```bash
+   mkdir heimdall && cd heimdall
+   curl -fsSLO https://raw.githubusercontent.com/mrashed98/heimdall/main/deploy/compose/docker-compose.yml
+   curl -fsSL -o .env https://raw.githubusercontent.com/mrashed98/heimdall/main/deploy/compose/.env.example
+   ```
+
+2. Fill in `.env`. Each line says how to generate its value:
+
+   ```bash
+   POSTGRES_PASSWORD=<a long random password>
+   HEIMDALL_BOOTSTRAP_ADMIN_KEY=hd_...   # echo "hd_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+   HEIMDALL_SECRET_KEY=...               # openssl rand -base64 32
+   ```
+
+   Keep a copy of `HEIMDALL_SECRET_KEY`: without it, secrets saved in the
+   console cannot be read back.
+
+3. Write `heimdall.yaml` next to the compose file. The smallest one names
+   your realms:
+
+   ```yaml
+   realms: [prod]
+   ```
+
+   See the [configuration reference](/heimdall/reference/configuration/) for
+   channels, watchers and declared components. If it names environment
+   variables (`webhook_env: SLACK_WEBHOOK`), put them in `channels.env`
+   beside it; the compose file loads that file when it exists.
+
+4. Start it:
+
+   ```bash
+   docker compose up -d
+   curl -s localhost:8080/healthz    # 200 once Postgres is reachable
+   ```
+
+5. Open `http://localhost:8080` and sign in with the bootstrap key, or set
+   up [local accounts or OIDC](/heimdall/guides/sign-in-access-control/).
+
+</Steps>
+
+The port is bound to `127.0.0.1`. To reach the console from other machines,
+put a reverse proxy with TLS in front of it, or change the port line to
+`"8080:8080"` on a network you trust. To upgrade, set `HEIMDALL_VERSION` in
+`.env` (for example `0.3.2`) and run `docker compose up -d` again; Heimdall
+applies its database migrations at startup. Back up the `postgres` volume as
+you would any database.
+
+## Binary and systemd
+
+Each release has static Linux binaries for amd64 and arm64
+(`heimdall-linux-amd64`, `heimdall-linux-arm64`) with the web console built
+in. You need a Postgres database Heimdall can reach (CI tests against
+Postgres 17); it creates its own tables.
+
+<Steps>
+
+1. Install the binary:
+
+   ```bash
+   ARCH=amd64   # or arm64
+   sudo curl -fsSL -o /usr/local/bin/heimdall \
+     https://github.com/mrashed98/heimdall/releases/latest/download/heimdall-linux-$ARCH
+   sudo chmod +x /usr/local/bin/heimdall
+   ```
+
+2. Write the config and the environment file:
+
+   ```bash
+   sudo mkdir -p /etc/heimdall
+   sudo tee /etc/heimdall/heimdall.yaml >/dev/null <<'EOF'
+   realms: [prod]
+   EOF
+   sudo tee /etc/heimdall/heimdall.env >/dev/null <<'EOF'
+   DATABASE_URL=postgres://heimdall:<password>@localhost:5432/heimdall
+   HEIMDALL_BOOTSTRAP_ADMIN_KEY=hd_...
+   HEIMDALL_SECRET_KEY=...
+   EOF
+   sudo chmod 600 /etc/heimdall/heimdall.env
+   heimdall serve --check-config /etc/heimdall/heimdall.yaml   # prints "config ok"
+   ```
+
+3. Install the service. The unit in the repository at
+   `deploy/systemd/heimdall.service` runs Heimdall as a dynamic user with
+   1 GB of memory and one CPU at most, and a read-only view of the system:
+
+   ```bash
+   sudo curl -fsSL -o /etc/systemd/system/heimdall.service \
+     https://raw.githubusercontent.com/mrashed98/heimdall/main/deploy/systemd/heimdall.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now heimdall
+   curl -s localhost:8080/healthz
+   journalctl -u heimdall -f
+   ```
+
+</Steps>
+
+Heimdall listens on port 8080 on every interface. Use a firewall or a reverse
+proxy with TLS to control who reaches it.
+
+<Aside type="note">
+Heimdall needs outbound HTTPS to OSV, NVD, the EPSS feed, GitHub and the
+other registries it watches, and to your alert channels. It never needs
+inbound access from the internet.
+</Aside>
