@@ -40,8 +40,8 @@
   };
   let header = $derived(headers[current.page]);
   let nav = $derived([
-    { href: '/findings', label: 'Findings', icon: 'findings' as const, current: current.page === 'findings' || current.page === 'finding' },
     { href: '/', label: 'Overview', icon: 'overview' as const, current: current.page === 'overview' },
+    { href: '/findings', label: 'Findings', icon: 'findings' as const, current: current.page === 'findings' || current.page === 'finding' },
     { href: '/services', label: 'Inventory', icon: 'inventory' as const, current: current.page === 'inventory' || current.page === 'service' },
     { href: '/releases', label: 'Releases', icon: 'releases' as const, current: current.page === 'releases' },
     { href: '/oaths', label: 'Oaths', icon: 'oaths' as const, current: current.page === 'oaths' },
@@ -106,7 +106,7 @@
   </div>
 {:else if authState === 'ready'}
   <div class="shell">
-    <NavRail items={nav} home={'/findings' + realmQuery(selected)} {navigate}>
+    <NavRail items={nav} home={'/' + realmQuery(selected)} {navigate}>
       {#snippet footer()}
         <Menu label="Account" align="start" up>
           {#snippet trigger()}<span class="avatar" title={identity?.name}>{initials}</span>{/snippet}
@@ -117,7 +117,7 @@
     <main class="content" class:bleed={current.page === 'findings' || current.page === 'finding'}>
       {#if current.page === 'findings'}<Findings realms={selected} {navigate} {realmPicker} />
       {:else if current.page === 'finding'}<Finding id={current.id} grants={identity?.grants ?? []} {navigate} />
-      {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/findings' + realmQuery(selected))}>Go to findings</Button></div>
+      {:else if current.page === 'notfound'}<div class="state"><NotFound /><Button onclick={() => navigate('/' + realmQuery(selected))}>Go to overview</Button></div>
       {:else}
         {#if header}<PageHeader title={header[0]} description={header[1]}>{#snippet actions()}{#if current.page !== 'settings'}{@render realmPicker()}{/if}{/snippet}</PageHeader>{/if}
         {#if current.page === 'overview'}<Overview realms={selected} {navigate} />
