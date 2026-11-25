@@ -369,12 +369,17 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request
             auth,
             redact,
         } => {
+            // A bad URL is the channel's problem: hold its queue until it
+            // is fixed, as for a refused destination.
             let Ok(parsed) = reqwest::Url::parse(&url) else {
-                return Outcome::Rejected("the channel URL is not a valid URL".to_string());
+                return Outcome::Hold("the channel URL is not a valid URL".to_string());
             };
-            let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default())
-            else {
-                return Outcome::Rejected("the channel URL has no host".to_string());
+            let (Some(host), Some(port), "http" | "https") = (
+                parsed.host_str(),
+                parsed.port_or_known_default(),
+                parsed.scheme(),
+            ) else {
+                return Outcome::Hold("the channel URL needs an http or https host".to_string());
             };
             // A destination it may not reach is the channel's problem, not
             // the alert's: hold the queue so nothing is lost.
@@ -388,11 +393,11 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request
             let ChannelConfig::Email(c) = ch else {
                 return Outcome::Rejected("an email for a non-email channel".to_string());
             };
-            let addr = match d.egress.resolve(&c.host, c.port(), origin).await {
-                Ok(a) => a[0],
+            let addrs = match d.egress.resolve(&c.host, c.port(), origin).await {
+                Ok(a) => a,
                 Err(why) => return Outcome::Hold(why),
             };
-            match d.mailer.send(c, addr, *msg).await {
+            match d.mailer.send(c, &addrs, *msg).await {
                 Ok(()) => Outcome::Sent,
                 Err(MailError::Transient(why)) => Outcome::Retry {
                     retry_after_secs: None,

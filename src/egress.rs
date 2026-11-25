@@ -98,8 +98,8 @@ pub fn forbidden(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => forbidden_v4(v4),
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return forbidden_v4(v4);
+            if embedded_v4(v6).is_some_and(forbidden_v4) {
+                return true;
             }
             let seg = v6.segments();
             v6.is_unspecified()
@@ -112,6 +112,33 @@ pub fn forbidden(ip: IpAddr) -> bool {
     }
 }
 
+/// The IPv4 address an IPv6 address carries, in every form that can reach
+/// it: mapped (`::ffff:a.b.c.d`), compatible (`::a.b.c.d`), NAT64
+/// (`64:ff9b::/96`, `64:ff9b:1::/48`, last 32 bits) and 6to4 (`2002::/16`,
+/// bits 16-47).
+fn embedded_v4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    let last = Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8);
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return Some(v4);
+    }
+    if s[..6] == [0; 6] && !v6.is_unspecified() && !v6.is_loopback() {
+        return Some(last);
+    }
+    if (s[0], s[1]) == (0x64, 0xff9b) {
+        return Some(last);
+    }
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+        ));
+    }
+    None
+}
+
 fn forbidden_v4(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
     ip.is_link_local() // 169.254.0.0/16: AWS, GCP, Azure, OpenStack metadata
@@ -120,6 +147,8 @@ fn forbidden_v4(ip: Ipv4Addr) -> bool {
         || ip.is_broadcast()
         // Alibaba Cloud's metadata address.
         || ip == Ipv4Addr::new(100, 100, 100, 200)
+        // Azure's WireServer (VM agent and extension settings).
+        || ip == Ipv4Addr::new(168, 63, 129, 16)
 }
 
 /// The destination rules, built from the config.
@@ -152,8 +181,8 @@ impl Egress {
                 let lookup = tokio::net::lookup_host((bare, port));
                 match tokio::time::timeout(LOOKUP_TIMEOUT, lookup).await {
                     Ok(Ok(it)) => it.collect(),
-                    Ok(Err(e)) => return Err(format!("cannot resolve `{bare}`: {e}")),
-                    Err(_) => return Err(format!("resolving `{bare}` timed out")),
+                    Ok(Err(e)) => return Err(format!("cannot resolve the destination host: {e}")),
+                    Err(_) => return Err("resolving the destination host timed out".to_string()),
                 }
             }
         };
@@ -187,11 +216,13 @@ impl Egress {
             .collect();
         if ok.is_empty() {
             return Err(match blocked {
+                // Never the host name: for some webhooks it is part of the
+                // secret URL.
                 Some(ip) if forbidden(ip) => {
-                    format!("`{bare}` resolves to {ip}, a link-local or metadata address")
+                    format!("the destination is {ip}, a link-local or metadata address")
                 }
-                Some(_) => format!("`{bare}` is not in console_channels.allowed_hosts"),
-                None => format!("`{bare}` has no address"),
+                Some(_) => "the destination is not in console_channels.allowed_hosts".to_string(),
+                None => "the destination host has no address".to_string(),
             });
         }
         Ok(ok)
@@ -245,6 +276,11 @@ mod tests {
             "::",
             "ff02::1",
             "::ffff:169.254.169.254",
+            "::169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b:1::a9fe:a9fe",
+            "2002:a9fe:a9fe::1",
+            "168.63.129.16",
         ] {
             assert!(forbidden(ip.parse().unwrap()), "{ip}");
         }
@@ -255,6 +291,8 @@ mod tests {
             "8.8.8.8",
             "::1",
             "fd00::1",
+            "64:ff9b::808:808",
+            "2002:808:808::1",
         ] {
             assert!(!forbidden(ip.parse().unwrap()), "{ip}");
         }

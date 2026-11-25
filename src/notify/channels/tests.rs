@@ -608,7 +608,7 @@ impl Mailer for FakeMailer {
     fn send<'a>(
         &'a self,
         _ch: &'a EmailChannel,
-        _addr: std::net::SocketAddr,
+        _addrs: &'a [std::net::SocketAddr],
         msg: lettre::Message,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MailError>> + Send + 'a>>
     {

@@ -29,12 +29,23 @@ fn key() -> SecretKey {
 }
 
 async fn queue(pool: &PgPool, route: &str) -> i64 {
+    queue_as(
+        pool,
+        route,
+        "alertmanager",
+        json!({"alerts": [{"labels": {"alertname": "x"}, "annotations": {}}]}),
+    )
+    .await
+}
+
+async fn queue_as(pool: &PgPool, route: &str, kind: &str, card: serde_json::Value) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO outbox (group_key, card, route, channel_type, next_attempt_at) \
-         VALUES ('alert|x', $1, $2, 'alertmanager', '2000-01-01') RETURNING id",
+         VALUES ('alert|x', $1, $2, $3, '2000-01-01') RETURNING id",
     )
-    .bind(json!({"alerts": [{"labels": {"alertname": "x"}, "annotations": {}}]}))
+    .bind(card)
     .bind(route)
+    .bind(kind)
     .fetch_one(pool)
     .await
     .unwrap()
@@ -145,7 +156,10 @@ async fn allowlist_holds_console_channels_only(pool: PgPool) {
     assert!(state(&pool, from_config).await.0.is_some());
     let (sent, err) = state(&pool, from_console).await;
     assert!(sent.is_none());
-    assert!(err.unwrap_or_default().contains("allowed_hosts"));
+    let err = err.unwrap_or_default();
+    assert!(err.contains("allowed_hosts"), "{err}");
+    // Never the host: for some webhooks it is part of the secret URL.
+    assert!(!err.contains("127.0.0.1"), "{err}");
     server.verify().await;
 }
 
@@ -210,4 +224,92 @@ fn allowed_hosts_are_parsed_at_load() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("not a host"), "{err}");
+}
+
+/// A channel URL that does not parse, or is not http(s), keeps the alerts
+/// queued instead of discarding them.
+#[sqlx::test(migrations = "./migrations")]
+async fn bad_url_keeps_alerts_queued(pool: PgPool) {
+    std::env::set_var("EGRESS_BAD_URL", "hooks.example.com/no-scheme");
+    std::env::set_var("EGRESS_FILE_URL", "file:///etc/passwd");
+    let c = cfg(
+        "realms: [prod]\nchannels:\n  - {type: webhook, name: bad, url_env: EGRESS_BAD_URL, \
+                 min_severity: high}\n  - {type: webhook, name: file, url_env: EGRESS_FILE_URL, \
+                 min_severity: high}\n",
+    );
+    let bad = queue_as(&pool, "bad", "webhook", json!({"title": "x"})).await;
+    let file = queue_as(&pool, "file", "webhook", json!({"title": "x"})).await;
+    drain(&pool, &c).await;
+    drain(&pool, &c).await;
+    for id in [bad, file] {
+        let (sent, err) = state(&pool, id).await;
+        assert!(sent.is_none(), "row {id} was discarded");
+        assert!(err.unwrap_or_default().contains("URL"));
+    }
+}
+
+/// A minimal SMTP server that accepts one message; returns its address.
+async fn smtp_server() -> std::net::SocketAddr {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let (r, mut w) = sock.into_split();
+        let mut lines = BufReader::new(r).lines();
+        w.write_all(b"220 test\r\n").await.unwrap();
+        let mut data = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let reply: &[u8] = if data {
+                if line != "." {
+                    continue;
+                }
+                data = false;
+                b"250 queued\r\n"
+            } else {
+                match line.get(..4).unwrap_or("").to_ascii_uppercase().as_str() {
+                    "EHLO" | "HELO" | "MAIL" | "RCPT" | "RSET" | "NOOP" => b"250 ok\r\n",
+                    "DATA" => {
+                        data = true;
+                        b"354 go\r\n"
+                    }
+                    "QUIT" => {
+                        let _ = w.write_all(b"221 bye\r\n").await;
+                        return;
+                    }
+                    _ => b"500 what\r\n",
+                }
+            };
+            w.write_all(reply).await.unwrap();
+        }
+    });
+    addr
+}
+
+/// The real mailer tries each checked address until one answers, as lettre
+/// did when it resolved the host itself (a host listed as `::1` first but
+/// served on `127.0.0.1` still gets its mail).
+#[tokio::test]
+async fn email_falls_back_to_the_next_address() {
+    use super::channels::email::{self, Mailer, SmtpMailer};
+    use crate::config::ChannelConfig;
+    let live = smtp_server().await;
+    // Bound and dropped: nothing listens there any more.
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let ChannelConfig::Email(c) = serde_saphyr::from_str::<ChannelConfig>(
+        "{type: email, name: mail, host: localhost, security: none, \
+         from: heimdall@example.com, to: [ops@example.com], min_severity: high}",
+    )
+    .unwrap() else {
+        unreachable!()
+    };
+    let alert = super::alert::Alert::test(now());
+    let msg = email::message(&c, &email::render(&alert)).unwrap();
+    let secrets = super::channels::Secrets::new();
+    let mailer = SmtpMailer { secrets: &secrets };
+    mailer.send(&c, &[dead, live], msg).await.unwrap();
 }

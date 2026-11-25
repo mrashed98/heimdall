@@ -397,17 +397,21 @@ the addresses it checked, so the check and the connection always agree.
 - **Never sent to, by any channel:** link-local addresses (`169.254.0.0/16`,
   `fe80::/10`), which include the cloud metadata service at
   `169.254.169.254` on AWS, Google Cloud, Azure and OpenStack; Alibaba
-  Cloud's `100.100.100.200`; AWS's IPv6 `fd00:ec2::254`; and unspecified,
-  multicast and broadcast addresses. No alert destination lives there.
+  Cloud's `100.100.100.200`; Azure's WireServer `168.63.129.16`; AWS's IPv6
+  `fd00:ec2::254`; and unspecified, multicast and broadcast addresses. An IPv6
+  address that carries one of these IPv4 addresses (mapped, compatible, NAT64
+  or 6to4) is refused too. No alert destination lives there.
 - **Redirects are not followed.** A channel whose server answers with a
   redirect keeps its alerts queued and shows the reason; set the URL it
   redirects to.
 - **Private and loopback addresses are allowed**, because Alertmanager, an
   internal webhook or an SMTP relay usually live there.
 
-A destination that is refused keeps the channel's alerts queued with the
-reason (shown as **Failing** in the console), so nothing is lost when you fix
-it. Saving a console channel with a refused destination fails with the same
+A destination that is refused, or a channel URL that is not a valid `http` or
+`https` URL, keeps the channel's alerts queued with the reason (shown as
+**Failing** in the console), so nothing is lost when you fix it. The reason
+never names the host, since for some webhooks it is part of the secret URL.
+Saving a console channel with a refused destination fails with the same
 reason.
 
 ### Limiting console channels to some hosts
@@ -430,9 +434,15 @@ entry by name, or resolving to an address in a listed network. Channels in
 `heimdall.yaml` are not limited by it. The list can only be set in the config
 file, not in the console, because it limits what console admins can reach.
 
-If Heimdall sends through a proxy (`HTTPS_PROXY`), the proxy connects to the
-destination: the checks above still apply to the URL's host and the
-addresses it resolves to on the Heimdall side.
+<Aside type="caution" title="Behind a proxy">
+When `HTTP_PROXY` or `HTTPS_PROXY` is set, Heimdall sends through the proxy,
+and the proxy looks up the host and connects itself. Heimdall still checks
+the host and the addresses it resolves to, but a name whose DNS answer
+changes between that check and the proxy's lookup can reach an address the
+check refused. If console admins are not fully trusted, block link-local and
+metadata addresses on the proxy too, or list the channel hosts in `NO_PROXY`
+so Heimdall connects to them directly.
+</Aside>
 
 ## Troubleshooting
 
