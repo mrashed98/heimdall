@@ -1116,7 +1116,7 @@ channels:\n\
             .collect();
         assert!(block.len() > 5, "example block not found");
         let cfg = load_str(&format!("realms: [dev-k3s]\n{}", block.join("\n"))).unwrap();
-        assert_eq!(cfg.channels.len(), 6);
+        assert_eq!(cfg.channels.len(), 8);
     }
 
     #[test]
