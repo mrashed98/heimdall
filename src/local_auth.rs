@@ -1,4 +1,6 @@
 //! Local identities and browser sessions.
+// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
+#![allow(clippy::disallowed_methods)]
 use crate::config::{HeimdallConfig, Role};
 use crate::{
     auth::{authenticate_key, Scope},

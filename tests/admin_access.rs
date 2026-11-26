@@ -111,6 +111,8 @@ async fn oath_permissions_and_audit(pool: PgPool) {
     }
     let (_, created) = call(&app, "POST", "/api/v1/oaths", &editor, oath("prod", false)).await;
     let id = created["id"].as_i64().unwrap();
+    // Exception: a token/date the server checks against its real clock.
+    #[allow(clippy::disallowed_methods)]
     let until = (chrono::Utc::now().date_naive() + chrono::Duration::days(4)).to_string();
     for action in ["extend", "revoke"] {
         let path = format!("/api/v1/oaths/{id}/{action}");

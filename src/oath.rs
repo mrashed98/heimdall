@@ -1,6 +1,8 @@
 //! Oaths: recorded human decisions to accept an advisory for one component
 //! in one service. A snooze lapses on a date; an ignore comes up for review.
 //! The matcher, the gate and the digest all read oaths from here.
+// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
+#![allow(clippy::disallowed_methods)]
 
 use std::fmt;
 

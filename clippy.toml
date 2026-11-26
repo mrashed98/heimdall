@@ -1,0 +1,4 @@
+# Time comes from AppState.clock (lib.rs `Clock`), so tests can fix it.
+disallowed-methods = [
+  { path = "chrono::Utc::now", reason = "read the time from AppState.clock (`state.clock.now()`); tests fix it with Clock::fixed" },
+]

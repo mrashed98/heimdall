@@ -3,6 +3,8 @@
 //! percentile among all CVEs. Published once a day as one gzipped CSV of every
 //! CVE (about 3 MB, 400k rows). Only the CVEs Heimdall's advisories name are
 //! kept; the table is replaced whole on each good download.
+// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};

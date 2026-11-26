@@ -1,4 +1,6 @@
 //! OSV.dev client and advisory refresh.
+// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
+#![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

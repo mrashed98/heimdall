@@ -68,6 +68,7 @@ impl Clock {
         Clock(Some(at))
     }
     pub fn now(self) -> chrono::DateTime<chrono::Utc> {
+        #[allow(clippy::disallowed_methods)] // The one place the real clock is read.
         self.0.unwrap_or_else(chrono::Utc::now)
     }
 }
