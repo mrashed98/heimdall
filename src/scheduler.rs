@@ -38,6 +38,37 @@ struct Ctx {
     state: AppState,
     /// The realm in-process Sight scans; None when no cluster is reachable.
     sight_realm: Option<String>,
+    /// `sight.docker`, when configured: the Docker host read with Sight.
+    docker: Option<DockerScan>,
+}
+
+#[derive(Clone)]
+struct DockerScan {
+    host: crate::inventory::docker::DockerHost,
+    name: Option<String>,
+    realm: String,
+}
+
+/// The configured in-process Docker scan. The config was validated, so a
+/// failure here is a bug; it is logged, never silently ignored.
+fn docker_scan(cfg: &HeimdallConfig) -> Option<DockerScan> {
+    let d = cfg.sight.docker.as_ref()?;
+    let host = match d.host.parse() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("sight.docker.host: {e}; Sight for Docker is off");
+            return None;
+        }
+    };
+    let Some(realm) = cfg.docker_realm() else {
+        tracing::error!("sight.docker has no realm; Sight for Docker is off");
+        return None;
+    };
+    Some(DockerScan {
+        host,
+        name: d.name.clone(),
+        realm: realm.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,12 +142,17 @@ impl Job {
 /// drops the `JoinSet` and so aborts the loops with it).
 pub async fn run(state: AppState) {
     let sight_realm = sight_realm(&state.cfg).await;
-    let ctx = Ctx { state, sight_realm };
+    let docker = docker_scan(&state.cfg);
+    let ctx = Ctx {
+        state,
+        sight_realm,
+        docker,
+    };
     first_run(&ctx).await;
 
     let mut loops = JoinSet::new();
     for job in Job::ALL {
-        if job == Job::Sight && ctx.sight_realm.is_none() {
+        if job == Job::Sight && ctx.sight_realm.is_none() && ctx.docker.is_none() {
             continue;
         }
         loops.spawn(run_loop(job, ctx.clone()));
@@ -149,9 +185,7 @@ async fn first_run(ctx: &Ctx) {
     let span = tracing::info_span!("first_run");
     async {
         tracing::info!("first run started");
-        if let Some(realm) = &ctx.sight_realm {
-            log_failure("sight", sight_once(st, realm).await);
-        }
+        log_failure("sight", sight_all(ctx).await);
         log_failure("osv", osv_refresh(st).await);
         let matched = match_all(st).await;
         log_failure("alerts", announce(st, &matched).await);
@@ -194,10 +228,7 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
     let st = &ctx.state;
     let now = Utc::now();
     match job {
-        Job::Sight => {
-            let realm = ctx.sight_realm.as_deref().context("sight has no realm")?;
-            sight_once(st, realm).await
-        }
+        Job::Sight => sight_all(&ctx).await,
         Job::Osv => {
             // Stale advisories still match: the matcher runs either way.
             log_failure("osv", osv_refresh(st).await);
@@ -299,6 +330,39 @@ async fn rematch(st: &AppState) -> anyhow::Result<()> {
     let alerts = announce(st, &matched).await;
     meters::recompute(&st.pool, &st.cfg).await?;
     alerts
+}
+
+/// The cluster and the Docker host, whichever are configured. One failing
+/// does not skip the other.
+async fn sight_all(ctx: &Ctx) -> anyhow::Result<()> {
+    let st = &ctx.state;
+    let cluster = match &ctx.sight_realm {
+        Some(realm) => sight_once(st, realm).await,
+        None => Ok(()),
+    };
+    let docker = match &ctx.docker {
+        Some(d) => docker_once(st, d).await,
+        None => Ok(()),
+    };
+    cluster.and(docker)
+}
+
+async fn docker_once(st: &AppState, d: &DockerScan) -> anyhow::Result<()> {
+    let inv = crate::inventory::docker::scan(&d.host, &d.realm, d.name.as_deref()).await?;
+    // An idle Docker host may run nothing: that empties its own services only.
+    let out = crate::ingest::api::ingest_cluster_inner(st, &inv, true)
+        .await
+        .map_err(|e| anyhow::anyhow!("docker sight ingest: {e:?}"))?;
+    tracing::info!(
+        realm = %d.realm,
+        origin = inv.origin.as_deref().unwrap_or_default(),
+        services = out.services,
+        added = out.added,
+        removed = out.removed,
+        "docker sight ran"
+    );
+    record_sync(st, "sight-docker").await?;
+    Ok(())
 }
 
 async fn sight_once(st: &AppState, realm: &str) -> anyhow::Result<()> {

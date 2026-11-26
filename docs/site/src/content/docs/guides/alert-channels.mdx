@@ -1,6 +1,6 @@
 ---
 title: Alert channels
-description: Send Gjallarhorn's alerts to Teams, Slack, Discord, Telegram, PagerDuty, Alertmanager, a webhook or email, routed by realm and severity.
+description: Send Gjallarhorn's alerts to Teams, Slack, Discord, Mattermost, Telegram, PagerDuty, Alertmanager, Jira, a webhook or email, routed by realm and severity.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -58,8 +58,8 @@ console](#managing-channels-in-the-console)).
 - **The weekly digest and the first-run summary** go to every channel covering
   the realm whose `digest` is on, whatever its `min_severity`. `digest`
   defaults to `true`, except for the paging types (`pagerduty`,
-  `alertmanager`), where a weekly summary would page someone; set
-  `digest: true` there to opt in, or `digest: false` on any channel to opt out.
+  `alertmanager`), where a weekly summary would page someone, and `jira`,
+  where it would open an issue every week; set `digest: true` there to opt in, or `digest: false` on any channel to opt out.
   Medium and low findings of a realm that no digest channel covers stay
   pending until one does.
 - **Links:** only links Heimdall makes itself (the advisory, the release notes)
@@ -69,8 +69,19 @@ console](#managing-channels-in-the-console)).
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
-  channel rejects (a 4xx other than 429, a permanent SMTP error) is not retried
-  and counts in `heimdall_notify_failures_total{channel_type}`.
+  channel rejects (a 4xx other than 429, which is retried, and those below; or
+  a permanent SMTP error) is not retried and counts in
+  `heimdall_notify_failures_total{channel_type}`.
+- **A broken channel keeps its alerts.** Some answers mean the channel is
+  wrong, not the message: 401, 403, 404 and 410 from any channel (bad
+  credentials or permissions, or a webhook deleted where the service answers
+  404 or 410, as Slack and Discord do), a Jira 400 that names a field other
+  than the summary or description (or names none and gives no message), and
+  Telegram's `chat not found` or a group that became a supergroup (update
+  `chat_id`). The channel's queue then
+  waits and retries with the usual backoff until it is fixed, and nothing is
+  discarded. A service that answers a deleted webhook with a plain 400 can't
+  be told apart from a refused message, so that alert is dropped.
 - **Destinations are checked** before every send: see
   [Where channels may send](#where-channels-may-send).
 - **A missing variable** keeps that channel's messages queued until it is set.
@@ -261,6 +272,66 @@ permanent one (a 5xx reply such as an unknown recipient) is not. A failed login
 (530, 534, 535) is a problem with the channel, not the message: the whole
 channel's queue waits and retries with the usual backoff, so a wrong password
 delays mail but never discards it. Fix the credentials and the backlog goes out.
+
+## Mattermost
+
+`type: mattermost`, `webhook_env` (an [incoming
+webhook](https://developers.mattermost.com/integrate/webhooks/incoming/) URL:
+*Integrations → Incoming Webhooks*). One message attachment per alert,
+coloured by severity, with the severity (for findings) and the realms (when
+the alert has any) as fields. Text is
+Markdown-escaped, and an `@` that starts a word is broken with an invisible
+character, so an advisory saying `@channel` or `@all` never notifies anyone.
+
+```yaml
+- type: mattermost
+  name: security
+  webhook_env: MATTERMOST_WEBHOOK_SECURITY
+  min_severity: high
+```
+
+## Jira
+
+`type: jira` opens one issue per alert with the REST API v2, which Jira Cloud
+and Jira Data Center both accept.
+
+| Key | Meaning |
+|---|---|
+| `url` | The site, for example `https://example.atlassian.net`. **Required.** |
+| `project` | Project key, for example `SEC` (sent uppercase). **Required.** |
+| `issue_type` | Issue type name. Default `Task`. |
+| `token_env` | Variable holding the API token (Cloud) or personal access token (Data Center). **Required.** |
+| `username_env` | Variable holding the account email. Set it for Jira Cloud, where the token goes with basic auth; leave it out for Data Center, where the token is sent as a bearer token. |
+
+```yaml
+- type: jira
+  name: sec-issues
+  url: https://example.atlassian.net
+  project: SEC
+  issue_type: Bug
+  username_env: JIRA_EMAIL
+  token_env: JIRA_API_TOKEN
+  realms: [prod]
+  min_severity: high
+```
+
+The summary is the alert's title; the description lists the findings in wiki
+markup, with the links the alert has (the advisory, or the release notes).
+Each issue gets the label `heimdall`, `severity-<level>` for a finding, and a
+random `heimdall-q-<id>` given when it is queued, which lets Heimdall see on a
+retry that an earlier attempt already created it (it searches for that label
+first). The project and issue type are read when the issue is
+created, so changing them also moves issues still in the queue (except one
+an earlier, timed-out attempt already created: that one stays where it is). The weekly
+digest is off by default (it would open an issue every week); set
+`digest: true` to have it. The account needs permission to create issues in
+the project, and the create screen needs the Labels field. A 401 or 403, or
+a 400 that names any field but the summary or description (the project, the
+issue type, labels, or a field the project requires that Heimdall doesn't
+fill), keeps the issues queued until that is fixed; so does a 400 Heimdall
+can't read. A 400 that names only the summary or description (whatever its
+messages say), or names no field but gives a message, drops that issue only,
+with Jira's message shown as the reason.
 
 ## Managing channels in the console
 

@@ -1298,3 +1298,6 @@ async fn test_send_scrubs_a_console_secret_the_server_echoed() {
         "{err}"
     );
 }
+
+#[path = "tests_mattermost_jira.rs"]
+mod mattermost_jira;

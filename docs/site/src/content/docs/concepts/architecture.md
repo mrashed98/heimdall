@@ -35,7 +35,7 @@ Kubernetes Secrets ([ADR 0003](/heimdall/decisions/0003-no-secret-access/)).
 - **Watchers** poll outside sources on a schedule and record new releases.
 - **Matcher** joins inventory, advisories, releases and oaths into findings.
 - **Gjallarhorn** turns findings into alerts on the configured channels (Teams,
-  Slack, Discord, Telegram, PagerDuty, Alertmanager, webhooks, email), through a paced queue stored
+  Slack, Discord, Mattermost, Telegram, PagerDuty, Alertmanager, Jira, webhooks, email), through a paced queue stored
   in the database.
 - **Image scanner CronJob** is a separate Kubernetes job (syft, its own limits)
   that asks Heimdall for image digests without an SBOM, generates them and posts

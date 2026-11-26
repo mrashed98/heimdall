@@ -53,6 +53,11 @@ impl FromRequestParts<AppState> for UploadSlot {
 pub struct ClusterInventory {
     pub realm: String,
     pub services: Vec<ClusterService>,
+    /// What reported it: absent for a Kubernetes cluster, `docker:<host>`
+    /// for a Docker host. An ingest only empties services of its own origin,
+    /// so a realm can hold a cluster and Docker hosts side by side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +230,7 @@ async fn ingest_cluster(
         "services": out.services,
         "added": out.added,
         "removed": out.removed,
+        "skipped": out.skipped,
     })))
 }
 
@@ -234,6 +240,9 @@ pub struct ClusterOutcome {
     pub services: usize,
     pub added: usize,
     pub removed: usize,
+    /// Reported services another origin (the cluster, another Docker host)
+    /// already holds: left alone, and logged.
+    pub skipped: usize,
 }
 
 /// The cluster ingest itself, shared by `/ingest/cluster` and Sight's
@@ -251,17 +260,59 @@ pub async fn ingest_cluster_inner(
     allow_empty: bool,
 ) -> Result<ClusterOutcome, ApiError> {
     check_realm(state, &inv.realm)?;
+    let origin = match inv.origin.as_deref() {
+        None => "",
+        Some(o) => {
+            let host = o.strip_prefix("docker:").unwrap_or_default();
+            if host.trim().is_empty()
+                || host.contains('/')
+                || o.len() > 200
+                || o.chars().any(char::is_control)
+            {
+                return Err(ApiError::BadRequest(
+                    "origin must be `docker:<id>` (no `/`, at most 200 characters)".into(),
+                ));
+            }
+            o
+        }
+    };
     if inv.services.is_empty() && !allow_empty {
         return Err(ApiError::BadRequest(
             "empty cluster inventory: no services (pass allow_empty=true to accept it)".into(),
         ));
     }
     let mut tx = state.pool.begin().await?;
+    // One cluster ingest per realm at a time: two origins reporting one
+    // name at once would both pass the ownership check below.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('ingest-cluster|' || $1))")
+        .bind(&inv.realm)
+        .execute(&mut *tx)
+        .await?;
 
     let mut added = 0;
     let mut removed = 0;
+    let mut skipped = 0;
     let mut listed: HashSet<String> = HashSet::new();
     for svc in &inv.services {
+        // A name another origin still reports (it has cluster rows) is
+        // theirs: taking it over would swap its components, and their sweep
+        // could then never empty it.
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT s.origin FROM services s WHERE s.realm = $1 AND s.name = $2 \
+             AND s.origin <> $3 AND EXISTS (SELECT 1 FROM service_components sc \
+             WHERE sc.service_id = s.id AND sc.source = 'cluster')",
+        )
+        .bind(&inv.realm)
+        .bind(&svc.name)
+        .bind(origin)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(owner) = owner {
+            tracing::warn!(realm = %inv.realm, service = %svc.name, owner = %owner, origin = %origin,
+                "a service with this name is reported by another origin; skipped (give the Docker host a unique name)");
+            skipped += 1;
+            continue;
+        }
         listed.insert(svc.name.clone());
         let items: Vec<InventoryItem> = svc
             .items
@@ -274,19 +325,26 @@ pub async fn ingest_cluster_inner(
             })
             .collect();
         let id = upsert_service(&mut *tx, &inv.realm, &svc.name).await?;
+        sqlx::query("UPDATE services SET origin = $2 WHERE id = $1")
+            .bind(id)
+            .bind(origin)
+            .execute(&mut *tx)
+            .await?;
         let r = replace_components_in(&mut tx, id, Source::Cluster, &items).await?;
         added += r.added;
         removed += r.removed;
     }
 
-    // Services that still have cluster rows but were not reported have left
-    // the cluster: replace their cluster set with nothing.
+    // Services of this origin that still have cluster rows but were not
+    // reported have left: replace their cluster set with nothing. Other
+    // origins (the cluster, other Docker hosts) are not touched.
     let known: Vec<(i64, String)> = sqlx::query_as(
         "SELECT DISTINCT s.id, s.name FROM services s \
          JOIN service_components sc ON sc.service_id = s.id \
-         WHERE s.realm = $1 AND sc.source = 'cluster'",
+         WHERE s.realm = $1 AND sc.source = 'cluster' AND s.origin = $2",
     )
     .bind(&inv.realm)
+    .bind(origin)
     .fetch_all(&mut *tx)
     .await?;
     for (id, name) in known {
@@ -298,9 +356,10 @@ pub async fn ingest_cluster_inner(
     tx.commit().await?;
 
     Ok(ClusterOutcome {
-        services: inv.services.len(),
+        services: inv.services.len() - skipped,
         added,
         removed,
+        skipped,
     })
 }
 
@@ -385,6 +444,7 @@ mod tests {
     use sqlx::PgPool;
     use tower::ServiceExt;
 
+    use super::*;
     use crate::auth::{create_key, Scope};
     use crate::config::HeimdallConfig;
     use crate::inventory::store::effective_components;
@@ -782,5 +842,134 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    /// Cluster components per service of realm dev-k3s, by name.
+    async fn cluster_services(pool: &PgPool) -> Vec<(String, i64)> {
+        sqlx::query_as(
+            "SELECT s.name, count(sc.component_id) FROM services s \
+             LEFT JOIN service_components sc ON sc.service_id = s.id AND sc.source = 'cluster' \
+             WHERE s.realm = 'dev-k3s' GROUP BY s.name ORDER BY s.name",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn inv(origin: Option<&str>, services: &[(&str, &str)]) -> ClusterInventory {
+        ClusterInventory {
+            realm: "dev-k3s".to_string(),
+            origin: origin.map(str::to_string),
+            services: services
+                .iter()
+                .map(|(name, purl)| ClusterService {
+                    name: name.to_string(),
+                    items: vec![ClusterItem {
+                        purl: purl.to_string(),
+                        cpes: vec![],
+                        direct: false,
+                        via_image_digest: None,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    /// A cluster and Docker hosts share a realm: each ingest empties only
+    /// the services of its own origin.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ingests_of_different_origins_leave_each_other_alone(pool: PgPool) {
+        let (_, _, pool, st) = setup_with_state(pool).await;
+        let k8s = |s| inv(None, s);
+        let vm1 = |s| inv(Some("docker:vm1"), s);
+        ingest_cluster_inner(&st, &k8s(&[("api", "pkg:generic/a@1")]), false)
+            .await
+            .unwrap();
+        ingest_cluster_inner(&st, &vm1(&[("vm1/web", "pkg:generic/b@1")]), false)
+            .await
+            .unwrap();
+        ingest_cluster_inner(
+            &st,
+            &inv(Some("docker:vm2"), &[("vm2/db", "pkg:generic/c@1")]),
+            false,
+        )
+        .await
+        .unwrap();
+        // vm1 now runs nothing: only vm1's service empties.
+        ingest_cluster_inner(&st, &vm1(&[]), true).await.unwrap();
+        assert_eq!(
+            cluster_services(&pool).await,
+            [
+                ("api".into(), 1),
+                ("vm1/web".into(), 0),
+                ("vm2/db".into(), 1)
+            ]
+        );
+        // The cluster reports a new service: Docker services are kept.
+        ingest_cluster_inner(&st, &k8s(&[("api2", "pkg:generic/d@1")]), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            cluster_services(&pool).await,
+            [
+                ("api".into(), 0),
+                ("api2".into(), 1),
+                ("vm1/web".into(), 0),
+                ("vm2/db".into(), 1)
+            ]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn origin_must_be_a_docker_host(pool: PgPool) {
+        let (_, _, _, st) = setup_with_state(pool).await;
+        for bad in [
+            "k8s:x",
+            "docker:a\nb",
+            "docker:",
+            "docker: ",
+            "docker:a/b",
+            "",
+        ] {
+            let err =
+                ingest_cluster_inner(&st, &inv(Some(bad), &[("x", "pkg:generic/a@1")]), false)
+                    .await
+                    .unwrap_err();
+            assert!(matches!(err, ApiError::BadRequest(_)), "{bad}: {err:?}");
+        }
+    }
+
+    /// A name another origin still holds is skipped, not taken over: the
+    /// cluster's `api` keeps its components when a Docker host reports `api`.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_name_another_origin_holds_is_skipped(pool: PgPool) {
+        let (_, _, pool, st) = setup_with_state(pool).await;
+        ingest_cluster_inner(&st, &inv(None, &[("api", "pkg:generic/a@1")]), false)
+            .await
+            .unwrap();
+        let out = ingest_cluster_inner(
+            &st,
+            &inv(
+                Some("docker:E"),
+                &[("api", "pkg:generic/x@9"), ("vm/web", "pkg:generic/b@1")],
+            ),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!((out.services, out.skipped), (1, 1));
+        let api: Vec<String> = sqlx::query_scalar(
+            "SELECT c.purl FROM services s JOIN service_components sc ON sc.service_id = s.id \
+             JOIN components c ON c.id = sc.component_id WHERE s.name = 'api'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(api, ["pkg:generic/a@1"]);
+        let origin: String = sqlx::query_scalar("SELECT origin FROM services WHERE name = 'api'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(origin, "");
     }
 }

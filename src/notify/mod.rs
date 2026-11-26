@@ -1,5 +1,5 @@
 //! Gjallarhorn: announces findings on the configured alert channels (Teams,
-//! Slack, Discord, Telegram, PagerDuty, Alertmanager, a generic webhook,
+//! Slack, Discord, Mattermost, Telegram, PagerDuty, Alertmanager, Jira, a generic webhook,
 //! email).
 //!
 //! - this file: which findings alert, and routing them into the outbox.

@@ -5,7 +5,7 @@ const common = { name: 'ops', realms: ['prod'], min_severity: 'high', digest: nu
 
 describe('channel forms', () => {
   it('lists every channel type in order', () => {
-    expect(CHANNEL_TYPES.map(t => t.id)).toEqual(['teams', 'slack', 'discord', 'telegram', 'pagerduty', 'alertmanager', 'email', 'webhook']);
+    expect(CHANNEL_TYPES.map(t => t.id)).toEqual(['teams', 'slack', 'discord', 'mattermost', 'telegram', 'pagerduty', 'alertmanager', 'email', 'webhook', 'jira']);
   });
   it('marks every server-side secret as a secret field', () => {
     const secrets = (id: string) => CHANNEL_TYPES.find(t => t.id === id)!.fields.filter(f => f.kind === 'secret').map(f => f.key);
@@ -18,6 +18,8 @@ describe('channel forms', () => {
     expect(secrets('alertmanager')).toEqual(['username', 'password', 'bearer_token']);
     expect(secrets('email')).toEqual(['username', 'password']);
     expect(secrets('webhook')).toEqual(['url', 'secret']);
+    expect(secrets('mattermost')).toEqual(['webhook']);
+    expect(secrets('jira')).toEqual(['username', 'token']);
   });
   it('requires email recipients and lists the supported security modes', () => {
     const fields = CHANNEL_TYPES.find(t => t.id === 'email')!.fields;

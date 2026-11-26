@@ -20,8 +20,8 @@ teams:
     realms: []          # empty = all realms
     min_severity: high
 
-# More alert channels: slack, discord, telegram, pagerduty, alertmanager,
-# webhook, email (and teams). Names are unique across `teams` and `channels`;
+# More alert channels: slack, discord, mattermost, telegram, pagerduty,
+# alertmanager, jira, webhook, email (and teams). Names are unique across `teams` and `channels`;
 # `*_env` keys name environment variables, never the secret itself.
 # channels:
 #   - { type: slack, name: dev-chat, webhook_env: SLACK_WEBHOOK_DEV, realms: [dev-k3s], min_severity: high }
@@ -29,6 +29,8 @@ teams:
 #   - { type: pagerduty, name: oncall, routing_key_env: PAGERDUTY_ROUTING_KEY, min_severity: critical }
 #   - { type: alertmanager, name: am, url: "http://alertmanager:9093", min_severity: high }
 #   - { type: webhook, name: siem, url_env: SIEM_WEBHOOK_URL, secret_env: SIEM_WEBHOOK_SECRET, min_severity: low }
+#   - { type: mattermost, name: sec-chat, webhook_env: MATTERMOST_WEBHOOK, min_severity: high }
+#   - { type: jira, name: sec-issues, url: "https://example.atlassian.net", project: SEC, username_env: JIRA_EMAIL, token_env: JIRA_API_TOKEN, min_severity: critical }
 #   - type: email
 #     name: security
 #     host: smtp.example.com

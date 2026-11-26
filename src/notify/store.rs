@@ -40,8 +40,10 @@ pub fn secret_fields(kind: &str) -> Option<&'static [SecretField]> {
     ];
     const GENERIC: &[SecretField] = &[f("url", true), f("secret", false)];
     const EMAIL: &[SecretField] = &[f("username", false), f("password", false)];
+    const JIRA: &[SecretField] = &[f("username", false), f("token", true)];
     Some(match kind {
-        "teams" | "slack" | "discord" => WEBHOOK,
+        "teams" | "slack" | "discord" | "mattermost" => WEBHOOK,
+        "jira" => JIRA,
         "telegram" => TELEGRAM,
         "pagerduty" => PAGERDUTY,
         "alertmanager" => ALERTMANAGER,

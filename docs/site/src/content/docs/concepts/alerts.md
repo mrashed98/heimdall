@@ -5,8 +5,8 @@ description: Which findings alert immediately, how alerts are grouped, and what 
 
 Heimdall tries hard not to cry wolf. If its channel gets muted, it has failed.
 So alerts follow strict rules, the same for every [alert
-channel](/heimdall/guides/alert-channels/) (Teams, Slack, Discord, Telegram,
-PagerDuty, Alertmanager, webhooks, email). "Card" below means one alert message
+channel](/heimdall/guides/alert-channels/) (Teams, Slack, Discord, Mattermost,
+Telegram, PagerDuty, Alertmanager, Jira, webhooks, email). "Card" below means one alert message
 on any channel.
 
 ## Immediate alerts
