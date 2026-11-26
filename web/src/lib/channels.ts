@@ -14,6 +14,7 @@ export const CHANNEL_TYPES: { id: string; label: string; fields: Field[] }[] = [
   { id: 'teams', label: 'Microsoft Teams', fields: webhook },
   { id: 'slack', label: 'Slack', fields: webhook },
   { id: 'discord', label: 'Discord', fields: webhook },
+  { id: 'mattermost', label: 'Mattermost', fields: webhook },
   { id: 'telegram', label: 'Telegram', fields: [
     f('bot_token', 'Bot token', 'secret', true), f('chat_id', 'Chat ID', 'text', true),
     f('api_url', 'API URL', 'url', false, { hint: 'Leave empty for api.telegram.org.' }),
@@ -34,6 +35,12 @@ export const CHANNEL_TYPES: { id: string; label: string; fields: Field[] }[] = [
   ] },
   { id: 'webhook', label: 'Webhook', fields: [
     f('url', 'Endpoint URL', 'secret', true), f('secret', 'Signing secret', 'secret'),
+  ] },
+  { id: 'jira', label: 'Jira', fields: [
+    f('url', 'Jira URL', 'url', true, { hint: 'For example https://example.atlassian.net.' }),
+    f('project', 'Project key', 'text', true), f('issue_type', 'Issue type', 'text', false, { hint: 'Leave empty for Task.' }),
+    f('username', 'Account email', 'secret', false, { hint: 'Jira Cloud. Leave empty to send the token as a bearer token (Data Center).' }),
+    f('token', 'API token', 'secret', true),
   ] },
 ];
 

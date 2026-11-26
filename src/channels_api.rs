@@ -242,7 +242,7 @@ async fn list(State(st): State<AppState>, p: Principal) -> Result<Json<List>, Fa
                 Some(c) => c.wants_digest(),
                 None => row
                     .digest
-                    .unwrap_or(!matches!(u.kind.as_str(), "pagerduty" | "alertmanager")),
+                    .unwrap_or(crate::config::digest_by_default(&u.kind)),
             },
             settings: u
                 .config
