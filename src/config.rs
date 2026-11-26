@@ -938,6 +938,8 @@ pub struct Retention {
     pub outbox_days: u32,
     #[serde(default = "default_findings_days")]
     pub audit_days: u32,
+    #[serde(default = "default_findings_days")]
+    pub trends_days: u32,
 }
 
 impl Default for Retention {
@@ -947,6 +949,7 @@ impl Default for Retention {
             releases_days: default_releases_days(),
             outbox_days: default_outbox_days(),
             audit_days: default_findings_days(),
+            trends_days: default_findings_days(),
         }
     }
 }

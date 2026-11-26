@@ -102,3 +102,4 @@ retention:
   findings_days: 365
   releases_days: 365
   outbox_days: 30
+  trends_days: 365

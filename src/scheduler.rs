@@ -324,11 +324,12 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
     }
 }
 
-/// Matcher for every realm, then alerts, then the gauges.
+/// Matcher for every realm, then alerts, then the gauges and today's trend row.
 async fn rematch(st: &AppState) -> anyhow::Result<()> {
     let matched = match_all(st).await;
     let alerts = announce(st, &matched).await;
     meters::recompute(&st.pool, &st.cfg).await?;
+    crate::trends::snapshot(&st.pool, &st.cfg.realms, chrono::Utc::now().date_naive()).await?;
     alerts
 }
 

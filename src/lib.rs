@@ -25,6 +25,7 @@ pub mod scheduler;
 pub mod secrets;
 pub mod server;
 pub mod telemetry;
+pub mod trends;
 pub mod ui;
 pub mod version;
 pub mod vuln;

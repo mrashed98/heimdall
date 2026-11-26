@@ -3,6 +3,8 @@
   import { statusUrl } from './overview';
   import { SEVERITIES as severities, type Severity } from './ui/format';
   import { packageLabel, rowTitle } from './findings';
+  import { dailySeries, type TrendRow } from './trends';
+  import TrendChart from './TrendChart.svelte';
   import { Badge, DataTable, EmptyState, EpssBar, ErrorState, Panel, Skeleton, Stat } from './ui';
   let { realms, navigate }: { realms: string[]; navigate: (to: string) => void } = $props();
   type Counts = { realm: string; severity: Severity; count: number };
@@ -10,12 +12,15 @@
   type Status = { severity: Counts[]; fix_available: number; services: Risk[]; eol: { realm: string; service: string | null; ref_id: string | null; details: Record<string, unknown> }[]; sync: Record<string, string | null> };
   type Release = { id: number; target: string; version: string; published_at: string | null; notes_class: string | null };
   type Fixable = { id: number; kind: string; ref_id: string | null; summary?: string; component_name?: string; component_version?: string; fix?: string; service: string | null; realm: string; severity: string; epss?: number; epss_percentile?: number; details: Record<string, unknown> };
-  let status = $state<Status | null>(null); let releases = $state<Release[]>([]); let fixFirst = $state<Fixable[]>([]);
+  let status = $state<Status | null>(null); let releases = $state<Release[]>([]); let fixFirst = $state<Fixable[]>([]); let trend = $state<TrendRow[]>([]);
   let loading = $state(true); let failed = $state(false); let revision = $state(0);
   let groups = $derived([...new Set((status?.severity ?? []).map(x => x.realm))].map(realm => ({ realm, counts: severities.map(s => status?.severity.find(x => x.realm === realm && x.severity === s)?.count ?? 0) })));
   let bySeverity = (s: Severity) => (status?.severity ?? []).filter(x => x.severity === s).reduce((n, x) => n + x.count, 0);
   let total = $derived((status?.severity ?? []).reduce((n, row) => n + row.count, 0));
   let max = $derived(Math.max(1, ...groups.map(g => g.counts.reduce((a, b) => a + b, 0))));
+  const TREND_DAYS = 90;
+  let days = $derived(dailySeries(trend, TREND_DAYS));
+  let recorded = $derived(days.filter(d => d.critical !== null));
   let q = $derived(realms.length ? `?realms=${encodeURIComponent(realms.join(','))}` : '');
   function date(value: string | null) { if (!value) return 'Not yet'; const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Not yet' : d.toLocaleString(); }
   function go(e: MouseEvent, to: string) { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); navigate(to); }
@@ -23,8 +28,8 @@
     const url = statusUrl(realms); const realmParam = realms.length ? `&realms=${encodeURIComponent(realms.join(','))}` : ''; revision;
     let active = true; loading = true; failed = false;
     // The fix-first list is optional: if it fails, only that panel is empty.
-    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`).catch(() => [] as Fixable[])])
-      .then(([s, r, f]) => { if (active) { status = s; releases = r; fixFirst = f; loading = false; } })
+    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`).catch(() => [] as Fixable[]), api<TrendRow[]>(`/api/v1/trends?days=${TREND_DAYS}${realmParam}`).catch(() => [] as TrendRow[])])
+      .then(([s, r, f, t]) => { if (active) { status = s; releases = r; fixFirst = f; trend = t; loading = false; } })
       .catch(() => { if (active) { failed = true; loading = false; } });
     return () => { active = false; };
   });
@@ -59,6 +64,20 @@
         {:else}<p class="pad muted">Nothing with a fix is open.</p>{/if}
       </Panel>
     </div>
+    <Panel title="Open findings over 90 days">
+      {#snippet actions()}End of each day, UTC{/snippet}
+      {#if recorded.length}
+        <div class="trends">
+          {#each [['critical', 'Critical', 'var(--sev-critical)'], ['high', 'High', 'var(--sev-high)']] as const as [s, label, color]}
+            <div><h3>{label}</h3><TrendChart {label} {color} points={days.map(d => ({ day: d.day, value: d[s] }))} /></div>
+          {/each}
+        </div>
+        <details><summary>Show as table</summary>
+          <DataTable label="Open findings per day"><thead><tr><th>Day</th>{#each severities as s}<th>{s[0]!.toUpperCase() + s.slice(1)}</th>{/each}</tr></thead>
+            <tbody>{#each [...recorded].reverse() as d}<tr><td>{d.day}</td>{#each severities as s}<td>{d[s]}</td>{/each}</tr>{/each}</tbody></DataTable>
+        </details>
+      {:else}<p class="muted small">The first point appears after the next matcher run; a line after two days.</p>{/if}
+    </Panel>
     <Panel title="Riskiest services" flush>
       {#snippet actions()}Critical × 10 + High × 3 + Medium{/snippet}
       {#if status.services.length}
@@ -99,6 +118,9 @@
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--sev-unknown); margin-right: var(--s2); } .dot.fresh { background: var(--ok); }
   .mono { font-family: var(--font-mono); } .small { font-size: var(--text-sm); } .muted { color: var(--muted); } .ok { color: var(--ok); font-weight: 600; } .arrow { margin: 0 .5ch; } .crit { color: var(--sev-critical); font-weight: 700; }
   .pad { padding: var(--s3) var(--s4); margin: 0; }
+  .trends { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s5); }
+  .trends h3 { margin: 0 0 var(--s2); font-size: var(--text-sm); font-weight: 600; color: var(--muted); }
+  details { margin-top: var(--s3); font-size: var(--text-sm); } summary { cursor: pointer; color: var(--muted); margin-bottom: var(--s2); }
   @media (max-width: 1000px) { .two { grid-template-columns: 1fr; } }
   @media (max-width: 700px) { .list li { grid-template-columns: 1fr; } .kv li { flex-direction: column; gap: 2px; } .kv li > span:last-child { text-align: left; } }
 </style>

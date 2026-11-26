@@ -64,6 +64,14 @@ pub async fn cleanup(
         .bind(days(r.audit_days))
         .execute(pool)
         .await?;
+    for table in ["realm_daily", "service_daily"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE day < $1"
+        )))
+        .bind(days(r.trends_days).date_naive())
+        .execute(pool)
+        .await?;
+    }
     Ok(RetentionReport {
         findings,
         releases,
@@ -121,6 +129,39 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retention_drops_trend_days_past_their_age(pool: PgPool) {
+        let cfg: HeimdallConfig =
+            serde_saphyr::from_str("realms: [prod]\nretention: {trends_days: 30}").unwrap();
+        let now: DateTime<Utc> = "2026-11-13T12:00:00Z".parse().unwrap();
+        let svc = crate::inventory::store::upsert_service(&pool, "prod", "api")
+            .await
+            .unwrap();
+        for day in ["2026-10-13", "2026-10-14"] {
+            sqlx::query("INSERT INTO realm_daily VALUES ('prod', $1::date, 0, 0, 0, 0, 0)")
+                .bind(day)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO service_daily VALUES ($1, $2::date, 0, 0, 0, 0, 0)")
+                .bind(svc)
+                .bind(day)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        cleanup(&pool, &cfg, now).await.unwrap();
+        for table in ["realm_daily", "service_daily"] {
+            let days: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT day::text FROM {table} ORDER BY day"
+            )))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(days, ["2026-10-14"], "{table}");
+        }
     }
 
     #[sqlx::test(migrations = "./migrations")]

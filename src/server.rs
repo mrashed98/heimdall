@@ -1170,6 +1170,108 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn trends_return_recent_days_in_readable_realms(pool: PgPool) {
+        let api = crate::inventory::store::upsert_service(&pool, "prod", "api")
+            .await
+            .unwrap();
+        let job = crate::inventory::store::upsert_service(&pool, "dev", "job")
+            .await
+            .unwrap();
+        // Days relative to the database's UTC today, the clock the endpoint reads.
+        for (realm, ago, critical) in [
+            ("prod", 0, 3),
+            ("prod", 1, 2),
+            ("prod", 9, 1),
+            ("dev", 0, 7),
+        ] {
+            sqlx::query("INSERT INTO realm_daily (realm, day, critical, high, medium, low, unknown) VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2, $3, 1, 0, 0, 0)")
+                .bind(realm).bind(ago).bind(critical).execute(&pool).await.unwrap();
+        }
+        for (service, ago) in [(api, 0), (api, 100), (job, 0)] {
+            sqlx::query("INSERT INTO service_daily (service_id, day, critical, high, medium, low, unknown) VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2, 1, 0, 0, 0, 0)")
+                .bind(service).bind(ago).execute(&pool).await.unwrap();
+        }
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let fetch = |path: String| {
+            let (app, key) = (&app, &key);
+            async move {
+                let (status, body) = get(app, &path, Some(key)).await;
+                (
+                    status,
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default(),
+                )
+            }
+        };
+        let critical = |rows: &serde_json::Value| -> Vec<i64> {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["critical"].as_i64().unwrap())
+                .collect()
+        };
+
+        let (status, rows) = fetch("/api/v1/trends?realms=prod&days=2".into()).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(critical(&rows), [2, 3], "the last 2 days, oldest first");
+        assert_eq!(rows[1]["realm"], "prod");
+        assert_eq!(rows[1]["high"], 1);
+        assert_eq!(rows[1]["day"].as_str().unwrap().len(), 10);
+        assert_eq!(
+            critical(&fetch("/api/v1/trends?realms=prod".into()).await.1),
+            [1, 2, 3],
+            "90 days by default"
+        );
+        assert_eq!(
+            fetch("/api/v1/trends?days=1".into())
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "every readable realm"
+        );
+
+        assert_eq!(
+            fetch(format!("/api/v1/services/{api}/trend"))
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            fetch(format!("/api/v1/services/{api}/trend?days=101"))
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            fetch(format!("/api/v1/services/{job}/trend?realms=prod"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        for bad in ["0", "367", "x"] {
+            assert_eq!(
+                fetch(format!("/api/v1/trends?days={bad}")).await.0,
+                StatusCode::BAD_REQUEST,
+                "days={bad}"
+            );
+        }
+        assert_eq!(
+            get(&app, "/api/v1/trends", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn data_page_projections_page_filter_and_sort(pool: PgPool) {
         seed_finding(&pool, "prod", "api", "a", "critical").await;
         seed_finding(&pool, "prod", "api", "b", "high").await;

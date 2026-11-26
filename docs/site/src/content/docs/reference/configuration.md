@@ -311,6 +311,8 @@ images that were scanned or no longer run in any cluster.
 | `retention.findings_days` | integer | `365` | Resolved findings. |
 | `retention.releases_days` | integer | `365` | Release records. |
 | `retention.outbox_days` | integer | `30` | Sent notification rows. |
+| `retention.audit_days` | integer | `365` | Audit log entries. |
+| `retention.trends_days` | integer | `365` | Daily counts behind the trend charts. |
 
 ## Fixed values
 

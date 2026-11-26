@@ -4,12 +4,15 @@
 struct UiQuery {
     realms: Option<String>, limit: Option<String>, offset: Option<String>,
     sort: Option<String>, order: Option<String>, kind: Option<String>, tab: Option<String>,
+    days: Option<String>,
 }
 fn ui_data_routes() -> Router<AppState> {
     Router::new().route("/api/v1/ui/services", get(ui_services))
         .route("/api/v1/ui/services/{id}/{section}", get(ui_service_section))
         .route("/api/v1/ui/releases", get(ui_releases))
         .route("/api/v1/ui/oaths", get(ui_oaths))
+        .route("/api/v1/trends", get(realm_trends))
+        .route("/api/v1/services/{id}/trend", get(service_trend))
 }
 fn ui_realms(state: &AppState, p: &Principal, q: &UiQuery) -> Result<Vec<String>, ApiError> {
     p.require_read()?;
@@ -70,4 +73,29 @@ async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<U
     let (sort, order) = ui_sort(&q, &[("advisory","advisory_id"),("service","service_name"),("realm","realm"),("kind","kind"),("date","COALESCE(expires_at,review_at)"),("status","status")], "id")?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT id,advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,expires_at,review_at,created_by,created_at,status FROM oaths WHERE (realm=ANY($1) OR (realm IS NULL AND cardinality($1::text[])>0)) AND CASE $2 WHEN 'active' THEN status='active' AND (COALESCE(expires_at,review_at) IS NULL OR COALESCE(expires_at,review_at)>now()) WHEN 'expiring' THEN status='active' AND COALESCE(expires_at,review_at)>now() AND COALESCE(expires_at,review_at)<=now()+interval '7 days' ELSE status IN ('expired','revoked') OR (status='active' AND COALESCE(expires_at,review_at)<=now()) END ORDER BY {sort} {order} NULLS LAST, id DESC LIMIT $3 OFFSET $4) t");
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(tab).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+}
+
+/// Days of history a trend returns: `days`, default 90, at most 366, ending today (UTC).
+fn trend_days(q: &UiQuery) -> Result<i32, ApiError> {
+    match given(&q.days) {
+        None => Ok(90),
+        Some(s) => s.parse::<i32>().ok().filter(|n| (1..=366).contains(n)).ok_or_else(|| ApiError::BadRequest(format!("days {s:?} must be a number from 1 to 366"))),
+    }
+}
+const TREND_COLUMNS: &str = "to_char(day,'YYYY-MM-DD') AS day,critical,high,medium,low,unknown";
+const TREND_SINCE: &str = "day > (now() AT TIME ZONE 'UTC')::date - $2";
+/// Open findings per severity at the end of each day, per realm, oldest first.
+/// Days without a snapshot (the server was down) have no row.
+async fn realm_trends(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let sql = format!("SELECT row_to_json(t) FROM (SELECT realm,{TREND_COLUMNS} FROM realm_daily WHERE realm=ANY($1) AND {TREND_SINCE} ORDER BY day, realm) t");
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(realms).bind(trend_days(&q)?).fetch_all(&state.pool).await?))
+}
+/// The same for one service; `404` when it is not in a realm the caller reads.
+async fn service_trend(State(state): State<AppState>, p: Principal, UrlPath(id): UrlPath<i64>, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM services WHERE id=$1 AND realm=ANY($2))").bind(id).bind(&realms).fetch_one(&state.pool).await?;
+    if !exists { return Err(ApiError::NotFound); }
+    let sql = format!("SELECT row_to_json(t) FROM (SELECT {TREND_COLUMNS} FROM service_daily WHERE service_id=$1 AND {TREND_SINCE} ORDER BY day) t");
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(id).bind(trend_days(&q)?).fetch_all(&state.pool).await?))
 }
