@@ -12,14 +12,14 @@
   type Status = { severity: Counts[]; fix_available: number; services: Risk[]; eol: { realm: string; service: string | null; ref_id: string | null; details: Record<string, unknown> }[]; sync: Record<string, string | null> };
   type Release = { id: number; target: string; version: string; published_at: string | null; notes_class: string | null };
   type Fixable = { id: number; kind: string; ref_id: string | null; summary?: string; component_name?: string; component_version?: string; fix?: string; service: string | null; realm: string; severity: string; epss?: number; epss_percentile?: number; details: Record<string, unknown> };
-  let status = $state<Status | null>(null); let releases = $state<Release[]>([]); let fixFirst = $state<Fixable[]>([]); let trend = $state<TrendRow[]>([]);
+  let status = $state<Status | null>(null); let releases = $state<Release[]>([]); let fixFirst = $state<Fixable[]>([]); let trend = $state<TrendRow[] | null>([]); let fixFailed = $state(false);
   let loading = $state(true); let failed = $state(false); let revision = $state(0);
   let groups = $derived([...new Set((status?.severity ?? []).map(x => x.realm))].map(realm => ({ realm, counts: severities.map(s => status?.severity.find(x => x.realm === realm && x.severity === s)?.count ?? 0) })));
   let bySeverity = (s: Severity) => (status?.severity ?? []).filter(x => x.severity === s).reduce((n, x) => n + x.count, 0);
   let total = $derived((status?.severity ?? []).reduce((n, row) => n + row.count, 0));
   let max = $derived(Math.max(1, ...groups.map(g => g.counts.reduce((a, b) => a + b, 0))));
   const TREND_DAYS = 90;
-  let days = $derived(dailySeries(trend, TREND_DAYS));
+  let days = $derived(dailySeries(trend ?? [], TREND_DAYS));
   let recorded = $derived(days.filter(d => d.critical !== null));
   let q = $derived(realms.length ? `?realms=${encodeURIComponent(realms.join(','))}` : '');
   function date(value: string | null) { if (!value) return 'Not yet'; const d = new Date(value); return Number.isNaN(d.getTime()) ? 'Not yet' : d.toLocaleString(); }
@@ -28,8 +28,8 @@
     const url = statusUrl(realms); const realmParam = realms.length ? `&realms=${encodeURIComponent(realms.join(','))}` : ''; revision;
     let active = true; loading = true; failed = false;
     // The fix-first list is optional: if it fails, only that panel is empty.
-    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`).catch(() => [] as Fixable[]), api<TrendRow[]>(`/api/v1/trends?days=${TREND_DAYS}${realmParam}`).catch(() => [] as TrendRow[])])
-      .then(([s, r, f, t]) => { if (active) { status = s; releases = r; fixFirst = f; trend = t; loading = false; } })
+    Promise.all([api<Status>(url), api<Release[]>('/api/v1/releases?limit=5'), api<Fixable[]>(`/api/v1/findings?ui=true&kind=fixavailable&view_status=open&sort=epss&order=desc&limit=5${realmParam}`).catch(() => null), api<TrendRow[]>(`/api/v1/trends?days=${TREND_DAYS}${realmParam}`).catch(() => null)])
+      .then(([s, r, f, t]) => { if (active) { status = s; releases = r; fixFirst = f ?? []; fixFailed = f === null; trend = t; loading = false; } })
       .catch(() => { if (active) { failed = true; loading = false; } });
     return () => { active = false; };
   });
@@ -61,12 +61,14 @@
         {#snippet actions()}Most likely exploited, with a fix{/snippet}
         {#if fixFirst.length}
           <ul class="list">{#each fixFirst as f}<li><a href={`/findings/${f.id}${q}`} onclick={(e) => go(e, `/findings/${f.id}${q}`)}><span class="t">{rowTitle(f)}</span><span class="mono small">{packageLabel(f)}{#if f.fix}<span class="arrow">→</span><b class="ok">{f.fix}</b>{/if}</span></a><EpssBar score={f.epss} percentile={f.epss_percentile} /></li>{/each}</ul>
+        {:else if fixFailed}<p class="pad muted">This list could not be loaded.</p>
         {:else}<p class="pad muted">Nothing with a fix is open.</p>{/if}
       </Panel>
     </div>
     <Panel title="Open findings over 90 days">
       {#snippet actions()}End of each day, UTC{/snippet}
-      {#if recorded.length}
+      {#if trend === null}<p class="muted small">Trend data could not be loaded.</p>
+      {:else if recorded.length}
         <div class="trends">
           {#each [['critical', 'Critical', 'var(--sev-critical)'], ['high', 'High', 'var(--sev-high)']] as const as [s, label, color]}
             <div><h3>{label}</h3><TrendChart {label} {color} points={days.map(d => ({ day: d.day, value: d[s] }))} /></div>
@@ -74,7 +76,7 @@
         </div>
         <details><summary>Show as table</summary>
           <DataTable label="Open findings per day"><thead><tr><th>Day</th>{#each severities as s}<th>{s[0]!.toUpperCase() + s.slice(1)}</th>{/each}</tr></thead>
-            <tbody>{#each [...recorded].reverse() as d}<tr><td>{d.day}</td>{#each severities as s}<td>{d[s]}</td>{/each}</tr>{/each}</tbody></DataTable>
+            <tbody>{#each [...days].reverse() as d}<tr><td>{d.day}</td>{#each severities as s}<td>{d[s] ?? '—'}</td>{/each}</tr>{/each}</tbody></DataTable>
         </details>
       {:else}<p class="muted small">The first point appears after the next matcher run; a line after two days.</p>{/if}
     </Panel>

@@ -30,3 +30,17 @@ export function niceMax(value: number): number {
   const power = 10 ** Math.floor(Math.log10(value));
   return [1, 2, 5, 10].map(m => m * power).find(m => m >= value)!;
 }
+
+/** A chart point; `value` is null on a day without a snapshot. */
+export type Point = { day: string; value: number | null };
+/** How to draw `points`: `runs` are the index ranges to join with a line
+ * (a missing day breaks it), `lone` the days with no neighbour on either side
+ * (drawn as a dot), `last` the index of the newest recorded day or -1. */
+export function lineShape(points: Point[]): { runs: number[][]; lone: number[]; last: number } {
+  const runs: number[][] = [];
+  points.forEach((p, i) => {
+    if (p.value === null) return;
+    if (i > 0 && points[i - 1]!.value !== null) runs[runs.length - 1]!.push(i); else runs.push([i]);
+  });
+  return { runs: runs.filter(r => r.length > 1), lone: runs.filter(r => r.length === 1).map(r => r[0]!), last: runs.at(-1)?.at(-1) ?? -1 };
+}

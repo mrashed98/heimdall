@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { niceMax } from './trends';
-  type Point = { day: string; value: number | null };
+  import { lineShape, niceMax, type Point } from './trends';
   let { points, label, color, compact = false }: { points: Point[]; label: string; color: string; compact?: boolean } = $props();
   let width = $state(0), hover = $state<number | null>(null);
   const height = $derived(compact ? 36 : 140);
@@ -9,10 +8,10 @@
   const step = $derived(points.length > 1 ? (width - pad.l - pad.r) / (points.length - 1) : 0);
   const x = (i: number) => pad.l + i * step;
   const y = (v: number) => pad.t + (1 - v / max) * (height - pad.t - pad.b);
-  // Missing days break the line; a day with no neighbours is drawn as a dot.
-  const path = $derived(points.map((p, i) => p.value === null ? '' : `${points[i - 1]?.value == null ? 'M' : 'L'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(''));
-  const lone = $derived(points.flatMap((p, i) => p.value !== null && points[i - 1]?.value == null && points[i + 1]?.value == null ? [i] : []));
-  const last = $derived(points.reduce((found, p, i) => p.value === null ? found : i, -1));
+  const shape = $derived(lineShape(points));
+  const path = $derived(shape.runs.map(run => run.map((i, k) => `${k ? 'L' : 'M'}${x(i).toFixed(1)},${y(points[i]!.value!).toFixed(1)}`).join('')).join(''));
+  const lone = $derived(shape.lone);
+  const last = $derived(shape.last);
   const short = (day: string) => new Date(day + 'T00:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const summary = $derived(last < 0 ? `${label}: no data yet` : `${label}: ${points[last]!.value} on ${short(points[last]!.day)}; peak ${Math.max(...points.map(p => p.value ?? 0))} over ${points.length} days`);
   function move(e: PointerEvent) {
@@ -21,7 +20,7 @@
     hover = Math.min(points.length - 1, Math.max(0, Math.round((e.clientX - box.left - pad.l) / step)));
   }
 </script>
-<!-- Pointer-only crosshair; keyboard and screen-reader users get the summary and the table view. -->
+<!-- Pointer-only crosshair. Keyboard and screen-reader users get the summary label; the Overview adds a table view. -->
 <div class="chart" bind:clientWidth={width} role="presentation" onpointermove={move} onpointerleave={() => hover = null}>
   {#if width}
     <svg {width} {height} role="img" aria-label={summary}>
