@@ -187,9 +187,7 @@ async fn first_run(ctx: &Ctx) {
         tracing::info!("first run started");
         log_failure("sight", sight_all(ctx).await);
         log_failure("osv", osv_refresh(st).await);
-        let matched = match_all(st).await;
-        log_failure("alerts", announce(st, &matched).await);
-        log_failure("gauges", meters::recompute(&st.pool, &st.cfg).await);
+        log_failure("rematch", rematch(st).await);
         tracing::info!("first run done");
     }
     .instrument(span)
@@ -324,12 +322,18 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
     }
 }
 
-/// Matcher for every realm, then alerts, then the gauges and today's trend row.
+/// One matcher pass: matcher for every realm, then alerts, the gauges and
+/// today's trend row. The only way to run the matcher (startup included), so
+/// a step added here runs after every pass. A failing step does not skip the
+/// others; the alerts result is returned, the rest are logged.
 async fn rematch(st: &AppState) -> anyhow::Result<()> {
     let matched = match_all(st).await;
     let alerts = announce(st, &matched).await;
-    meters::recompute(&st.pool, &st.cfg).await?;
-    crate::trends::snapshot(&st.pool, &st.cfg.realms, chrono::Utc::now().date_naive()).await?;
+    log_failure("gauges", meters::recompute(&st.pool, &st.cfg).await);
+    log_failure(
+        "trends",
+        crate::trends::snapshot(&st.pool, &st.cfg.realms, Utc::now().date_naive()).await,
+    );
     alerts
 }
 
