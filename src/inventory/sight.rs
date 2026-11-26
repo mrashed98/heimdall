@@ -366,7 +366,7 @@ pub(crate) fn digest_of(s: &str) -> Option<String> {
 
 /// Split an image reference into (registry, repository path, tag).
 /// Docker Hub short names become `docker.io/library/<name>`.
-fn parse_image(image: &str) -> (String, String, Option<String>) {
+pub(crate) fn parse_image(image: &str) -> (String, String, Option<String>) {
     let no_digest = image.split('@').next().unwrap_or(image);
     let (registry, rest) = match no_digest.split_once('/') {
         Some((first, rest))

@@ -70,7 +70,7 @@ impl HeimdallConfig {
             if d.name.as_deref().is_some_and(|n| {
                 n.trim().is_empty()
                     || n.contains('/')
-                    || n.len() > 100
+                    || n.chars().count() > 100
                     || n.chars().any(char::is_control)
             }) {
                 bail!("sight.docker.name must be 1 to 100 characters, without `/` or control characters");

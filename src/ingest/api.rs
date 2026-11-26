@@ -282,6 +282,12 @@ pub async fn ingest_cluster_inner(
         ));
     }
     let mut tx = state.pool.begin().await?;
+    // One cluster ingest per realm at a time: two origins reporting one
+    // name at once would both pass the ownership check below.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('ingest-cluster|' || $1))")
+        .bind(&inv.realm)
+        .execute(&mut *tx)
+        .await?;
 
     let mut added = 0;
     let mut removed = 0;

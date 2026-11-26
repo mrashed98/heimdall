@@ -151,12 +151,14 @@ Scan a cluster, or with `--docker` a Docker host, and ingest its inventory.
 | `--config FILE` | `heimdall.yaml` | Config path, for in-process mode (also needs `DATABASE_URL`). |
 | `--docker` | off | Read a Docker host's running containers instead of a cluster. |
 | `--docker-host URL` | `sight.docker.host` in-process, else `unix:///var/run/docker.sock` | The Docker Engine API, `unix://` or `tcp://`. |
-| `--docker-name NAME` | `sight.docker.name` in-process, else the name Docker reports | The host's name in service names. |
+| `--docker-name NAME` | `sight.docker.name` in-process when the host is the configured one, else the name Docker reports | The host's name in service names. |
 
 A Docker scan replaces only that daemon's services (by engine ID), so it
 never empties a cluster's or another host's, and a host running nothing is a
 valid scan. A service name another source already holds is skipped, and the
-count is printed.
+count is printed. In-process, scanning the host `sight.docker` names under
+another `--realm` than its configured one is refused, so the two scans never
+keep two copies of its services. The engine must report an ID in `/info`.
 
 Prints `sight: N services, N components added, N removed`, and how many
 services were skipped when any were.

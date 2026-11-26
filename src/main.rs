@@ -451,25 +451,40 @@ async fn docker_sight(
 ) -> anyhow::Result<heimdall::ingest::api::ClusterOutcome> {
     use anyhow::Context;
     use heimdall::inventory::docker;
-    // In-process, the config's sight.docker fills what the flags leave out,
-    // so a run by hand reports the host under the same name as the server.
-    let configured = state.and_then(|s| s.cfg.sight.docker.as_ref());
+    // In-process, the config's sight.docker fills what the flags leave out
+    // when this is the configured host, so a run by hand reports it under
+    // the same name and realm as the server's scan.
+    let configured = state.and_then(|s| s.cfg.sight.docker.as_ref().map(|d| (d, &s.cfg)));
+    let host_text = args
+        .docker_host
+        .clone()
+        .or_else(|| configured.map(|(d, _)| d.host.clone()))
+        .unwrap_or_else(|| docker::DEFAULT_HOST.to_string());
+    let same_host = configured.filter(|(d, _)| d.host == host_text);
+    if let Some((_, cfg)) = same_host {
+        if let Some(r) = cfg.docker_realm().filter(|r| *r != args.realm) {
+            anyhow::bail!(
+                "--realm {} differs from sight.docker's realm {r} for this host; \
+                 use --realm {r} so both scans keep one set of services",
+                args.realm
+            );
+        }
+    }
     let name = args
         .docker_name
         .clone()
-        .or_else(|| configured.and_then(|d| d.name.clone()));
+        .or_else(|| same_host.and_then(|(d, _)| d.name.clone()));
     if name.as_deref().is_some_and(|n| {
-        n.trim().is_empty() || n.contains('/') || n.len() > 100 || n.chars().any(char::is_control)
+        n.trim().is_empty()
+            || n.contains('/')
+            || n.chars().count() > 100
+            || n.chars().any(char::is_control)
     }) {
         anyhow::bail!(
             "--docker-name must be 1 to 100 characters, without `/` or control characters"
         );
     }
-    let host: docker::DockerHost = args
-        .docker_host
-        .clone()
-        .or_else(|| configured.map(|d| d.host.clone()))
-        .unwrap_or_else(|| docker::DEFAULT_HOST.to_string())
+    let host: docker::DockerHost = host_text
         .parse()
         .map_err(|e: String| anyhow::anyhow!("--docker-host: {e}"))?;
     let inv = docker::scan(&host, &args.realm, name.as_deref()).await?;

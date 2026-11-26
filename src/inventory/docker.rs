@@ -21,7 +21,7 @@ use anyhow::{bail, Context};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::sight::{digest_of, distro_purl, image_item, item, PodImage, Services};
+use super::sight::{digest_of, distro_purl, image_item, item, parse_image, PodImage, Services};
 use crate::ingest::api::ClusterInventory;
 
 /// The Docker host when none is configured.
@@ -204,14 +204,22 @@ pub struct HostObjects {
 /// Read the running containers and their images.
 pub async fn collect(host: &DockerHost) -> anyhow::Result<HostObjects> {
     let info: Info = host.get("/info").await?;
+    // The engine ID is the host's identity; without one, its services
+    // couldn't be told apart from another host's.
+    if info.id.trim().is_empty() || info.id.contains('/') {
+        bail!("the Docker engine reported no usable ID in /info");
+    }
     let containers: Vec<Container> = host.get("/containers/json").await?;
     let mut images = HashMap::new();
     for c in &containers {
         if images.contains_key(&c.image_id) {
             continue;
         }
+        // Only a well-formed id goes into a request path. Another runtime's
+        // id form is reported as it is, without its registry digest.
         if digest_of(&c.image_id).as_deref() != Some(c.image_id.as_str()) {
-            bail!("container image id is not a sha256 digest");
+            tracing::warn!(image = %c.image_id, "image id is not sha256:<hex>; reported without its digest");
+            continue;
         }
         // An image removed after its container started has no record left
         // (404); any other failure fails the scan rather than report the
@@ -236,15 +244,9 @@ pub async fn collect(host: &DockerHost) -> anyhow::Result<HostObjects> {
     })
 }
 
-/// The origin a daemon's inventory carries: its engine ID (the reported
-/// name only if the engine gives no ID).
+/// The origin a daemon's inventory carries: its engine ID.
 pub fn origin(info: &Info) -> String {
-    let id = if info.id.trim().is_empty() {
-        &info.name
-    } else {
-        &info.id
-    };
-    format!("docker:{}", id.trim())
+    format!("docker:{}", info.id.trim())
 }
 
 /// A container's service name, before the host prefix.
@@ -271,12 +273,20 @@ fn service_name(c: &Container) -> String {
 /// and the manifest digest (pullable) when a registry digest of that same
 /// repository is known, else the local image id (not pullable).
 fn container_image(c: &Container, img: Option<&Image>) -> PodImage {
+    // A repository as text (`nginx@sha256:…`, `docker.io/library/nginx:1`).
     let repo = |r: &str| {
         let no_digest = r.split('@').next().unwrap_or(r);
         match no_digest.rsplit_once(':') {
             Some((repo, tag)) if !tag.contains('/') => repo.to_string(),
             _ => no_digest.to_string(),
         }
+    };
+    // The same repository however it is spelled: `nginx` is
+    // `docker.io/library/nginx`.
+    let same_repo = |a: &str, b: &str| {
+        let (ra, pa, _) = parse_image(a);
+        let (rb, pb, _) = parse_image(b);
+        (ra, pa) == (rb, pb)
     };
     let digests = img.map(|i| i.repo_digests.as_slice()).unwrap_or_default();
     let tags = img.map(|i| i.repo_tags.as_slice()).unwrap_or_default();
@@ -300,7 +310,7 @@ fn container_image(c: &Container, img: Option<&Image>) -> PodImage {
     let manifest = pinned.or_else(|| {
         digests
             .iter()
-            .find(|d| repo(d) == want)
+            .find(|d| same_repo(&repo(d), &want))
             .and_then(|d| digest_of(d))
     });
     match manifest {
@@ -434,7 +444,7 @@ mod tests {
         let replies: HashMap<String, Value> = HashMap::from([
             (
                 "/info".to_string(),
-                json!({"Name": "vm9", "OperatingSystem": "Debian GNU/Linux 12 (bookworm)"}),
+                json!({"ID": "E9", "Name": "vm9", "OperatingSystem": "Debian GNU/Linux 12 (bookworm)"}),
             ),
             (
                 "/containers/json".to_string(),
@@ -519,6 +529,10 @@ mod tests {
             Some(&img(json!([]), json!([]))),
         );
         assert_eq!((p.digest.as_str(), p.pullable), (D2, true));
+        // The same repository spelled out in full still matches.
+        let i = img(json!([format!("nginx@{D1}")]), json!(["nginx:1.27"]));
+        let p = container_image(&ctr("docker.io/library/nginx:1.27"), Some(&i));
+        assert_eq!((p.digest.as_str(), p.pullable), (D1, true));
         // Another repository's digest is never borrowed.
         let i = img(json!([format!("other/repo@{D1}")]), json!(["redis:7"]));
         let p = container_image(&ctr("redis:7"), Some(&i));
@@ -598,5 +612,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("unexpected"), "{err:#}");
+    }
+
+    /// An image id in another runtime's form is reported without a digest,
+    /// and never sent in a request path; the scan goes on.
+    #[tokio::test]
+    async fn an_odd_image_id_is_reported_without_its_digest() {
+        let replies = HashMap::from([
+            ("/info".to_string(), json!({"ID": "E", "Name": "vm9"})),
+            (
+                "/containers/json".to_string(),
+                json!([{"Names": ["/app"], "Image": "redis:7", "ImageID": "abc def"}]),
+            ),
+        ]);
+        let (_d, host) = fake_docker(replies, None).await;
+        let inv = scan(&host, "prod", None).await.unwrap();
+        assert_eq!(inv.services[0].items[0].via_image_digest, None);
+    }
+
+    /// Without an engine ID a host can't be told apart from another one.
+    #[tokio::test]
+    async fn an_engine_without_an_id_fails_the_scan() {
+        let replies = HashMap::from([("/info".to_string(), json!({"Name": "vm9"}))]);
+        let (_d, host) = fake_docker(replies, None).await;
+        let err = scan(&host, "prod", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("no usable ID"), "{err:#}");
     }
 }
