@@ -996,6 +996,51 @@ mod tests {
         .unwrap();
     }
 
+    /// Read routes that hold no per-realm data, with the reason. Every other
+    /// `GET /api/v1` route must be requested in `session_read_access_is_realm_scoped`.
+    const NOT_REALM_SCOPED: &[(&str, &str)] = &[
+        ("/api/v1/audit", "admin only"),
+        ("/api/v1/channels", "admin only"),
+        ("/api/v1/channels/{id}/queued", "admin only"),
+        ("/api/v1/keys", "admin only"),
+        ("/api/v1/users", "admin only"),
+        ("/api/v1/users/{id}/grants", "admin only"),
+        ("/api/v1/images/pending", "ingest scope, image digests only"),
+    ];
+
+    /// A new read route is checked against a viewer limited to one realm, or
+    /// says here why it has no realm data. Reads the router's source.
+    #[test]
+    fn every_read_route_is_checked_for_realm_scope() {
+        let source = [include_str!("server.rs"), include_str!("ui_data.rs")].concat();
+        let test = &source[source
+            .find(concat!(
+                "async fn session_read_access_",
+                "is_realm_scoped(pool"
+            ))
+            .unwrap()..];
+        let test = &test[..test.find("\n    }\n").unwrap()];
+        let route = regex::Regex::new(r#"\.route\(\s*"(/api/v1/[^"]*)",\s*get\("#).unwrap();
+        let mut missing = Vec::new();
+        for path in route.captures_iter(&source).map(|c| c[1].to_owned()) {
+            if NOT_REALM_SCOPED.iter().any(|(p, _)| *p == path) {
+                continue;
+            }
+            // `{id}` in the route is a `{name}` placeholder in the test's format! paths.
+            let pattern = regex::escape(&path)
+                .replace(r"\{id\}", r"\{[a-z_]+\}")
+                .replace(r"\{section\}", "[a-z]+");
+            let used = regex::Regex::new(&format!(r#""{pattern}[?"]"#)).unwrap();
+            if !used.is_match(test) {
+                missing.push(path);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "request these as the realm-`a` viewer in session_read_access_is_realm_scoped (and seed realm-b data they must hide), or add them to NOT_REALM_SCOPED with a reason: {missing:?}"
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn session_read_access_is_realm_scoped(pool: PgPool) {
         use sha2::{Digest, Sha256};
@@ -1009,6 +1054,22 @@ mod tests {
             sqlx::query("INSERT INTO oaths(advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,created_by) VALUES ('CVE-test','pkg','one',$1,'ignore','test','1','alice')")
                 .bind(realm).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO realm_daily VALUES ('a','2026-01-10',1,0,0,0,0),('b','2026-01-10',5,0,0,0,0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_daily SELECT id,'2026-01-10',1,0,0,0,0 FROM services")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:generic/shared@1','pkg:generic/shared','generic','1'),('pkg:generic/only-b@1','pkg:generic/only-b','generic','1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_components(service_id,component_id,source) SELECT s.id,c.id,'cluster' FROM services s, components c WHERE s.realm='b' OR c.name_key='pkg:generic/shared'")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO releases(target,version) VALUES ('global','1')")
             .execute(&pool)
             .await
@@ -1030,12 +1091,14 @@ mod tests {
             "realms: [a, b]\nauth: {public_url: 'http://localhost:8080'}",
         )
         .unwrap();
-        let app = router(AppState::with_grant_cache_ttl(
+        let mut st = AppState::with_grant_cache_ttl(
             pool.clone(),
             Arc::new(cfg),
             reqwest::Client::new(),
             Duration::ZERO,
-        ));
+        );
+        st.clock = crate::Clock::fixed("2026-01-10T12:00:00Z".parse().unwrap());
+        let app = router(st);
         let get_session = |path: String| {
             let app = app.clone();
             async move {
@@ -1079,6 +1142,17 @@ mod tests {
         assert_eq!(overview["severity"].as_array().unwrap().len(), 5);
         assert_eq!(overview["severity"][0]["realm"], "a");
         assert_eq!(overview["services"][0]["risk"], 3);
+        let (_, trends) = get_session("/api/v1/trends".into()).await;
+        assert_eq!(trends.as_array().unwrap().len(), 1, "{trends}");
+        assert_eq!(trends[0]["realm"], "a");
+        let (_, found) = get_session("/api/v1/components?search=generic".into()).await;
+        assert_eq!(
+            found.as_array().unwrap().len(),
+            1,
+            "only-b is hidden: {found}"
+        );
+        assert_eq!(found[0]["services"].as_array().unwrap().len(), 1, "{found}");
+        assert_eq!(found[0]["services"][0]["realm"], "a");
         let (_, filtered) = get_session("/api/v1/status?realms=b".into()).await;
         assert!(filtered["severity"].as_array().unwrap().is_empty());
         assert!(filtered["services"].as_array().unwrap().is_empty());
@@ -1086,6 +1160,8 @@ mod tests {
             "/api/v1/ui/services?realms=b",
             "/api/v1/ui/oaths?realms=b",
             "/api/v1/ui/releases?realms=b",
+            "/api/v1/trends?realms=b",
+            "/api/v1/components?search=pkg&realms=b",
         ] {
             let (status, rows) = get_session(path.into()).await;
             assert_eq!(status, StatusCode::OK, "{path}: {rows}");
@@ -1099,6 +1175,12 @@ mod tests {
         );
         assert_eq!(
             get_session(format!("/api/v1/services/{service_b}/components"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_session(format!("/api/v1/services/{service_b}/trend"))
                 .await
                 .0,
             StatusCode::NOT_FOUND
@@ -1314,29 +1396,29 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn trends_return_recent_days_in_readable_realms(pool: PgPool) {
+    async fn trends_return_the_days_ending_today(pool: PgPool) {
         let api = crate::inventory::store::upsert_service(&pool, "prod", "api")
             .await
             .unwrap();
-        let job = crate::inventory::store::upsert_service(&pool, "dev", "job")
-            .await
-            .unwrap();
-        // Days relative to the database's UTC today, the clock the endpoint reads.
-        for (realm, ago, critical) in [
-            ("prod", 0, 3),
-            ("prod", 1, 2),
-            ("prod", 9, 1),
-            ("dev", 0, 7),
+        // Today is fixed: a handler reading the real clock sees none of these.
+        for (realm, day, critical) in [
+            ("prod", "2026-01-10", 3),
+            ("prod", "2026-01-09", 2),
+            ("prod", "2026-01-01", 1),
+            ("prod", "2026-01-11", 9),
+            ("dev", "2026-01-10", 7),
         ] {
-            sqlx::query("INSERT INTO realm_daily (realm, day, critical, high, medium, low, unknown) VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2, $3, 1, 0, 0, 0)")
-                .bind(realm).bind(ago).bind(critical).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO realm_daily (realm, day, critical, high, medium, low, unknown) VALUES ($1, $2::date, $3, 1, 0, 0, 0)")
+                .bind(realm).bind(day).bind(critical).execute(&pool).await.unwrap();
         }
-        for (service, ago) in [(api, 0), (api, 100), (job, 0)] {
-            sqlx::query("INSERT INTO service_daily (service_id, day, critical, high, medium, low, unknown) VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2, 1, 0, 0, 0, 0)")
-                .bind(service).bind(ago).execute(&pool).await.unwrap();
+        for day in ["2026-01-10", "2025-10-02"] {
+            sqlx::query("INSERT INTO service_daily (service_id, day, critical, high, medium, low, unknown) VALUES ($1, $2::date, 1, 0, 0, 0, 0)")
+                .bind(api).bind(day).execute(&pool).await.unwrap();
         }
         let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
-        let app = router(state(pool));
+        let mut st = state(pool);
+        st.clock = crate::Clock::fixed("2026-01-10T23:59:00Z".parse().unwrap());
+        let app = router(st);
         let fetch = |path: String| {
             let (app, key) = (&app, &key);
             async move {
@@ -1347,23 +1429,26 @@ mod tests {
                 )
             }
         };
-        let critical = |rows: &serde_json::Value| -> Vec<i64> {
+        let days = |rows: &serde_json::Value| -> Vec<String> {
             rows.as_array()
                 .unwrap()
                 .iter()
-                .map(|r| r["critical"].as_i64().unwrap())
+                .map(|r| format!("{} {}", r["day"].as_str().unwrap(), r["critical"]))
                 .collect()
         };
 
         let (status, rows) = fetch("/api/v1/trends?realms=prod&days=2".into()).await;
         assert_eq!(status, StatusCode::OK, "{rows}");
-        assert_eq!(critical(&rows), [2, 3], "the last 2 days, oldest first");
+        assert_eq!(
+            days(&rows),
+            ["2026-01-09 2", "2026-01-10 3"],
+            "the last 2 days, oldest first, none after today"
+        );
         assert_eq!(rows[1]["realm"], "prod");
         assert_eq!(rows[1]["high"], 1);
-        assert_eq!(rows[1]["day"].as_str().unwrap().len(), 10);
         assert_eq!(
-            critical(&fetch("/api/v1/trends?realms=prod".into()).await.1),
-            [1, 2, 3],
+            days(&fetch("/api/v1/trends?realms=prod".into()).await.1),
+            ["2026-01-01 1", "2026-01-09 2", "2026-01-10 3"],
             "90 days by default"
         );
         assert_eq!(
@@ -1378,13 +1463,8 @@ mod tests {
         );
 
         assert_eq!(
-            fetch(format!("/api/v1/services/{api}/trend"))
-                .await
-                .1
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            days(&fetch(format!("/api/v1/services/{api}/trend")).await.1),
+            ["2026-01-10 1"]
         );
         assert_eq!(
             fetch(format!("/api/v1/services/{api}/trend?days=101"))
@@ -1394,12 +1474,6 @@ mod tests {
                 .unwrap()
                 .len(),
             2
-        );
-        assert_eq!(
-            fetch(format!("/api/v1/services/{job}/trend?realms=prod"))
-                .await
-                .0,
-            StatusCode::NOT_FOUND
         );
 
         for bad in ["0", "367", "x"] {

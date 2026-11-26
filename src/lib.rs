@@ -53,6 +53,23 @@ pub struct AppState {
     /// is unset or malformed.
     pub secret_key: Option<Arc<secrets::SecretKey>>,
     pub channel_tests: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// The time handlers read. Tests fix it with `Clock::fixed`, so a result
+    /// that depends on today does not change at midnight.
+    pub clock: Clock,
+}
+
+/// Where handlers get the current time: the system clock, or a fixed
+/// instant in tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Clock(Option<chrono::DateTime<chrono::Utc>>);
+
+impl Clock {
+    pub fn fixed(at: chrono::DateTime<chrono::Utc>) -> Clock {
+        Clock(Some(at))
+    }
+    pub fn now(self) -> chrono::DateTime<chrono::Utc> {
+        self.0.unwrap_or_else(chrono::Utc::now)
+    }
 }
 
 impl AppState {
@@ -80,6 +97,7 @@ impl AppState {
             oidc_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             secret_key: secrets::SecretKey::from_env().map(Arc::new),
             channel_tests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            clock: Clock::default(),
         }
     }
 }
