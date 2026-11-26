@@ -297,7 +297,7 @@ fn container_image(c: &Container, img: Option<&Image>) -> PodImage {
         && !bare.is_empty()
         && bare.bytes().all(|b| b.is_ascii_hexdigit())
         && c.image_id.trim_start_matches("sha256:").starts_with(bare)
-        || digest_of(&c.image).is_some() && !c.image.contains('@');
+        || digest_of(&c.image).as_deref() == Some(c.image.as_str());
     let reference = match (by_id, tags.first(), digests.first()) {
         (false, _, _) => c.image.clone(),
         (true, Some(tag), _) => tag.clone(),
@@ -533,6 +533,10 @@ mod tests {
         let i = img(json!([format!("nginx@{D1}")]), json!(["nginx:1.27"]));
         let p = container_image(&ctr("docker.io/library/nginx:1.27"), Some(&i));
         assert_eq!((p.digest.as_str(), p.pullable), (D1, true));
+        // A repository whose name holds a digest-like segment keeps its name.
+        let tagged = format!("acme/{D2}:1");
+        let p = container_image(&ctr(&tagged), Some(&img(json!([]), json!(["other:9"]))));
+        assert_eq!(p.image, tagged);
         // Another repository's digest is never borrowed.
         let i = img(json!([format!("other/repo@{D1}")]), json!(["redis:7"]));
         let p = container_image(&ctr("redis:7"), Some(&i));

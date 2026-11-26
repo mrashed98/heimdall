@@ -58,8 +58,10 @@ Docker hosts, and renaming a host empties its services under the old name.
 A service name another source already holds (the cluster, or another host
 with the same hostname) is skipped and logged, not taken over: give hosts
 that share a hostname their own `name`. Heimdall only reads from Docker
-(`GET /info`, `/containers/json` and `/images/{id}/json`). The Overview's
-feed health shows **Sight for Docker** with its last successful scan.
+(`GET /info`, `/containers/json` and `/images/{id}/json`). With
+`sight.docker` set, the Overview's feed health shows **Sight for Docker**
+with the server's own last successful scan; scans pushed from other hosts
+with `--push` don't update it.
 
 <Aside type="caution" title="The Docker socket">
 Access to the Docker socket is root on the host. Give Heimdall a read-only

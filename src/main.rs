@@ -460,7 +460,10 @@ async fn docker_sight(
         .clone()
         .or_else(|| configured.map(|(d, _)| d.host.clone()))
         .unwrap_or_else(|| docker::DEFAULT_HOST.to_string());
-    let same_host = configured.filter(|(d, _)| d.host == host_text);
+    // Compared parsed, so `tcp://x:2375/` and `http://x:2375` are one host.
+    let parsed = |h: &str| h.parse::<docker::DockerHost>().ok();
+    let same_host = configured
+        .filter(|(d, _)| parsed(&d.host).is_some() && parsed(&d.host) == parsed(&host_text));
     if let Some((_, cfg)) = same_host {
         if let Some(r) = cfg.docker_realm().filter(|r| *r != args.realm) {
             anyhow::bail!(
