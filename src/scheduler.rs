@@ -237,7 +237,13 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
         }
         Job::Epss => {
             // Scores only annotate findings: nothing to rematch or announce.
-            let r = epss::refresh(&st.pool, &st.http, epss::FEED_URL).await?;
+            let r = epss::refresh(
+                &st.pool,
+                &st.http,
+                epss::FEED_URL,
+                st.clock.now().date_naive(),
+            )
+            .await?;
             tracing::info!(kept = r.kept, total = r.total, date = %r.date, "epss refresh ran");
             record_sync(st, "epss").await
         }

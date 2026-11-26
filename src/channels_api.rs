@@ -2,8 +2,6 @@
 //! the UI, listed together, plus create, edit, delete and a test send.
 //! No response ever carries a secret value or an environment variable's
 //! value: secrets show as `{"set": bool}`, missing variables by name.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -366,7 +364,7 @@ async fn test(
         mailer: &mailer,
     };
     // The error is already redacted.
-    let sent = outbox::send_now(&d, &ch, origin, &chans.secrets, Utc::now()).await;
+    let sent = outbox::send_now(&d, &ch, origin, &chans.secrets, st.clock.now()).await;
     let mut conn = st.pool.acquire().await?;
     crate::admin::record(
         &mut conn,

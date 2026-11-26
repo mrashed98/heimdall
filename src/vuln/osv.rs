@@ -1,6 +1,4 @@
 //! OSV.dev client and advisory refresh.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -521,6 +519,9 @@ pub(crate) fn fixed_versions(vuln: &Value, pkg: &OsvPackage) -> Vec<String> {
 }
 
 #[cfg(test)]
+// Exception: these tests compare against database now() defaults, so they
+// read the real clock. Tests only; production code here uses AppState.clock.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use serde_json::{json, Value};
     use sqlx::PgPool;

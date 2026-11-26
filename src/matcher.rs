@@ -1,8 +1,6 @@
 //! Matcher: joins a realm's inventory with linked advisories and oaths into
 //! findings. A finding has a stable text key, so it is opened once, kept up to
 //! date while it applies, and resolved when it no longer does.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -451,6 +449,9 @@ struct Existing {
 }
 
 #[cfg(test)]
+// Exception: these tests compare against database now() defaults, so they
+// read the real clock. Tests only; production code here uses AppState.clock.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use chrono::Duration;
     use serde_json::{json, Value};
@@ -887,6 +888,7 @@ mod tests {
                 until: None,
                 by: "alice".to_string(),
             },
+            Utc::now(),
         )
         .await
         .unwrap();

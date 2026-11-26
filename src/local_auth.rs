@@ -1,6 +1,4 @@
 //! Local identities and browser sessions.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 use crate::config::{HeimdallConfig, Role};
 use crate::{
     auth::{authenticate_key, Scope},
@@ -283,7 +281,7 @@ impl FromRequestParts<AppState> for Principal {
         let admin_allowed = if user_kind == "oidc" {
             let oidc = cfg.oidc.as_ref().ok_or(ApiError::Reauth)?;
             if refreshed.is_none_or(|at| {
-                at < chrono::Utc::now()
+                at < state.clock.now()
                     - chrono::Duration::minutes(i64::from(oidc.groups_max_age_minutes))
             }) {
                 return Err(ApiError::Reauth);
@@ -539,6 +537,9 @@ async fn logout(
 }
 
 #[cfg(test)]
+// Exception: these tests compare against database now() defaults, so they
+// read the real clock. Tests only; production code here uses AppState.clock.
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

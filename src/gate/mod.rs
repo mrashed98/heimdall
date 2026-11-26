@@ -4,8 +4,6 @@
 //!
 //! - this file: the route, the decision and the CLI helpers.
 //! - `lookup`: asking OSV and the GitHub Advisory Database.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 
 mod lookup;
 
@@ -173,7 +171,7 @@ pub async fn run(
         }
     };
 
-    let now = Utc::now();
+    let now = state.clock.now();
     let mut findings = Vec::new();
     for h in hits {
         let oath = oath_for(pool, &h.oath_ids, &h.name_key, q, now).await?;

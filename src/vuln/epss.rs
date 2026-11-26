@@ -3,14 +3,12 @@
 //! percentile among all CVEs. Published once a day as one gzipped CSV of every
 //! CVE (about 3 MB, 400k rows). Only the CVEs Heimdall's advisories name are
 //! kept; the table is replaced whole on each good download.
-// Exception: predates AppState.clock; move these Utc::now() calls to it. Expires 2027-03-01, approval: pending (owner).
-#![allow(clippy::disallowed_methods)]
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 
 use anyhow::{bail, Context};
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use flate2::read::GzDecoder;
 use reqwest::Client;
 use sqlx::PgPool;
@@ -52,7 +50,7 @@ pub struct Refresh {
 /// The file starts with `#model_version:...,score_date:2026-11-22T...` and a
 /// `cve,epss,percentile` header; a different header is an error, so a format
 /// change is noticed instead of storing columns in the wrong place.
-pub fn parse(gz: &[u8], wanted: &HashSet<String>) -> anyhow::Result<Feed> {
+pub fn parse(gz: &[u8], wanted: &HashSet<String>, today: NaiveDate) -> anyhow::Result<Feed> {
     let mut date = None;
     let mut header = false;
     let mut scores = Vec::new();
@@ -103,7 +101,7 @@ pub fn parse(gz: &[u8], wanted: &HashSet<String>) -> anyhow::Result<Feed> {
         bail!("epss feed: empty file");
     }
     Ok(Feed {
-        date: date.unwrap_or_else(|| Utc::now().date_naive()),
+        date: date.unwrap_or(today),
         scores,
         total,
     })
@@ -146,7 +144,12 @@ pub async fn store(pool: &PgPool, feed: &Feed) -> anyhow::Result<()> {
 
 /// Download the feed and store the scores of the CVEs Heimdall knows.
 // ponytail: CVEs first seen after a run get their score on the next daily run.
-pub async fn refresh(pool: &PgPool, http: &Client, url: &str) -> anyhow::Result<Refresh> {
+pub async fn refresh(
+    pool: &PgPool,
+    http: &Client,
+    url: &str,
+    today: NaiveDate,
+) -> anyhow::Result<Refresh> {
     let wanted = wanted_cves(pool).await?;
     let body = retry::send("epss feed", || http.get(url))
         .await?
@@ -154,7 +157,7 @@ pub async fn refresh(pool: &PgPool, http: &Client, url: &str) -> anyhow::Result<
         .await
         .map_err(|e| retry::request_failed("epss feed", e))?;
     // 400k rows of decoding: off the async workers, which also answer probes.
-    let feed = tokio::task::spawn_blocking(move || parse(&body, &wanted)).await??;
+    let feed = tokio::task::spawn_blocking(move || parse(&body, &wanted, today)).await??;
     if feed.total < MIN_FEED_ROWS {
         bail!(
             "epss feed has only {} rows (expected at least {MIN_FEED_ROWS}); kept the old scores",
@@ -175,6 +178,11 @@ mod tests {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write;
 
+    /// The day a feed without a date is filed under.
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 10).unwrap()
+    }
+
     fn gz(text: &str) -> Vec<u8> {
         let mut e = GzEncoder::new(Vec::new(), Compression::fast());
         e.write_all(text.as_bytes()).unwrap();
@@ -193,7 +201,7 @@ mod tests {
 
     #[test]
     fn keeps_only_wanted_cves_and_reads_the_date() {
-        let f = parse(&gz(FEED), &wanted(&["CVE-2024-3094", "CVE-2030-9"])).unwrap();
+        let f = parse(&gz(FEED), &wanted(&["CVE-2024-3094", "CVE-2030-9"]), day()).unwrap();
         assert_eq!(f.total, 3);
         assert_eq!(f.date, NaiveDate::from_ymd_opt(2026, 11, 22).unwrap());
         assert_eq!(
@@ -209,11 +217,11 @@ mod tests {
     #[test]
     fn rejects_a_changed_header_bad_values_and_plain_text() {
         let w = wanted(&["CVE-1"]);
-        assert!(parse(&gz("cve,percentile,epss\nCVE-1,0.1,0.2\n"), &w).is_err());
-        assert!(parse(&gz("cve,epss,percentile\nCVE-1,2.5,0.2\n"), &w).is_err());
-        assert!(parse(&gz("cve,epss,percentile\nCVE-1,0.1\n"), &w).is_err());
-        assert!(parse(&gz(""), &w).is_err());
-        assert!(parse(b"cve,epss,percentile\n", &w).is_err());
+        assert!(parse(&gz("cve,percentile,epss\nCVE-1,0.1,0.2\n"), &w, day()).is_err());
+        assert!(parse(&gz("cve,epss,percentile\nCVE-1,2.5,0.2\n"), &w, day()).is_err());
+        assert!(parse(&gz("cve,epss,percentile\nCVE-1,0.1\n"), &w, day()).is_err());
+        assert!(parse(&gz(""), &w, day()).is_err());
+        assert!(parse(b"cve,epss,percentile\n", &w, day()).is_err());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -229,9 +237,13 @@ mod tests {
         let w = wanted_cves(&pool).await.unwrap();
         assert_eq!(w, wanted(&["CVE-2024-3094", "CVE-2025-0002"]));
 
-        store(&pool, &parse(&gz(FEED), &w).unwrap()).await.unwrap();
+        store(&pool, &parse(&gz(FEED), &w, day()).unwrap())
+            .await
+            .unwrap();
         let next = "cve,epss,percentile\nCVE-2024-3094,0.5,0.9\n";
-        store(&pool, &parse(&gz(next), &w).unwrap()).await.unwrap();
+        store(&pool, &parse(&gz(next), &w, day()).unwrap())
+            .await
+            .unwrap();
         let rows: Vec<(String, f32)> = sqlx::query_as("SELECT cve_id, score FROM epss")
             .fetch_all(&pool)
             .await
