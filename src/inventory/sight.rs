@@ -122,6 +122,7 @@ pub async fn run(
                 services: n("services"),
                 added: n("added"),
                 removed: n("removed"),
+                skipped: n("skipped"),
             })
         }
         // A real cluster always has pods (DNS, the CNI), so an empty scan is a
@@ -208,24 +209,25 @@ pub fn build_inventory(realm: &str, objs: &ClusterObjects) -> ClusterInventory {
     ClusterInventory {
         realm: realm.to_string(),
         services: services.finish(),
+        origin: None,
     }
 }
 
 /// Services by name with their items, de-duplicated by purl.
 #[derive(Default)]
-struct Services {
+pub(crate) struct Services {
     by_name: BTreeMap<String, (Vec<ClusterItem>, HashSet<String>)>,
 }
 
 impl Services {
-    fn add(&mut self, service: &str, it: ClusterItem) {
+    pub(crate) fn add(&mut self, service: &str, it: ClusterItem) {
         let (items, seen) = self.by_name.entry(service.to_string()).or_default();
         if seen.insert(it.purl.clone()) {
             items.push(it);
         }
     }
 
-    fn finish(self) -> Vec<ClusterService> {
+    pub(crate) fn finish(self) -> Vec<ClusterService> {
         self.by_name
             .into_iter()
             .map(|(name, (items, _))| ClusterService { name, items })
@@ -233,7 +235,7 @@ impl Services {
     }
 }
 
-fn item(purl: String, via_image_digest: Option<String>) -> ClusterItem {
+pub(crate) fn item(purl: String, via_image_digest: Option<String>) -> ClusterItem {
     ClusterItem {
         purl,
         cpes: Vec::new(),
@@ -296,14 +298,14 @@ fn pod_workload(pod: &Pod) -> Option<(String, String)> {
 }
 
 /// A container image as Sight reports it.
-struct PodImage {
+pub(crate) struct PodImage {
     /// The image field from the spec (it has the tag).
-    image: String,
-    digest: String,
+    pub image: String,
+    pub digest: String,
     /// The digest names a manifest, so `repo@digest` can be pulled and
     /// scanned. A bare `sha256:...` imageID is the image's config id on some
     /// runtimes: nothing can be pulled by it.
-    pullable: bool,
+    pub pullable: bool,
 }
 
 /// Every container image with a known digest, init containers included.
@@ -354,7 +356,7 @@ fn pod_images(pod: &Pod) -> Vec<PodImage> {
 }
 
 /// `sha256:<64 hex>` anywhere in `s` (imageID comes in several shapes).
-fn digest_of(s: &str) -> Option<String> {
+pub(crate) fn digest_of(s: &str) -> Option<String> {
     let start = s.find("sha256:")?;
     let hex = s.get(start + 7..start + 7 + 64)?;
     hex.bytes()
@@ -364,7 +366,7 @@ fn digest_of(s: &str) -> Option<String> {
 
 /// Split an image reference into (registry, repository path, tag).
 /// Docker Hub short names become `docker.io/library/<name>`.
-fn parse_image(image: &str) -> (String, String, Option<String>) {
+pub(crate) fn parse_image(image: &str) -> (String, String, Option<String>) {
     let no_digest = image.split('@').next().unwrap_or(image);
     let (registry, rest) = match no_digest.split_once('/') {
         Some((first, rest))
@@ -392,7 +394,7 @@ fn parse_image(image: &str) -> (String, String, Option<String>) {
     (registry, repo, tag)
 }
 
-fn image_item(img: &PodImage) -> ClusterItem {
+pub(crate) fn image_item(img: &PodImage) -> ClusterItem {
     let digest = &img.digest;
     let (registry, repo, tag) = parse_image(&img.image);
     let last = repo.rsplit('/').next().unwrap_or(&repo);
@@ -449,24 +451,31 @@ fn cluster_version_purls(version: &Info, nodes: &[Node]) -> Vec<String> {
             out.push(format!("pkg:generic/k3s@{git}"));
         }
     }
-    let number = Regex::new(r"\d+(\.\d+)*").expect("static regex");
     for node in nodes {
         let Some(os) = node.status.as_ref().and_then(|s| s.node_info.as_ref()) else {
             continue;
         };
-        let image = os.os_image.trim();
-        let distro = if image.starts_with("Ubuntu") {
-            "ubuntu"
-        } else if image.starts_with("Debian") {
-            "debian"
-        } else {
-            continue;
-        };
-        if let Some(m) = number.find(image) {
-            out.push(format!("pkg:generic/{distro}@{}", m.as_str()));
-        }
+        out.extend(distro_purl(&os.os_image));
     }
     out
+}
+
+/// `Ubuntu 24.04.1 LTS` -> `pkg:generic/ubuntu@24.04.1`, the same for
+/// Debian; `None` for any other OS.
+pub(crate) fn distro_purl(os_image: &str) -> Option<String> {
+    let image = os_image.trim();
+    let distro = if image.starts_with("Ubuntu") {
+        "ubuntu"
+    } else if image.starts_with("Debian") {
+        "debian"
+    } else {
+        return None;
+    };
+    static NUMBER: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\d+(\.\d+)*").expect("static regex"));
+    NUMBER
+        .find(image)
+        .map(|m| format!("pkg:generic/{distro}@{}", m.as_str()))
 }
 
 #[cfg(test)]

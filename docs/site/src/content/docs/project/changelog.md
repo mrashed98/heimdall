@@ -9,6 +9,13 @@ each version, with the binaries and container image tags.
 
 ## Unreleased
 
+- **Sight for Docker.** Heimdall can read a Docker host's running containers
+  (`sight.docker` in `heimdall.yaml`, or `heimdall sight --docker`) and track
+  them like a cluster's pods: each container is a service `<host>/<name>`.
+  A host is identified by its Docker engine ID and its scan only replaces
+  that host's services, so a realm can hold a cluster and Docker hosts
+  together. See [Sight for
+  Docker](/heimdall/getting-started/without-kubernetes/#sight-for-docker).
 - **Mattermost and Jira channels.** `type: mattermost` posts to an incoming
   webhook; `type: jira` opens one issue per alert (Jira Cloud or Data Center),
   in `heimdall.yaml` or the console. See

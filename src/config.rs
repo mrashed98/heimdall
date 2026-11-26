@@ -63,6 +63,24 @@ impl HeimdallConfig {
     /// Semantic checks serde cannot express. Errors name the offending key.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::bail;
+        if let Some(d) = &self.sight.docker {
+            d.host
+                .parse::<crate::inventory::docker::DockerHost>()
+                .map_err(|e| anyhow::anyhow!("sight.docker.host: {e}"))?;
+            if d.name.as_deref().is_some_and(|n| {
+                n.trim().is_empty()
+                    || n.contains('/')
+                    || n.chars().count() > 100
+                    || n.chars().any(char::is_control)
+            }) {
+                bail!("sight.docker.name must be 1 to 100 characters, without `/` or control characters");
+            }
+            match self.docker_realm() {
+                Some(r) if self.realms.iter().any(|x| x == r) => {}
+                Some(r) => bail!("sight.docker.realm: `{r}` is not in realms"),
+                None => bail!("sight.docker needs a realm: set sight.docker.realm"),
+            }
+        }
         if self.digest.hour > 23 {
             bail!("digest.hour must be 0-23, got {}", self.digest.hour);
         }
@@ -189,6 +207,12 @@ impl HeimdallConfig {
             .as_deref()
             .or(self.realms.first().map(|r| r.as_str()))
     }
+
+    /// The realm of the in-process Docker scan, when one is configured.
+    pub fn docker_realm(&self) -> Option<&str> {
+        let d = self.sight.docker.as_ref()?;
+        d.realm.as_deref().or(self.sight_realm())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,6 +319,28 @@ pub enum Role {
 pub struct SightConfig {
     /// The realm of the cluster Heimdall runs in. Default: the first realm.
     pub realm: Option<String>,
+    /// Also read a Docker host's running containers (Sight for Docker).
+    pub docker: Option<DockerSight>,
+}
+
+/// `sight.docker`: the Docker host Heimdall reads in-process.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerSight {
+    /// `unix:///var/run/docker.sock` (default), or `tcp://host:2375` for a
+    /// socket proxy.
+    #[serde(default = "default_docker_host")]
+    pub host: String,
+    /// The host's name in service names (`<name>/<service>`). Default: the
+    /// name Docker reports.
+    pub name: Option<String>,
+    /// The realm its containers belong to. Default: `sight.realm`, else the
+    /// first realm.
+    pub realm: Option<String>,
+}
+
+fn default_docker_host() -> String {
+    crate::inventory::docker::DEFAULT_HOST.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

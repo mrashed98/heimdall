@@ -491,17 +491,25 @@ async fn status_handler(
                 "sync|k8s",
                 "sync|epss",
                 "sync|sight",
+                "sync|sight-docker",
             ])
             .fetch_all(&state.pool)
             .await?;
     let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
     let mut sync = std::collections::BTreeMap::new();
-    for feed in ["osv", "nvd", "k8s", "epss", "sight"] {
-        let visible = feed != "sight"
-            || state
-                .cfg
-                .sight_realm()
-                .is_some_and(|r| selected.iter().any(|s| s == r));
+    // Sight for Docker only appears when it is configured.
+    let docker = state.cfg.sight.docker.is_some().then_some("sight-docker");
+    for feed in ["osv", "nvd", "k8s", "epss", "sight"]
+        .into_iter()
+        .chain(docker)
+    {
+        let realm = match feed {
+            "sight" => Some(state.cfg.sight_realm()),
+            "sight-docker" => Some(state.cfg.docker_realm()),
+            _ => None,
+        };
+        // A Sight feed shows only when its realm is selected.
+        let visible = realm.is_none_or(|r| r.is_some_and(|r| selected.iter().any(|s| s == r)));
         sync.insert(
             feed.to_string(),
             if visible {

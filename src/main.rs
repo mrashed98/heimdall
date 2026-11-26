@@ -153,6 +153,17 @@ struct SightArgs {
     /// Path to heimdall.yaml (in-process mode)
     #[arg(long, default_value = "heimdall.yaml")]
     config: PathBuf,
+    /// Read a Docker host's running containers instead of a cluster
+    #[arg(long)]
+    docker: bool,
+    /// Docker Engine API: unix:///path or tcp://host:port (default: the
+    /// config's sight.docker.host in-process, else the local socket)
+    #[arg(long)]
+    docker_host: Option<String>,
+    /// The host's name in service names (default: the config's
+    /// sight.docker.name in-process, else the name Docker reports)
+    #[arg(long)]
+    docker_name: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -432,6 +443,76 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
     client.post_json(&path, &body).await
 }
 
+/// Scan a Docker host, then ingest in-process or push like cluster Sight.
+/// A host running nothing is a valid scan: it empties its own services only.
+async fn docker_sight(
+    state: Option<&AppState>,
+    args: &SightArgs,
+) -> anyhow::Result<heimdall::ingest::api::ClusterOutcome> {
+    use anyhow::Context;
+    use heimdall::inventory::docker;
+    // In-process, the config's sight.docker fills what the flags leave out
+    // when this is the configured host, so a run by hand reports it under
+    // the same name and realm as the server's scan.
+    let configured = state.and_then(|s| s.cfg.sight.docker.as_ref().map(|d| (d, &s.cfg)));
+    let host_text = args
+        .docker_host
+        .clone()
+        .or_else(|| configured.map(|(d, _)| d.host.clone()))
+        .unwrap_or_else(|| docker::DEFAULT_HOST.to_string());
+    // Compared parsed, so `tcp://x:2375/` and `http://x:2375` are one host.
+    let parsed = |h: &str| h.parse::<docker::DockerHost>().ok();
+    let same_host = configured
+        .filter(|(d, _)| parsed(&d.host).is_some() && parsed(&d.host) == parsed(&host_text));
+    if let Some((_, cfg)) = same_host {
+        if let Some(r) = cfg.docker_realm().filter(|r| *r != args.realm) {
+            anyhow::bail!(
+                "--realm {} differs from sight.docker's realm {r} for this host; \
+                 use --realm {r} so both scans keep one set of services",
+                args.realm
+            );
+        }
+    }
+    let name = args
+        .docker_name
+        .clone()
+        .or_else(|| same_host.and_then(|(d, _)| d.name.clone()));
+    if name.as_deref().is_some_and(|n| {
+        n.trim().is_empty()
+            || n.contains('/')
+            || n.chars().count() > 100
+            || n.chars().any(char::is_control)
+    }) {
+        anyhow::bail!(
+            "--docker-name must be 1 to 100 characters, without `/` or control characters"
+        );
+    }
+    let host: docker::DockerHost = host_text
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("--docker-host: {e}"))?;
+    let inv = docker::scan(&host, &args.realm, name.as_deref()).await?;
+    match (args.push.as_deref(), state) {
+        (Some(url), _) => {
+            let key = std::env::var("HEIMDALL_API_KEY").context("HEIMDALL_API_KEY is not set")?;
+            let client = heimdall::client::Client::new(url, key);
+            let r: serde_json::Value = client
+                .post_json("/api/v1/ingest/cluster?allow_empty=true", &inv)
+                .await?;
+            let n = |k: &str| r[k].as_u64().unwrap_or(0) as usize;
+            Ok(heimdall::ingest::api::ClusterOutcome {
+                services: n("services"),
+                added: n("added"),
+                removed: n("removed"),
+                skipped: n("skipped"),
+            })
+        }
+        (None, Some(st)) => heimdall::ingest::api::ingest_cluster_inner(st, &inv, true)
+            .await
+            .map_err(|e| anyhow::anyhow!("ingest failed: {e:?}")),
+        (None, None) => anyhow::bail!("in-process ingest needs the application state"),
+    }
+}
+
 async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
     use anyhow::Context;
     // Without --push the scan is ingested in-process, which needs the config
@@ -449,11 +530,21 @@ async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
             ))
         }
     };
-    let out = sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?;
-    let msg = format!(
+    let out = if args.docker {
+        docker_sight(state.as_ref(), &args).await?
+    } else {
+        sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?
+    };
+    let mut msg = format!(
         "sight: {} services, {} components added, {} removed",
         out.services, out.added, out.removed
     );
+    if out.skipped > 0 {
+        msg.push_str(&format!(
+            ", {} skipped (another source holds their names)",
+            out.skipped
+        ));
+    }
     print!("{}", render::ok_line(style, &msg));
     Ok(())
 }
