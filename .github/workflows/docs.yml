@@ -40,7 +40,8 @@ jobs:
           cache-dependency-path: docs/site/package-lock.json
       - run: npm ci
       # Fails on broken internal links (starlight-links-validator).
-      - run: npm run build
+      - run: scripts/check.sh docs
+        working-directory: .
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'
         with:
