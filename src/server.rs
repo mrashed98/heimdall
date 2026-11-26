@@ -1192,10 +1192,10 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            sqlx::query("INSERT INTO service_components(service_id,component_id,source,via_image_digest) SELECT $1,id,'cluster',$2 FROM components WHERE version=$3")
+            sqlx::query("INSERT INTO service_components(service_id,component_id,source,via_image_digest) SELECT $1,id,'cluster',$2 FROM components WHERE purl=$3")
                 .bind(service)
                 .bind(digest)
-                .bind(version)
+                .bind(format!("pkg:maven/org.apache.logging.log4j/log4j-core@{version}"))
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1206,6 +1206,16 @@ mod tests {
             .unwrap();
         sqlx::query("INSERT INTO service_components(service_id,component_id,source) SELECT $1,id,'ci' FROM components WHERE ecosystem='npm'")
             .bind(api)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Inside an image's SBOM only, and two Ubuntu revisions dpkg orders
+        // differently from semver (`-0ubuntu8` is not a pre-release).
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:deb/ubuntu/libc6@2.39-0ubuntu8?distro=ubuntu-24.04','pkg:deb/ubuntu/libc6','deb','2.39-0ubuntu8'),('pkg:deb/ubuntu/libc6@2.38-1ubuntu6?distro=ubuntu-24.04','pkg:deb/ubuntu/libc6','deb','2.38-1ubuntu6')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO image_components(digest,component_id) SELECT 'sha256:a',id FROM components WHERE ecosystem='deb'")
             .execute(&pool)
             .await
             .unwrap();
@@ -1267,6 +1277,22 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        // Found through the image that carries it, with that image and its service.
+        let (_, rows) = search("/api/v1/components?search=libc6").await;
+        assert_eq!(
+            versions(&rows),
+            ["2.38-1ubuntu6", "2.39-0ubuntu8"],
+            "{rows}"
+        );
+        assert_eq!(rows[1]["services"][0]["name"], "api");
+        assert_eq!(rows[1]["images"], serde_json::json!(["acme/api:1"]));
+        // dpkg order: 2.39-0ubuntu8 is above 2.39 (semver would call it a pre-release below it).
+        let (_, rows) = search("/api/v1/components?search=libc6&version_lt=2.39").await;
+        assert_eq!(versions(&rows), ["2.38-1ubuntu6"]);
+        assert_eq!(
+            search("/api/v1/components?search=a%00b").await.0,
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(
             search("/api/v1/components?search=l").await.0,
             StatusCode::BAD_REQUEST

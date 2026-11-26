@@ -18,7 +18,7 @@
 </form>
 {#if query}
  <Panel flush>
- {#if loading}<Skeleton/>{:else if failed==='retry'}<ErrorState retry={()=>revision++}/>{:else if failed}<ErrorState message={failed}/>{:else if !rows.length}<EmptyState title="No matching components" body={query.below ? `Nothing matching "${query.search}" below ${query.below} in these realms.` : `Nothing matching "${query.search}" in these realms.`}/>{:else}
+ {#if loading}<Skeleton/>{:else if failed==='retry'}<ErrorState retry={()=>revision++}/>{:else if failed}<ErrorState message={failed}/>{:else if !rows.length}<EmptyState title={offset ? 'No more matching components' : 'No matching components'} body={query.below ? `Nothing matching "${query.search}" below ${query.below} in these realms.` : `Nothing matching "${query.search}" in these realms.`}/>{:else}
   <DataTable label="Matching components"><thead><tr><th>Package URL</th><th>Version</th><th>Services</th><th>Images</th></tr></thead><tbody>{#each rows as row}<tr><td class="mono">{row.purl}</td><td class="mono">{row.version}</td><td><ul>{#each row.services as s}<li><a href={'/services/'+s.id+location.search}>{s.name}</a> <span class="muted">· {s.realm}</span></li>{/each}</ul></td><td>{#if row.images.length}<ul>{#each row.images as image}<li class="mono">{image}</li>{/each}</ul>{:else}<span class="muted">—</span>{/if}</td></tr>{/each}</tbody></DataTable>
  {/if}
  {#if !failed && !loading}<Pagination {offset} count={rows.length} {loading} change={(n)=>offset=n}/>{/if}

@@ -168,12 +168,13 @@ Scope `read`. `404` if the service does not exist. Rows:
 
 Scope `read`. Finds every component whose package URL contains a text, with the
 services and images that carry it, for example every service on a
-`log4j-core` older than 2.17.
+`log4j-core` older than 2.17. A service carries a component when the component
+is in its own inventory (any source) or inside an image it runs.
 
 | Parameter | Default | Meaning |
 |---|---|---|
 | `search` | required | Text the package URL contains, at least 2 characters, case-insensitive. `%` and `_` match themselves. |
-| `version_lt` | none | Only versions below this one, compared the way the package's ecosystem orders versions (so `2.9.1` is below `2.17`). A version that cannot be compared is left out. |
+| `version_lt` | none | Only versions below this one, compared as the matcher compares that package's versions: dpkg order for Debian and Ubuntu packages, semver for Go and npm, otherwise semver with dpkg order as the fallback. So `2.9.1` is below `2.17`. A version that cannot be compared is left out. |
 | `realms` | the caller's realms | Comma-separated realms to search. A realm not in the config is a `400`; realms the caller cannot read are ignored. |
 | `limit`, `offset` | `500`, `0` | Paging; `limit` is at most 5000. |
 
