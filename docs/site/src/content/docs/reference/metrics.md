@@ -15,7 +15,7 @@ alert ideas.
 | `heimdall_watcher_failures_total` | counter | `watcher` | Failed fetches per watcher type. |
 | `heimdall_watcher_duration_seconds` | summary | `watcher` | Time spent per watcher type per run. |
 | `heimdall_teams_failures_total` | counter | none | Cards Teams rejected (Teams channels only). |
-| `heimdall_notify_failures_total` | counter | `channel_type` | Alerts a channel rejected (a 4xx other than 401, 403, 404, 410 and 429, and for Jira 400; a permanent SMTP error), by channel type: `teams`, `slack`, `discord`, `mattermost`, `telegram`, `pagerduty`, `alertmanager`, `jira`, `webhook`, `email`. |
+| `heimdall_notify_failures_total` | counter | `channel_type` | Alerts a channel rejected (a 4xx other than 429 that does not mean the channel itself is broken, see [Shared behaviour](/heimdall/guides/alert-channels/#shared-behaviour); a permanent SMTP error), by channel type: `teams`, `slack`, `discord`, `mattermost`, `telegram`, `pagerduty`, `alertmanager`, `jira`, `webhook`, `email`. |
 | `heimdall_outbox_pending` | gauge | none | Notifications waiting to be sent. |
 | `heimdall_oaths_active` | gauge | `kind` (`snooze`, `ignore`) | Active oaths. |
 | `heimdall_oath_next_expiry_timestamp_seconds` | gauge | none | Unix time of the nearest oath date (snooze expiry or ignore review). `0` when there is none. |

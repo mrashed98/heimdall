@@ -69,13 +69,16 @@ console](#managing-channels-in-the-console)).
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
-  channel rejects (a 4xx other than 401, 403, 404, 410 and 429, and for Jira
-  400; a permanent SMTP error) is not retried and counts in
-  `heimdall_notify_failures_total{channel_type}`. A 401, 403, 404 or 410 (and
-  Jira's 400, a wrong project or issue type) means the channel itself is wrong:
-  its credentials, permissions or settings, or a deleted webhook or chat. The
-  channel's queue then waits and retries with the usual backoff until it is
-  fixed, and nothing is discarded.
+  channel rejects (a 4xx other than those below, or a permanent SMTP error) is
+  not retried and counts in `heimdall_notify_failures_total{channel_type}`.
+- **A broken channel keeps its alerts.** Some answers mean the channel is
+  wrong, not the message: 401, 403, 404 and 410 from any channel (bad
+  credentials or permissions, or a webhook deleted where the service answers
+  404 or 410, as Slack and Discord do), a Jira 400 about the project, issue
+  type or labels, and Telegram's `chat not found`. The channel's queue then
+  waits and retries with the usual backoff until it is fixed, and nothing is
+  discarded. A service that answers a deleted webhook with a plain 400 can't
+  be told apart from a refused message, so that alert is dropped.
 - **Destinations are checked** before every send: see
   [Where channels may send](#where-channels-may-send).
 - **A missing variable** keeps that channel's messages queued until it is set.
@@ -292,7 +295,7 @@ and Jira Data Center both accept.
 | Key | Meaning |
 |---|---|
 | `url` | The site, for example `https://example.atlassian.net`. **Required.** |
-| `project` | Project key, for example `SEC`. **Required.** |
+| `project` | Project key, for example `SEC` (sent uppercase). **Required.** |
 | `issue_type` | Issue type name. Default `Task`. |
 | `token_env` | Variable holding the API token (Cloud) or personal access token (Data Center). **Required.** |
 | `username_env` | Variable holding the account email. Set it for Jira Cloud, where the token goes with basic auth; leave it out for Data Center, where the token is sent as a bearer token. |
@@ -311,13 +314,17 @@ and Jira Data Center both accept.
 
 The summary is the alert's title; the description lists the findings in wiki
 markup, with the links the alert has (the advisory, or the release notes).
-Each issue gets the label `heimdall`, `severity-<level>` for a finding, and
-`heimdall-outbox-<n>`, which lets Heimdall see on a retry that an earlier
-attempt already created the issue. The project and issue type are read when the issue is
+Each issue gets the label `heimdall`, `severity-<level>` for a finding, and a
+random `heimdall-q-<id>` given when it is queued, which lets Heimdall see on a
+retry that an earlier attempt already created it (it searches the project
+for that label first). The project and issue type are read when the issue is
 created, so changing them also moves issues still in the queue. The weekly
 digest is off by default (it would open an issue every week); set
 `digest: true` to have it. The account needs permission to create issues in
-the project: a 401 or 403 keeps the issues queued until that is fixed.
+the project: a 401 or 403, or a 400 about the project, issue type or labels
+(the create screen needs the Labels field), keeps the issues queued until
+that is fixed. A 400 about the issue itself, such as a description too long,
+drops that issue only.
 
 ## Managing channels in the console
 

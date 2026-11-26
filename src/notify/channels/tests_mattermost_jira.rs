@@ -255,22 +255,51 @@ fn client_errors_blame_the_channel_or_the_alert() {
         let c = ch(yaml);
         for s in [401, 403, 404, 410] {
             let s = StatusCode::from_u16(s).unwrap();
-            assert_eq!(blame(&c, s), Blame::Channel, "{} {s}", c.type_name());
+            assert_eq!(
+                blame(&c, s, &Value::Null),
+                Blame::Channel,
+                "{} {s}",
+                c.type_name()
+            );
         }
-        let bad = blame(&c, StatusCode::BAD_REQUEST);
-        let want = if c.type_name() == "jira" {
-            Blame::Channel
-        } else {
-            Blame::Alert
-        };
-        assert_eq!(bad, want, "{} 400", c.type_name());
-        assert_eq!(
-            blame(&c, StatusCode::PAYLOAD_TOO_LARGE),
-            Blame::Alert,
-            "{}",
-            c.type_name()
-        );
+        // A plain 400 is the alert's, for every type.
+        for s in [400, 413] {
+            let s = StatusCode::from_u16(s).unwrap();
+            assert_eq!(
+                blame(&c, s, &Value::Null),
+                Blame::Alert,
+                "{} {s}",
+                c.type_name()
+            );
+        }
     }
+    // A 400 that names a channel setting is the channel's.
+    let jira = ch(every[9]);
+    let jira_400 =
+        |errors: Value| blame(&jira, StatusCode::BAD_REQUEST, &json!({ "errors": errors }));
+    assert_eq!(
+        jira_400(json!({"project": "valid project is required"})),
+        Blame::Channel
+    );
+    assert_eq!(
+        jira_400(json!({"issuetype": "valid issue type is required"})),
+        Blame::Channel
+    );
+    assert_eq!(
+        jira_400(json!({"labels": "Field 'labels' cannot be set"})),
+        Blame::Channel
+    );
+    assert_eq!(jira_400(json!({"description": "too long"})), Blame::Alert);
+    let tg = ch(every[4]);
+    let tg_400 = |d: &str| {
+        blame(
+            &tg,
+            StatusCode::BAD_REQUEST,
+            &json!({"ok": false, "description": d}),
+        )
+    };
+    assert_eq!(tg_400("Bad Request: chat not found"), Blame::Channel);
+    assert_eq!(tg_400("Bad Request: can't parse entities"), Blame::Alert);
 }
 
 /// A deleted Slack webhook (404) holds the queue; nothing is discarded.
@@ -316,18 +345,57 @@ async fn jira_bad_request_keeps_the_issue_queued(pool: PgPool) {
     assert!(r.sent_at.is_none() && r.card.get("failed").is_none());
 }
 
-/// The first attempt labels the issue with its row; a retry finds the
-/// issue an earlier timed-out attempt created and does not create another.
+/// A Jira 400 the issue itself caused (not a channel setting) drops that
+/// issue and the queue moves on, so one bad alert can't block the channel.
+#[sqlx::test(migrations = "./migrations")]
+async fn jira_issue_rejected_for_its_own_content_moves_on(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"errors": {"description": "The entered text is too long."}})),
+        )
+        .mount(&server)
+        .await;
+    std::env::set_var("CH_JIRA_LONG", "t");
+    let c = cfg(&format!(
+        "realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: '{}', project: SEC, \
+         token_env: CH_JIRA_LONG, min_severity: high}}\n",
+        server.uri()
+    ));
+    let id = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
+    assert_eq!(drain(&pool, &c).await.failed, 1);
+    assert_eq!(row(&pool, id).await.card["failed"], json!(true));
+}
+
+/// Queuing gives each Jira issue a random label (stored with the row, never
+/// with a secret); a retry finds the issue an earlier timed-out attempt
+/// created, in the channel's project, and does not create another.
 #[sqlx::test(migrations = "./migrations")]
 async fn jira_retry_does_not_create_a_second_issue(pool: PgPool) {
     let server = MockServer::start().await;
-    std::env::set_var("CH_JIRA_DEDUPE", "t");
+    std::env::set_var("CH_JIRA_DEDUPE", "dedupe-TOKEN");
     let c = cfg(&format!(
-        "realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: '{}', project: SEC, \
+        "realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: '{}', project: sec, \
          token_env: CH_JIRA_DEDUPE, min_severity: high}}\n",
         server.uri()
     ));
-    let first = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
+    let enqueue = || async {
+        let mut conn = pool.acquire().await.unwrap();
+        let card = render(&c.channels[0], &vuln_alert());
+        crate::notify::outbox::push(&mut conn, "alert|x", &card, &c.channels[0])
+            .await
+            .unwrap()
+    };
+    let label_of = |card: &Value| jira_attempt_label(card).map(str::to_string);
+    let first = enqueue().await;
+    let card = row(&pool, first).await.card;
+    let label = label_of(&card).expect("queued with an attempt label");
+    assert!(!card.to_string().contains("TOKEN"), "{card}");
+    sqlx::query("UPDATE outbox SET next_attempt_at = '2000-01-01'")
+        .execute(&pool)
+        .await
+        .unwrap();
     Mock::given(method("POST"))
         .and(path("/rest/api/2/issue"))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({"key": "SEC-1"})))
@@ -336,7 +404,6 @@ async fn jira_retry_does_not_create_a_second_issue(pool: PgPool) {
         .await;
     assert_eq!(drain(&pool, &c).await.sent, 1);
     let got: Value = serde_json::from_slice(&requests(&server).await[0].body).unwrap();
-    let label = format!("heimdall-outbox-{first}");
     assert!(
         got["fields"]["labels"]
             .as_array()
@@ -344,10 +411,13 @@ async fn jira_retry_does_not_create_a_second_issue(pool: PgPool) {
             .contains(&json!(label)),
         "{got}"
     );
+    assert_eq!(got["fields"]["project"], json!({"key": "SEC"}));
 
     // A second row whose earlier attempt timed out after Jira created it.
-    let second = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
-    sqlx::query("UPDATE outbox SET attempts = 1 WHERE id = $1")
+    let second = enqueue().await;
+    let second_label = label_of(&row(&pool, second).await.card).unwrap();
+    assert_ne!(second_label, label, "labels are unique per queued issue");
+    sqlx::query("UPDATE outbox SET attempts = 1, next_attempt_at = '2000-01-01' WHERE id = $1")
         .bind(second)
         .execute(&pool)
         .await
@@ -362,22 +432,24 @@ async fn jira_retry_does_not_create_a_second_issue(pool: PgPool) {
         .await;
     assert_eq!(drain(&pool, &c).await.sent, 1);
     assert!(row(&pool, second).await.sent_at.is_some());
-    let posts = requests(&server)
-        .await
-        .iter()
-        .filter(|r| r.method.as_str() == "POST")
-        .count();
-    assert_eq!(posts, 1, "the retry created a second issue");
-    let search = requests(&server)
-        .await
-        .into_iter()
-        .find(|r| r.method.as_str() == "GET")
-        .unwrap();
-    assert!(search
+    let reqs = requests(&server).await;
+    assert_eq!(
+        reqs.iter().filter(|r| r.method.as_str() == "POST").count(),
+        1,
+        "the retry created a second issue"
+    );
+    let search = reqs.iter().find(|r| r.method.as_str() == "GET").unwrap();
+    let jql: String = search
         .url
-        .query()
+        .query_pairs()
+        .find(|(k, _)| k == "jql")
         .unwrap()
-        .contains(&format!("heimdall-outbox-{second}")));
+        .1
+        .into_owned();
+    assert_eq!(
+        jql,
+        format!("project = \"SEC\" AND labels = \"{second_label}\"")
+    );
 }
 
 #[test]
@@ -385,15 +457,30 @@ fn mattermost_notification_text_is_plain() {
     let mut a = vuln_alert();
     a.title = "Critical in my_pkg [prod] @all".to_string();
     let att = &mattermost::render(&a)["attachments"][0];
+    // Notifications are plain text; the title may render Markdown, so it
+    // stays escaped.
     assert_eq!(att["fallback"], "Critical in my_pkg [prod] @\u{2060}all");
-    assert_eq!(att["title"], att["fallback"]);
+    assert_eq!(
+        att["title"],
+        mattermost::escape("Critical in my_pkg [prod] @all")
+    );
 }
 
 #[test]
 fn jira_escapes_block_markers() {
-    assert_eq!(jira::escape("h1. URGENT"), r"\h1. URGENT");
-    assert_eq!(jira::escape("ok\n  bq. quote"), "ok\n  \\bq. quote");
-    assert_eq!(jira::escape("h1 plain"), "h1 plain");
+    let esc = jira::escape_block_markers;
+    assert_eq!(esc("h1. URGENT"), r"\h1. URGENT");
+    assert_eq!(esc("ok\n  bq. quote"), "ok\n  \\bq. quote");
+    assert_eq!(esc("h1 plain"), "h1 plain");
+    // Mid-line text (a realm in `*Realm:* …`) is left alone.
+    assert_eq!(jira::escape("h1.prod"), "h1.prod");
+    let mut a = vuln_alert();
+    a.summary = Some("h1. URGENT".to_string());
+    let d = jira::render(&a)["fields"]["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(d.contains("\n\\h1. URGENT"), "{d}");
 }
 
 #[test]
@@ -404,7 +491,7 @@ fn jira_url_and_project_are_validated() {
     };
     let e = bad("realms: [prod]\nchannels:\n  - {type: jira, name: j, url: 'https://x/?a=1', project: SEC, token_env: T, min_severity: high}\n");
     assert!(e.contains("query"), "{e}");
-    for p in ["sec", "' SEC'", "S"] {
+    for p in ["' SEC'", "S", "1SEC", "SE-C"] {
         let e = bad(&format!("realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: 'https://x', project: {p}, token_env: T, min_severity: high}}\n"));
         assert!(e.contains("project key"), "{p}: {e}");
     }

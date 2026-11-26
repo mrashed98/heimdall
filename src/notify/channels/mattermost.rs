@@ -89,13 +89,14 @@ pub fn render(a: &Alert) -> Value {
     if !realms.is_empty() {
         fields.push(json!({"short": true, "title": "Realm", "value": truncate(&escape(&realms.join(", ")), 1024)}));
     }
-    // `fallback` (push and desktop notifications) and `title` are plain
-    // text: Markdown escapes would show as backslashes there.
-    let title = no_mentions(&truncate(&a.title, 250));
+    // `fallback` feeds push and desktop notifications, which are plain text:
+    // Markdown escapes would show as backslashes there. `title` stays
+    // escaped, since the client may render Markdown links in it.
+    let title = truncate(&a.title, 250);
     let mut attachment = json!({
-        "fallback": title,
+        "fallback": no_mentions(&title),
         "color": color(a.severity),
-        "title": title,
+        "title": escape(&title),
         "text": join_capped(&lines, TEXT_CHARS, "…"),
         "fields": fields,
         "footer": "Heimdall",

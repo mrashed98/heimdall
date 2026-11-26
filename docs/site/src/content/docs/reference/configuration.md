@@ -156,7 +156,7 @@ And, by type (keys of other types are rejected):
 | `email` | `from` | string | Sender address. **Required.** |
 | `email` | `to` | list of strings | Recipients, at least one. **Required.** |
 | `jira` | `url` | URL | Jira site, e.g. `https://example.atlassian.net`. No credentials in it. **Required.** |
-| `jira` | `project` | string | Project key. **Required.** |
+| `jira` | `project` | string | Project key, such as `SEC`; sent uppercase. **Required.** |
 | `jira` | `issue_type` | string | Issue type name. Default `Task`. |
 | `jira` | `token_env` | string | Variable holding the API token or personal access token. **Required.** |
 | `jira` | `username_env` | string | Variable holding the account email (Jira Cloud: basic auth). Without it the token is sent as a bearer token. |

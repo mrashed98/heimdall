@@ -133,10 +133,25 @@ pub fn jira_auth(c: &crate::config::JiraChannel, secrets: &Secrets) -> anyhow::R
     })
 }
 
-/// The label on the Jira issue created for outbox row `id`, so a retry can
-/// tell that an earlier attempt already created it.
-pub fn jira_row_label(id: i64) -> String {
-    format!("heimdall-outbox-{id}")
+/// The prefix of the random label each queued Jira issue carries, so a retry
+/// can tell that an earlier attempt already created it.
+const JIRA_ATTEMPT_PREFIX: &str = "heimdall-q-";
+
+/// A new random attempt label. Random rather than the outbox id: ids repeat
+/// across installs (staging and prod) and database restores sharing a site.
+pub fn new_jira_attempt_label() -> String {
+    let b: [u8; 8] = rand::random();
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{JIRA_ATTEMPT_PREFIX}{hex}")
+}
+
+/// The attempt label of a queued Jira payload, if it has one.
+pub fn jira_attempt_label(payload: &Value) -> Option<&str> {
+    payload["fields"]["labels"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|l| l.starts_with(JIRA_ATTEMPT_PREFIX))
 }
 
 /// HTTP authentication added to a request (never put in the URL).
@@ -194,7 +209,8 @@ pub fn request(
             };
             let auth = Some(auth);
             let mut issue = payload.clone();
-            issue["fields"]["project"] = serde_json::json!({"key": c.project});
+            // Jira keys are uppercase; a lowercase one in the config still works.
+            issue["fields"]["project"] = serde_json::json!({"key": c.project.to_ascii_uppercase()});
             issue["fields"]["issuetype"] = serde_json::json!({
                 "name": c.issue_type.as_deref().unwrap_or(jira::DEFAULT_ISSUE_TYPE)
             });

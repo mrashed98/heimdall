@@ -481,18 +481,16 @@ impl ChannelConfig {
                 if u.query().is_some() || u.fragment().is_some() {
                     bail!("{key}.url must be the site URL, without a query or fragment");
                 }
-                // Jira project keys: an uppercase letter, then uppercase
-                // letters, digits or `_` (a lowercase key never matches).
+                // Jira project keys: a letter, then letters, digits or `_`.
+                // Sent uppercase, so `sec` works for `SEC`.
                 let p = c.project.as_bytes();
                 if p.len() < 2
-                    || !p[0].is_ascii_uppercase()
-                    || !p
-                        .iter()
-                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+                    || !p[0].is_ascii_alphabetic()
+                    || !p.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
                 {
                     bail!(
-                        "{key}.project must be a Jira project key such as SEC (uppercase \
-                         letters, digits and _), got `{}`",
+                        "{key}.project must be a Jira project key such as SEC (letters, \
+                         digits and _, starting with a letter), got `{}`",
                         c.project
                     );
                 }

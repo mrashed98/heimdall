@@ -46,6 +46,15 @@ pub(crate) async fn push(
     card: &Value,
     channel: &ChannelConfig,
 ) -> anyhow::Result<i64> {
+    // Each Jira issue gets its own random label, stored with the row, so a
+    // retry can find an issue an earlier timed-out attempt created.
+    let mut card = card.clone();
+    if let ChannelConfig::Jira(_) = channel {
+        if let Some(labels) = card["fields"]["labels"].as_array_mut() {
+            labels.push(Value::String(channels::new_jira_attempt_label()));
+        }
+    }
+    let card = &card;
     let id = sqlx::query_scalar(
         "INSERT INTO outbox (group_key, card, route, channel_type) \
          VALUES ($1, $2, $3, $4) RETURNING id",
@@ -158,7 +167,7 @@ pub async fn drain_with(
     } else {
         Origin::Console
     };
-    let row = RowRef { id, attempts };
+    let row = RowRef { attempts };
     match attempt(d, ch, origin, &card, Some(row), now, &chans.secrets).await {
         Outcome::Sent => {
             sqlx::query("UPDATE outbox SET sent_at = $2 WHERE id = $1")
@@ -251,29 +260,21 @@ async fn attempt(
     secrets: &Secrets,
 ) -> Outcome {
     let mut hide = channels::secret_values(ch, secrets);
-    let mut payload = payload.clone();
     let mut done = None;
-    // A Jira create can succeed after the request timed out on our side:
-    // label the issue with its row, and on a retry look for it first.
+    // A Jira create can succeed after the request timed out on our side: on
+    // a retry, look for the issue by the row's attempt label first.
     if let (ChannelConfig::Jira(c), Some(r)) = (ch, row) {
-        let label = channels::jira_row_label(r.id);
-        if let Some(labels) = payload["fields"]["labels"].as_array_mut() {
-            labels.push(Value::String(label.clone()));
-        }
-        if r.attempts > 0 {
-            done = match jira_issue_exists(d, c, origin, secrets, &label).await {
+        if let (true, Some(label)) = (r.attempts > 0, channels::jira_attempt_label(payload)) {
+            done = match jira_issue_exists(d, c, origin, secrets, label).await {
                 Ok(true) => Some(Outcome::Sent),
                 Ok(false) => None,
-                Err(why) => Some(Outcome::Retry {
-                    retry_after_secs: None,
-                    why,
-                }),
+                Err(o) => Some(o),
             };
         }
     }
     let outcome = match done {
         Some(o) => o,
-        None => match channels::request(ch, &payload, now, secrets) {
+        None => match channels::request(ch, payload, now, secrets) {
             Ok(req) => {
                 if let Request::Http { redact, .. } = &req {
                     hide.extend(redact.iter().cloned());
@@ -413,7 +414,7 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request
                 Err(why) => return Outcome::Hold(why),
             };
             send_http(
-                |s| blame(ch, s),
+                |s, b| blame(ch, s, b),
                 &parsed,
                 &addrs,
                 body,
@@ -455,38 +456,48 @@ fn scrub(mut s: String, secrets: &[String]) -> String {
 /// The outbox row an attempt is for (none for a test send).
 #[derive(Debug, Clone, Copy)]
 struct RowRef {
-    id: i64,
     attempts: i32,
 }
 
-/// Whether Jira already has the issue labelled `label` (an earlier attempt
-/// created it). Tries the current search API, then the Data Center one. A
-/// query Jira refuses (400) counts as not found: a duplicate issue is better
-/// than an alert never sent.
+/// Whether Jira already has the issue labelled `label` in the channel's
+/// project (an earlier attempt created it). Tries the current search API,
+/// then the Data Center one. Failures follow the send rules: a refused
+/// destination or a channel-fault status holds the queue, 429 and 5xx retry.
+/// A query Jira refuses (400) counts as not found: a duplicate issue is
+/// better than an alert never sent.
 async fn jira_issue_exists(
     d: &Delivery<'_>,
     c: &crate::config::JiraChannel,
     origin: Origin,
     secrets: &Secrets,
     label: &str,
-) -> Result<bool, String> {
-    let auth = channels::jira_auth(c, secrets).map_err(|e| format!("{e:#}"))?;
+) -> Result<bool, Outcome> {
+    let hold = |why: String| Outcome::Hold(why);
+    let retry = |why: String| Outcome::Retry {
+        retry_after_secs: None,
+        why,
+    };
+    let auth = channels::jira_auth(c, secrets).map_err(|e| hold(format!("{e:#}")))?;
     let base = c.url.trim_end_matches('/');
+    let project = c.project.to_ascii_uppercase();
     for path in ["/rest/api/2/search/jql", "/rest/api/2/search"] {
         let url = reqwest::Url::parse_with_params(
             &format!("{base}{path}"),
             &[
-                ("jql", format!("labels = \"{label}\"")),
+                (
+                    "jql",
+                    format!("project = \"{project}\" AND labels = \"{label}\""),
+                ),
                 ("maxResults", "1".to_string()),
                 ("fields", "key".to_string()),
             ],
         )
-        .map_err(|_| "the channel URL is not a valid URL".to_string())?;
+        .map_err(|_| hold("the channel URL is not a valid URL".to_string()))?;
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
-            return Err("the channel URL has no host".to_string());
+            return Err(hold("the channel URL has no host".to_string()));
         };
-        let addrs = d.egress.resolve(host, port, origin).await?;
-        let http = pinned_client(&url, &addrs)?;
+        let addrs = d.egress.resolve(host, port, origin).await.map_err(hold)?;
+        let http = pinned_client(&url, &addrs).map_err(retry)?;
         let rb = http
             .get(url.clone())
             .timeout(std::time::Duration::from_secs(SEND_TIMEOUT_SECS));
@@ -494,22 +505,32 @@ async fn jira_issue_exists(
             HttpAuth::Basic(u, p) => rb.basic_auth(u, Some(p)),
             HttpAuth::Bearer(t) => rb.bearer_auth(t),
         };
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| format!("searching Jira for an earlier attempt: {}", e.without_url()))?;
-        match resp.status() {
-            StatusCode::NOT_FOUND => continue,
-            StatusCode::BAD_REQUEST => return Ok(false),
-            s if !s.is_success() => {
-                return Err(format!("searching Jira for an earlier attempt: {s}"))
+        let resp = rb.send().await.map_err(|e| {
+            retry(format!(
+                "searching Jira for an earlier attempt: {}",
+                e.without_url()
+            ))
+        })?;
+        let status = resp.status();
+        match status.as_u16() {
+            404 => continue,
+            400 => return Ok(false),
+            401 | 403 => {
+                return Err(hold(format!(
+                    "{status}: check the channel's settings, credentials and permissions"
+                )))
+            }
+            _ if !status.is_success() => {
+                return Err(retry(format!(
+                    "searching Jira for an earlier attempt: {status}"
+                )))
             }
             _ => {}
         }
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         return Ok(body["issues"].as_array().is_some_and(|i| !i.is_empty()));
     }
-    Err("Jira has no search API at this URL".to_string())
+    Err(hold("Jira has no search API at this URL".to_string()))
 }
 
 /// A client that connects only to `addrs` for `url`'s host and never follows
@@ -537,18 +558,38 @@ pub(crate) enum Blame {
     Channel,
 }
 
-/// Who a client error from `ch` blames. Every channel type decides here,
-/// with no catch-all arm: a new type must choose, because dropping an alert
-/// for a channel's mistake loses it for good.
-pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode) -> Blame {
+/// Who a client error from `ch` blames, given the response body (JSON, or
+/// null). Every channel type decides here, with no catch-all arm: a new type
+/// must choose, because dropping an alert for a channel's mistake loses it
+/// for good.
+pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode, body: &Value) -> Blame {
     // Credentials, permissions, a deleted webhook or chat: never the alert.
     if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
         return Blame::Channel;
     }
+    let bad_request = status == StatusCode::BAD_REQUEST;
     match ch {
-        // Jira answers 400 for a wrong project key, issue type or a field
-        // the create screen lacks: the channel's settings, not the issue.
-        ChannelConfig::Jira(_) if status == StatusCode::BAD_REQUEST => Blame::Channel,
+        // Jira names the fields it refused. The project, issue type, or a
+        // label field missing from the create screen are the channel's
+        // settings; anything else (say a description too long) is this issue.
+        ChannelConfig::Jira(_) if bad_request => {
+            let errors = body["errors"].as_object();
+            let setting = |k: &String| matches!(k.as_str(), "project" | "issuetype" | "labels");
+            if errors.is_some_and(|e| e.keys().any(setting)) {
+                Blame::Channel
+            } else {
+                Blame::Alert
+            }
+        }
+        // A deleted chat, or a bot removed from it.
+        ChannelConfig::Telegram(_)
+            if bad_request
+                && body["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("chat not found")) =>
+        {
+            Blame::Channel
+        }
         ChannelConfig::Jira(_)
         | ChannelConfig::Teams(_)
         | ChannelConfig::Slack(_)
@@ -566,7 +607,7 @@ pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode) -> Blame {
 /// and never following a redirect, which could lead anywhere. `blame`
 /// decides what a client error means (see [`blame`]).
 async fn send_http(
-    blame: impl Fn(StatusCode) -> Blame,
+    blame: impl Fn(StatusCode, &Value) -> Blame,
     url: &reqwest::Url,
     addrs: &[std::net::SocketAddr],
     body: Vec<u8>,
@@ -645,7 +686,8 @@ async fn send_http(
             why: format!("{status}"),
         };
     }
-    match blame(status) {
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    match blame(status, &body) {
         Blame::Alert => Outcome::Rejected(format!("{status}")),
         Blame::Channel => Outcome::Hold(format!(
             "{status}: check the channel's settings, credentials and permissions"
@@ -684,7 +726,7 @@ mod tests {
             .await
             .unwrap();
         send_http(
-            |_| Blame::Alert,
+            |_, _| Blame::Alert,
             &url,
             &addrs,
             b"{}".to_vec(),
@@ -708,7 +750,7 @@ mod tests {
         let addr = *server.address();
         let url = reqwest::Url::parse(&format!("http://pinned.invalid:{}/", addr.port())).unwrap();
         let out = send_http(
-            |_| Blame::Alert,
+            |_, _| Blame::Alert,
             &url,
             &[addr],
             b"{}".to_vec(),

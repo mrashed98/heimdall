@@ -18,29 +18,31 @@ const SUMMARY_CHARS: usize = 255;
 /// The issue type when the channel sets none.
 pub const DEFAULT_ISSUE_TYPE: &str = "Task";
 
-/// Backslash-escape every character wiki markup gives a meaning to, and
-/// the block markers a line can start with (`h1.` to `h6.`, `bq.`).
+/// Backslash-escape every character wiki markup gives a meaning to.
 pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for (i, line) in s.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let t = line.trim_start();
-        let block = t.starts_with("bq.")
-            || (t.len() >= 3
-                && t.as_bytes()[0] == b'h'
-                && (b'1'..=b'6').contains(&t.as_bytes()[1])
-                && t.as_bytes()[2] == b'.');
-        if block {
-            out.push_str(&line[..line.len() - t.len()]);
-            out.push('\\');
-            escape_chars(t, &mut out);
-        } else {
-            escape_chars(line, &mut out);
-        }
-    }
+    escape_chars(s, &mut out);
     out
+}
+
+/// `text` with a backslash before a block marker (`h1.` to `h6.`, `bq.`) that
+/// starts a line, so upstream text can't turn a line into a heading or quote.
+/// Run on the whole description: only there is a line start known.
+pub(crate) fn escape_block_markers(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let t = line.trim_start();
+            let b = t.as_bytes();
+            let block = t.starts_with("bq.")
+                || (b.len() >= 3 && b[0] == b'h' && (b'1'..=b'6').contains(&b[1]) && b[2] == b'.');
+            if block {
+                format!("{}\\{t}", &line[..line.len() - t.len()])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn escape_chars(s: &str, out: &mut String) {
@@ -117,7 +119,7 @@ pub fn render(a: &Alert) -> Value {
     json!({
         "fields": {
             "summary": truncate(&summary, SUMMARY_CHARS),
-            "description": join_capped(&lines, DESCRIPTION_CHARS, "…"),
+            "description": escape_block_markers(&join_capped(&lines, DESCRIPTION_CHARS, "…")),
             "labels": labels,
         }
     })
