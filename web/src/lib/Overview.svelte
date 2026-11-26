@@ -3,7 +3,7 @@
   import { statusUrl } from './overview';
   import { SEVERITIES as severities, type Severity } from './ui/format';
   import { packageLabel, rowTitle } from './findings';
-  import { dailySeries, type TrendRow } from './trends';
+  import { dailySeries, TREND_DAYS, type TrendRow } from './trends';
   import TrendChart from './TrendChart.svelte';
   import { Badge, DataTable, EmptyState, EpssBar, ErrorState, Panel, Skeleton, Stat } from './ui';
   let { realms, navigate }: { realms: string[]; navigate: (to: string) => void } = $props();
@@ -18,7 +18,6 @@
   let bySeverity = (s: Severity) => (status?.severity ?? []).filter(x => x.severity === s).reduce((n, x) => n + x.count, 0);
   let total = $derived((status?.severity ?? []).reduce((n, row) => n + row.count, 0));
   let max = $derived(Math.max(1, ...groups.map(g => g.counts.reduce((a, b) => a + b, 0))));
-  const TREND_DAYS = 90;
   let days = $derived(dailySeries(trend ?? [], TREND_DAYS));
   let recorded = $derived(days.filter(d => d.critical !== null));
   let q = $derived(realms.length ? `?realms=${encodeURIComponent(realms.join(','))}` : '');
@@ -65,7 +64,7 @@
         {:else}<p class="pad muted">Nothing with a fix is open.</p>{/if}
       </Panel>
     </div>
-    <Panel title="Open findings over 90 days">
+    <Panel title={`Open findings over ${TREND_DAYS} days`}>
       {#snippet actions()}Last count each day, UTC{/snippet}
       {#if trend === null}<p class="muted small">Trend data could not be loaded.</p>
       {:else if recorded.length}

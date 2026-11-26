@@ -1,5 +1,8 @@
 import { SEVERITIES, type Severity } from './ui/format';
 
+/** Days of history the console's trend charts show. */
+export const TREND_DAYS = 90;
+
 /** One row of `GET /api/v1/trends` or `/api/v1/services/{id}/trend`. */
 export type TrendRow = { day: string; realm?: string } & Record<Severity, number>;
 /** One calendar day; a severity is `null` when no snapshot was taken that day. */

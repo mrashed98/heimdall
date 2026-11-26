@@ -168,9 +168,10 @@ Scope `read`. `404` if the service does not exist. Rows:
 
 ### `GET /api/v1/trends`
 
-Scope `read`. Open findings per severity at the end of each day (UTC), per
-realm, oldest first. Heimdall records today's counts after every matcher run,
-the one at startup included, so a day holds the last counts taken that day. A
+Scope `read`. Open findings per severity on each day (UTC), per realm, oldest
+first. Heimdall records today's counts after every matcher run, the one at
+startup included, so a day holds the counts of its last run, which can be
+hours before midnight. A
 day with no row is one the server did not run; it is not a day with zero
 findings. A realm added to the config has no rows for the days before it was
 added, so a total across realms for those days covers only the realms

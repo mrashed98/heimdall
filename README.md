@@ -287,6 +287,7 @@ is a complete example.
 | `retention.findings_days` | `365` | Resolved findings are deleted after this long. |
 | `retention.releases_days` | `365` | Release records. |
 | `retention.outbox_days` | `30` | Sent notification rows. Oaths and their history are kept forever. |
+| `retention.audit_days` | `365` | Audit log entries. |
 | `retention.trends_days` | `365` | Daily counts behind the trend charts, 1 to 366. |
 
 `major_component` says which version number counts as the major. `0` (default)
