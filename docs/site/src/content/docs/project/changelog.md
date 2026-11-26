@@ -11,6 +11,12 @@ binaries, checksums, container image tags and the Helm chart of each version.
 
 ## Unreleased
 
+- **Component search.** Inventory → Find a component lists every service and
+  image carrying a package, optionally only versions below a given one ("where
+  do we run log4j-core below 2.17?"), within the realms you can read. The same
+  search is `GET /api/v1/components`; see the
+  [HTTP API](/heimdall/reference/http-api/#get-apiv1components).
+
 ## 0.4.0
 
 - **Sight for Docker.** Heimdall can read a Docker host's running containers

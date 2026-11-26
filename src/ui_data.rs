@@ -4,12 +4,14 @@
 struct UiQuery {
     realms: Option<String>, limit: Option<String>, offset: Option<String>,
     sort: Option<String>, order: Option<String>, kind: Option<String>, tab: Option<String>,
+    search: Option<String>, version_lt: Option<String>,
 }
 fn ui_data_routes() -> Router<AppState> {
     Router::new().route("/api/v1/ui/services", get(ui_services))
         .route("/api/v1/ui/services/{id}/{section}", get(ui_service_section))
         .route("/api/v1/ui/releases", get(ui_releases))
         .route("/api/v1/ui/oaths", get(ui_oaths))
+        .route("/api/v1/components", get(component_search))
 }
 fn ui_realms(state: &AppState, p: &Principal, q: &UiQuery) -> Result<Vec<String>, ApiError> {
     p.require_read()?;
@@ -70,4 +72,30 @@ async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<U
     let (sort, order) = ui_sort(&q, &[("advisory","advisory_id"),("service","service_name"),("realm","realm"),("kind","kind"),("date","COALESCE(expires_at,review_at)"),("status","status")], "id")?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT id,advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,expires_at,review_at,created_by,created_at,status FROM oaths WHERE (realm=ANY($1) OR (realm IS NULL AND cardinality($1::text[])>0)) AND CASE $2 WHEN 'active' THEN status='active' AND (COALESCE(expires_at,review_at) IS NULL OR COALESCE(expires_at,review_at)>now()) WHEN 'expiring' THEN status='active' AND COALESCE(expires_at,review_at)>now() AND COALESCE(expires_at,review_at)<=now()+interval '7 days' ELSE status IN ('expired','revoked') OR (status='active' AND COALESCE(expires_at,review_at)<=now()) END ORDER BY {sort} {order} NULLS LAST, id DESC LIMIT $3 OFFSET $4) t");
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(tab).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
+}
+
+/// A search matching more components than this is refused, so one request
+/// never holds a whole inventory in memory; the caller narrows the text.
+const COMPONENT_SEARCH_CAP: usize = 10_000;
+/// Components whose package URL contains `search`, each with the services and
+/// images that carry it in the caller's realms. `version_lt` keeps versions
+/// below it, compared the way the component's ecosystem orders versions.
+async fn component_search(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let search = given(&q.search).map(str::trim).unwrap_or("");
+    if search.chars().count() < 2 { return Err(ApiError::BadRequest("search needs at least 2 characters".into())); }
+    let below = given(&q.version_lt).map(str::trim).filter(|v| !v.is_empty());
+    let (limit, offset) = (parse_limit(&q.limit)? as usize, parse_offset(&q.offset)? as usize);
+    let pattern = format!("%{}%", search.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let candidates: Vec<(i64, String, String)> = sqlx::query_as("SELECT c.id,c.ecosystem,c.version FROM components c WHERE c.purl ILIKE $1 AND EXISTS (SELECT 1 FROM service_components sc JOIN services s ON s.id=sc.service_id WHERE sc.component_id=c.id AND s.realm=ANY($2)) ORDER BY c.name_key, c.version, c.id LIMIT $3")
+        .bind(pattern).bind(&realms).bind(COMPONENT_SEARCH_CAP as i64 + 1).fetch_all(&state.pool).await?;
+    if candidates.len() > COMPONENT_SEARCH_CAP { return Err(ApiError::BadRequest(format!("more than {COMPONENT_SEARCH_CAP} components match; narrow the search"))); }
+    let page: Vec<i64> = candidates.into_iter()
+        .filter(|(_, ecosystem, version)| below.is_none_or(|b| crate::version::compare(ecosystem, version, b) == Some(std::cmp::Ordering::Less)))
+        .skip(offset).take(limit).map(|(id, _, _)| id).collect();
+    Ok(Json(sqlx::query_scalar("SELECT row_to_json(t) FROM (SELECT c.purl,c.name_key,c.ecosystem,c.version, \
+        (SELECT json_agg(json_build_object('id',s.id,'name',s.name,'realm',s.realm) ORDER BY s.realm,s.name) FROM services s WHERE s.realm=ANY($2) AND EXISTS (SELECT 1 FROM service_components sc WHERE sc.service_id=s.id AND sc.component_id=c.id)) AS services, \
+        (SELECT coalesce(array_agg(DISTINCT i.image_ref ORDER BY i.image_ref),'{}') FROM service_components sc JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) JOIN image_sboms i ON i.digest=sc.via_image_digest WHERE sc.component_id=c.id) AS images \
+        FROM unnest($1::bigint[]) WITH ORDINALITY AS p(id,n) JOIN components c ON c.id=p.id ORDER BY p.n) t")
+        .bind(page).bind(&realms).fetch_all(&state.pool).await?))
 }

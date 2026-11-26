@@ -47,6 +47,7 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `GET /api/v1/findings/{id}` | read | Finding details. |
 | `GET /api/v1/services` | read | List services. |
 | `GET /api/v1/services/{id}/components` | read | A service's components. |
+| `GET /api/v1/components` | read | Find where a component runs. |
 | `GET /api/v1/releases` | read | Recorded releases. |
 | `POST /api/v1/ingest/sbom` | ingest | Upload an SBOM. |
 | `POST /api/v1/ingest/cluster` | ingest | Upload a cluster inventory. |
@@ -160,6 +161,34 @@ Scope `read`. `404` if the service does not exist. Rows:
   "id": 7, "purl": "pkg:npm/lodash@4.17.11", "name_key": "pkg:npm/lodash",
   "ecosystem": "npm", "version": "4.17.11", "source": "git",
   "direct": true, "via_image_digest": null
+}
+```
+
+### `GET /api/v1/components`
+
+Scope `read`. Finds every component whose package URL contains a text, with the
+services and images that carry it, for example every service on a
+`log4j-core` older than 2.17.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `search` | required | Text the package URL contains, at least 2 characters, case-insensitive. `%` and `_` match themselves. |
+| `version_lt` | none | Only versions below this one, compared the way the package's ecosystem orders versions (so `2.9.1` is below `2.17`). A version that cannot be compared is left out. |
+| `realms` | the caller's realms | Comma-separated realms to search. A realm not in the config is a `400`; realms the caller cannot read are ignored. |
+| `limit`, `offset` | `500`, `0` | Paging; `limit` is at most 5000. |
+
+Only components that a service in those realms carries are returned, and
+`services` and `images` list only what is in them. Rows are ordered by package
+name, then version as text. A search matching more than 10,000 components is a
+`400`: narrow the text. Rows:
+
+```json
+{
+  "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.9.1",
+  "name_key": "pkg:maven/org.apache.logging.log4j/log4j-core",
+  "ecosystem": "maven", "version": "2.9.1",
+  "services": [{"id": 12, "name": "checkout", "realm": "prod"}],
+  "images": ["ghcr.io/acme/checkout:4.2"]
 }
 ```
 
