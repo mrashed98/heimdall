@@ -94,7 +94,7 @@ async fn component_search(State(state): State<AppState>, p: Principal, Query(q):
         .filter(|(_, ecosystem, version)| below.is_none_or(|b| crate::version::compare(ecosystem, version, b) == Some(std::cmp::Ordering::Less)))
         .skip(offset).take(limit).map(|(id, _, _)| id).collect();
     Ok(Json(sqlx::query_scalar("SELECT row_to_json(t) FROM (SELECT c.purl,c.name_key,c.ecosystem,c.version, \
-        (SELECT json_agg(json_build_object('id',s.id,'name',s.name,'realm',s.realm) ORDER BY s.realm,s.name) FROM services s WHERE s.realm=ANY($2) AND EXISTS (SELECT 1 FROM service_components sc WHERE sc.service_id=s.id AND sc.component_id=c.id)) AS services, \
+        (SELECT coalesce(json_agg(json_build_object('id',s.id,'name',s.name,'realm',s.realm) ORDER BY s.realm,s.name),'[]') FROM services s WHERE s.realm=ANY($2) AND EXISTS (SELECT 1 FROM service_components sc WHERE sc.service_id=s.id AND sc.component_id=c.id)) AS services, \
         (SELECT coalesce(array_agg(DISTINCT i.image_ref ORDER BY i.image_ref),'{}') FROM service_components sc JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) JOIN image_sboms i ON i.digest=sc.via_image_digest WHERE sc.component_id=c.id) AS images \
         FROM unnest($1::bigint[]) WITH ORDINALITY AS p(id,n) JOIN components c ON c.id=p.id ORDER BY p.n) t")
         .bind(page).bind(&realms).fetch_all(&state.pool).await?))
