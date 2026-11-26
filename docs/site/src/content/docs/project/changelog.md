@@ -15,8 +15,8 @@ each version, with the binaries and container image tags.
   [Mattermost](/heimdall/guides/alert-channels/#mattermost) and
   [Jira](/heimdall/guides/alert-channels/#jira).
 - **A broken channel no longer discards alerts.** A 401, 403, 404 or 410 from
-  any channel, a Jira 400 about the project, issue type or labels, and
-  Telegram's `chat not found` mean the channel is wrong (credentials,
+  any channel, a Jira 400 about anything but the summary or description, and
+  Telegram's `chat not found` or a supergroup upgrade mean the channel is wrong (credentials,
   permissions, settings, or a deleted webhook or chat). The channel's queue now
   waits and retries until it is fixed, as a failed SMTP login already did.
 - **Alert channels in the console.** Settings → Alert channels lists every

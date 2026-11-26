@@ -29,7 +29,10 @@ pub(crate) fn escape(s: &str) -> String {
 /// starts a line, so upstream text can't turn a line into a heading or quote.
 /// Run on the whole description: only there is a line start known.
 pub(crate) fn escape_block_markers(text: &str) -> String {
-    text.split('\n')
+    // Jira also starts a line at a lone `\r`.
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
         .map(|line| {
             let t = line.trim_start();
             let b = t.as_bytes();

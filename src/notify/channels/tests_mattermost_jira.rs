@@ -262,34 +262,61 @@ fn client_errors_blame_the_channel_or_the_alert() {
                 c.type_name()
             );
         }
-        // A plain 400 is the alert's, for every type.
-        for s in [400, 413] {
-            let s = StatusCode::from_u16(s).unwrap();
+        // A plain 400 is the alert's, except for Jira (below).
+        if c.type_name() != "jira" {
+            let s = StatusCode::BAD_REQUEST;
             assert_eq!(
                 blame(&c, s, &Value::Null),
                 Blame::Alert,
-                "{} {s}",
+                "{} 400",
                 c.type_name()
             );
         }
+        let s = StatusCode::PAYLOAD_TOO_LARGE;
+        assert_eq!(
+            blame(&c, s, &Value::Null),
+            Blame::Alert,
+            "{} 413",
+            c.type_name()
+        );
     }
-    // A 400 that names a channel setting is the channel's.
+    // Jira: a 400 is the alert's only when it names nothing but the fields
+    // Heimdall fills from the alert; anything else is the channel's setup.
     let jira = ch(every[9]);
-    let jira_400 =
-        |errors: Value| blame(&jira, StatusCode::BAD_REQUEST, &json!({ "errors": errors }));
+    let jira_400 = |body: Value| blame(&jira, StatusCode::BAD_REQUEST, &body);
+    let errors = |e: Value| json!({ "errors": e });
     assert_eq!(
-        jira_400(json!({"project": "valid project is required"})),
+        jira_400(errors(json!({"description": "too long"}))),
+        Blame::Alert
+    );
+    assert_eq!(
+        jira_400(errors(json!({"summary": "too long", "description": "x"}))),
+        Blame::Alert
+    );
+    for field in [
+        "project",
+        "issuetype",
+        "labels",
+        "components",
+        "customfield_10010",
+    ] {
+        assert_eq!(
+            jira_400(errors(json!({ field: "required" }))),
+            Blame::Channel,
+            "{field}"
+        );
+    }
+    assert_eq!(
+        jira_400(errors(
+            json!({"description": "x", "components": "required"})
+        )),
         Blame::Channel
     );
     assert_eq!(
-        jira_400(json!({"issuetype": "valid issue type is required"})),
+        jira_400(json!({"errorMessages": ["no permission"], "errors": {}})),
         Blame::Channel
     );
-    assert_eq!(
-        jira_400(json!({"labels": "Field 'labels' cannot be set"})),
-        Blame::Channel
-    );
-    assert_eq!(jira_400(json!({"description": "too long"})), Blame::Alert);
+    assert_eq!(jira_400(Value::Null), Blame::Channel);
     let tg = ch(every[4]);
     let tg_400 = |d: &str| {
         blame(
@@ -300,6 +327,12 @@ fn client_errors_blame_the_channel_or_the_alert() {
     };
     assert_eq!(tg_400("Bad Request: chat not found"), Blame::Channel);
     assert_eq!(tg_400("Bad Request: can't parse entities"), Blame::Alert);
+    let migrated = json!({"ok": false, "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                          "parameters": {"migrate_to_chat_id": -1001234}});
+    assert_eq!(
+        blame(&tg, StatusCode::BAD_REQUEST, &migrated),
+        Blame::Channel
+    );
 }
 
 /// A deleted Slack webhook (404) holds the queue; nothing is discarded.
@@ -446,10 +479,7 @@ async fn jira_retry_does_not_create_a_second_issue(pool: PgPool) {
         .unwrap()
         .1
         .into_owned();
-    assert_eq!(
-        jql,
-        format!("project = \"SEC\" AND labels = \"{second_label}\"")
-    );
+    assert_eq!(jql, format!("labels = \"{second_label}\""));
 }
 
 #[test]
@@ -472,6 +502,7 @@ fn jira_escapes_block_markers() {
     assert_eq!(esc("h1. URGENT"), r"\h1. URGENT");
     assert_eq!(esc("ok\n  bq. quote"), "ok\n  \\bq. quote");
     assert_eq!(esc("h1 plain"), "h1 plain");
+    assert_eq!(esc("x\rh1. PWNED"), "x\n\\h1. PWNED");
     // Mid-line text (a realm in `*Realm:* …`) is left alone.
     assert_eq!(jira::escape("h1.prod"), "h1.prod");
     let mut a = vuln_alert();
@@ -495,4 +526,16 @@ fn jira_url_and_project_are_validated() {
         let e = bad(&format!("realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: 'https://x', project: {p}, token_env: T, min_severity: high}}\n"));
         assert!(e.contains("project key"), "{p}: {e}");
     }
+}
+
+/// Escaping can't push the Mattermost title past its 250 characters.
+#[test]
+fn mattermost_title_stays_within_its_limit() {
+    let mut a = vuln_alert();
+    a.title = "snake_case_name ".repeat(20);
+    let att = &mattermost::render(&a)["attachments"][0];
+    assert!(
+        att["title"].as_str().unwrap().chars().count() <= 250,
+        "{att}"
+    );
 }

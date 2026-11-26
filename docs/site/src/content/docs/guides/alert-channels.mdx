@@ -74,8 +74,9 @@ console](#managing-channels-in-the-console)).
 - **A broken channel keeps its alerts.** Some answers mean the channel is
   wrong, not the message: 401, 403, 404 and 410 from any channel (bad
   credentials or permissions, or a webhook deleted where the service answers
-  404 or 410, as Slack and Discord do), a Jira 400 about the project, issue
-  type or labels, and Telegram's `chat not found`. The channel's queue then
+  404 or 410, as Slack and Discord do), a Jira 400 about anything but the
+  summary or description, and Telegram's `chat not found` or a group that
+  became a supergroup (update `chat_id`). The channel's queue then
   waits and retries with the usual backoff until it is fixed, and nothing is
   discarded. A service that answers a deleted webhook with a plain 400 can't
   be told apart from a refused message, so that alert is dropped.
@@ -316,15 +317,16 @@ The summary is the alert's title; the description lists the findings in wiki
 markup, with the links the alert has (the advisory, or the release notes).
 Each issue gets the label `heimdall`, `severity-<level>` for a finding, and a
 random `heimdall-q-<id>` given when it is queued, which lets Heimdall see on a
-retry that an earlier attempt already created it (it searches the project
-for that label first). The project and issue type are read when the issue is
+retry that an earlier attempt already created it (it searches for that label
+first). The project and issue type are read when the issue is
 created, so changing them also moves issues still in the queue. The weekly
 digest is off by default (it would open an issue every week); set
 `digest: true` to have it. The account needs permission to create issues in
-the project: a 401 or 403, or a 400 about the project, issue type or labels
-(the create screen needs the Labels field), keeps the issues queued until
-that is fixed. A 400 about the issue itself, such as a description too long,
-drops that issue only.
+the project, and the create screen needs the Labels field. A 401 or 403, or
+a 400 about any field but the summary or description (the project, the issue
+type, labels, or a field the project requires that Heimdall doesn't fill),
+keeps the issues queued until that is fixed. A 400 about the summary or
+description, such as one too long, drops that issue only.
 
 ## Managing channels in the console
 

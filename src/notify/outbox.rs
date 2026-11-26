@@ -459,8 +459,8 @@ struct RowRef {
     attempts: i32,
 }
 
-/// Whether Jira already has the issue labelled `label` in the channel's
-/// project (an earlier attempt created it). Tries the current search API,
+/// Whether Jira already has the issue labelled `label` (an earlier attempt
+/// created it). Tries the current search API,
 /// then the Data Center one. Failures follow the send rules: a refused
 /// destination or a channel-fault status holds the queue, 429 and 5xx retry.
 /// A query Jira refuses (400) counts as not found: a duplicate issue is
@@ -479,15 +479,13 @@ async fn jira_issue_exists(
     };
     let auth = channels::jira_auth(c, secrets).map_err(|e| hold(format!("{e:#}")))?;
     let base = c.url.trim_end_matches('/');
-    let project = c.project.to_ascii_uppercase();
     for path in ["/rest/api/2/search/jql", "/rest/api/2/search"] {
         let url = reqwest::Url::parse_with_params(
             &format!("{base}{path}"),
             &[
-                (
-                    "jql",
-                    format!("project = \"{project}\" AND labels = \"{label}\""),
-                ),
+                // The label is random per queued issue, so it alone finds the
+                // issue, even if the channel's project changed since.
+                ("jql", format!("labels = \"{label}\"")),
                 ("maxResults", "1".to_string()),
                 ("fields", "key".to_string()),
             ],
@@ -533,6 +531,19 @@ async fn jira_issue_exists(
     Err(hold("Jira has no search API at this URL".to_string()))
 }
 
+/// The body of `resp` as JSON, reading at most `max` bytes: an error body
+/// only needs to say which field was refused. Null when longer or not JSON.
+async fn capped_json(mut resp: reqwest::Response, max: usize) -> Value {
+    let mut buf = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        if buf.len() + chunk.len() > max {
+            return Value::Null;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&buf).unwrap_or(Value::Null)
+}
+
 /// A client that connects only to `addrs` for `url`'s host and never follows
 /// a redirect.
 fn pinned_client(
@@ -569,24 +580,25 @@ pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode, body: &Value) -> Bla
     }
     let bad_request = status == StatusCode::BAD_REQUEST;
     match ch {
-        // Jira names the fields it refused. The project, issue type, or a
-        // label field missing from the create screen are the channel's
-        // settings; anything else (say a description too long) is this issue.
+        // Jira names the fields it refused. Heimdall fills only the summary
+        // and the description from the alert; every other field (the
+        // project, issue type, labels, or a field the project requires) is
+        // the channel's setup, and so is a refusal that names no field.
         ChannelConfig::Jira(_) if bad_request => {
-            let errors = body["errors"].as_object();
-            let setting = |k: &String| matches!(k.as_str(), "project" | "issuetype" | "labels");
-            if errors.is_some_and(|e| e.keys().any(setting)) {
-                Blame::Channel
-            } else {
-                Blame::Alert
+            let from_alert = |k: &String| matches!(k.as_str(), "summary" | "description");
+            match body["errors"].as_object() {
+                Some(e) if !e.is_empty() && e.keys().all(from_alert) => Blame::Alert,
+                _ => Blame::Channel,
             }
         }
-        // A deleted chat, or a bot removed from it.
+        // A deleted chat, a bot removed from it, or a group that became a
+        // supergroup (its chat_id changed).
         ChannelConfig::Telegram(_)
             if bad_request
-                && body["description"]
+                && (body["description"]
                     .as_str()
-                    .is_some_and(|d| d.contains("chat not found")) =>
+                    .is_some_and(|d| d.contains("chat not found"))
+                    || body["parameters"]["migrate_to_chat_id"].is_i64()) =>
         {
             Blame::Channel
         }
@@ -686,7 +698,7 @@ async fn send_http(
             why: format!("{status}"),
         };
     }
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let body = capped_json(resp, 64 * 1024).await;
     match blame(status, &body) {
         Blame::Alert => Outcome::Rejected(format!("{status}")),
         Blame::Channel => Outcome::Hold(format!(

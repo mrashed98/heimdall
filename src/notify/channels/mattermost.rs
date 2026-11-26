@@ -96,7 +96,8 @@ pub fn render(a: &Alert) -> Value {
     let mut attachment = json!({
         "fallback": no_mentions(&title),
         "color": color(a.severity),
-        "title": escape(&title),
+        // Escaped after cutting, then cut again: escapes lengthen it.
+        "title": truncate(&escape(&title), 250),
         "text": join_capped(&lines, TEXT_CHARS, "…"),
         "fields": fields,
         "footer": "Heimdall",
