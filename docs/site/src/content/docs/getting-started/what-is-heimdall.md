@@ -38,8 +38,9 @@ makes different trade-offs for small clusters:
 |---|---|---|
 | Aim | Component analysis for large organisations | A watcher for small clusters |
 | Releases and end of support | Not the focus | First-class: major releases, fixes for CVEs you have, end-of-support dates |
-| Footprint | A Java server and a web UI | One Rust binary, one Deployment, external Postgres |
-| Interface | Web UI | CLI and HTTP API (a web UI is planned for a later phase) |
+| Footprint | A Java API server (2 GB RAM and 2 cores minimum) and a front end | One Rust binary (256 MB target, 1 GB cap) and Postgres |
+| Install | Docker, Docker Compose | Helm, Docker Compose, a static binary with systemd |
+| Interface | Web UI | Web console, CLI and HTTP API |
 | CI gate | Upload, then poll for the result | One synchronous call, answered within 60 seconds |
 
 Heimdall is a clean-room implementation: Dependency-Track is a reference for
@@ -61,9 +62,9 @@ Heimdall is built to fit a small, shared cluster:
 
 ## What Heimdall does not do (yet)
 
-Phase 1 is a backend and a CLI. There is no web UI, no multi-tenant or SSO
-support, no license compliance and no policy engine beyond the severity gate.
-Teams is the only notifier.
+Heimdall has no multi-tenancy (one instance, one organisation, with realms
+inside it), no license compliance and no policy engine beyond the severity
+gate. License tracking and policies are planned.
 
 ## Next steps
 

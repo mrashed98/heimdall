@@ -36,6 +36,7 @@ export default defineConfig({
             { slug: 'getting-started/what-is-heimdall' },
             { slug: 'getting-started/quick-start' },
             { slug: 'getting-started/kubernetes' },
+            { slug: 'getting-started/without-kubernetes' },
           ],
         },
         {

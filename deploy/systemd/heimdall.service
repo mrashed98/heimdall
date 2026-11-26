@@ -1,0 +1,48 @@
+# Heimdall server as a systemd service. See the "Install without Kubernetes"
+# guide. Expects /usr/local/bin/heimdall, /etc/heimdall/heimdall.yaml and
+# /etc/heimdall/heimdall.env (DATABASE_URL and the other variables).
+[Unit]
+Description=Heimdall dependency, vulnerability and release tracker
+Documentation=https://mrashed98.github.io/heimdall/
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+ExecStart=/usr/local/bin/heimdall serve /etc/heimdall/heimdall.yaml
+EnvironmentFile=/etc/heimdall/heimdall.env
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5
+# Time to finish in-flight requests on stop (a CI gate call can take up
+# to 60 s).
+TimeoutStopSec=75
+MemoryMax=1G
+CPUQuota=100%
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
