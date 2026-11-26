@@ -22,4 +22,5 @@ CREATE TABLE service_daily (
     PRIMARY KEY (service_id, day)
 );
 -- Retention deletes by day alone.
+CREATE INDEX realm_daily_day_idx ON realm_daily (day);
 CREATE INDEX service_daily_day_idx ON service_daily (day);

@@ -4,12 +4,12 @@
  let { realms, serviceId }: {realms:string[], serviceId:number|null} = $props();
  type Row = {id:number,name:string,realm:string,critical:number,high:number,medium:number,low:number,unknown:number};
  type Detail = {purl?:string,version?:string,source?:string,digest?:string,image?:string,ref_id?:string,kind?:string,severity?:string,opened_at?:string};
- let info=$state<{name:string,realm:string}|null>(null), trend=$state<TrendRow[]|null>(null);
+ let info=$state<{name:string,realm:string}|null>(null), trend=$state<TrendRow[]|null>(null), trendFailed=$state(false);
  let spark=$derived(trend ? dailySeries(trend,90).map(d=>({day:d.day,value:d.critical===null ? null : d.critical+(d.high ?? 0)})) : []);
  let rows=$state<Row[]>([]), items=$state<Detail[]>([]), offset=$state(0), sort=$state('realm'), order=$state('asc'), section=$state('components'), loading=$state(true), failed=$state(false), revision=$state(0);
  let url=$derived(dataUrl(serviceId ? `/api/v1/ui/services/${serviceId}/${section}` : '/api/v1/ui/services',realms,offset,sort,order));
  $effect(()=>{realms.join(','); serviceId; offset=0; section='components'; sort=serviceId?'purl':'realm'; order='asc';});
- $effect(()=>{const id=serviceId; const rs=realms.join(','); info=null; if(!id)return; let active=true; api<{name:string,realm:string}[]>(dataUrl(`/api/v1/ui/services/${id}/info`,rs ? rs.split(',') : [],0,'name','asc')).catch(()=>null).then(data=>{if(active)info=data?.[0] ?? null;}); trend=null; api<TrendRow[]>(`/api/v1/services/${id}/trend?days=90${rs ? '&realms='+encodeURIComponent(rs) : ''}`).catch(()=>null).then(data=>{if(active)trend=data;}); return ()=>{active=false};});
+ $effect(()=>{const id=serviceId; const rs=realms.join(','); info=null; if(!id)return; let active=true; api<{name:string,realm:string}[]>(dataUrl(`/api/v1/ui/services/${id}/info`,rs ? rs.split(',') : [],0,'name','asc')).catch(()=>null).then(data=>{if(active)info=data?.[0] ?? null;}); trend=null; trendFailed=false; api<TrendRow[]>(`/api/v1/services/${id}/trend?days=90${rs ? '&realms='+encodeURIComponent(rs) : ''}`).catch(()=>null).then(data=>{if(active){trend=data; trendFailed=data===null;}}); return ()=>{active=false};});
  $effect(()=>{const target=url; revision; let active=true;loading=true;failed=false;api<Row[]|Detail[]>(target).then(data=>{if(active){if(serviceId) items=data as Detail[];else rows=data as Row[];loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}});return ()=>{active=false};});
  function changeSort(field:string){[sort,order]=nextSort(sort,order,field);offset=0;}
  function sortState(field:string):'ascending'|'descending'|'none'{return sort===field?(order==='asc'?'ascending':'descending'):'none';}
@@ -17,7 +17,7 @@
 </script>
 <div class="page">
  {#if serviceId}<a class="back" href={'/services'+location.search}>← All services</a><h2>{info ? info.name : 'Service inventory'}{#if info}<span class="realm"> · {info.realm}</span>{/if}</h2>
-  {#if spark.some(p=>p.value!==null)}<div class="spark"><span>Open critical + high, 90 days</span><TrendChart compact label="Open critical and high findings" color="var(--sev-high)" points={spark}/></div>{/if}
+  {#if trendFailed}<p class="spark">Trend data could not be loaded.</p>{:else if spark.some(p=>p.value!==null)}<div class="spark"><span>Open critical + high, 90 days</span><TrendChart compact label="Open critical and high findings" color="var(--sev-high)" points={spark}/></div>{/if}
   <Tabs label="Service inventory sections" current={section} change={selectSection} items={[{id:'components',label:'Components'},{id:'images',label:'Images'},{id:'findings',label:'Findings'}]} />{/if}
  {#if !serviceId}<ComponentSearch {realms}/>{/if}
  <Panel flush>
