@@ -312,9 +312,10 @@ fn client_errors_blame_the_channel_or_the_alert() {
         )),
         Blame::Channel
     );
+    // A message with no field is about this issue's content.
     assert_eq!(
-        jira_400(json!({"errorMessages": ["no permission"], "errors": {}})),
-        Blame::Channel
+        jira_400(json!({"errorMessages": ["invalid characters"], "errors": {}})),
+        Blame::Alert
     );
     assert_eq!(jira_400(Value::Null), Blame::Channel);
     let tg = ch(every[4]);
@@ -538,4 +539,68 @@ fn mattermost_title_stays_within_its_limit() {
         att["title"].as_str().unwrap().chars().count() <= 250,
         "{att}"
     );
+}
+
+/// A Jira 400 too long to read (over 64 KB) can't say which field it
+/// refused, so the issue stays queued instead of being judged on a guess.
+#[sqlx::test(migrations = "./migrations")]
+async fn oversized_jira_refusal_keeps_the_issue_queued(pool: PgPool) {
+    let server = MockServer::start().await;
+    let huge = json!({"errors": {"summary": "x".repeat(100 * 1024)}});
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(huge))
+        .mount(&server)
+        .await;
+    std::env::set_var("CH_JIRA_HUGE", "t");
+    let c = cfg(&format!(
+        "realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: '{}', project: SEC, \
+         token_env: CH_JIRA_HUGE, min_severity: high}}\n",
+        server.uri()
+    ));
+    let id = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
+    assert_eq!(drain(&pool, &c).await.retry, 1);
+    assert!(row(&pool, id).await.sent_at.is_none());
+}
+
+/// A refused issue's reason carries Jira's message.
+#[sqlx::test(migrations = "./migrations")]
+async fn jira_refusal_reason_names_the_field(pool: PgPool) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"errors": {"description": "The entered text is too long."}})),
+        )
+        .mount(&server)
+        .await;
+    std::env::set_var("CH_JIRA_REASON", "jira-reason-TOKEN");
+    let c = cfg(&format!(
+        "realms: [prod]\nchannels:\n  - {{type: jira, name: j, url: '{}', project: SEC, \
+         token_env: CH_JIRA_REASON, min_severity: high}}\n",
+        server.uri()
+    ));
+    let id = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
+    assert_eq!(drain(&pool, &c).await.failed, 1);
+    let err: String = sqlx::query_scalar("SELECT last_error FROM outbox WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        err.contains("description: The entered text is too long."),
+        "{err}"
+    );
+}
+
+/// Cutting a long title never splits an escape into a stray backslash.
+#[test]
+fn mattermost_title_never_ends_in_a_lone_backslash() {
+    let mut a = vuln_alert();
+    a.title = format!("{}_x{}", "a".repeat(248), "b".repeat(20));
+    let title = mattermost::render(&a)["attachments"][0]["title"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(title.chars().count() <= 250, "{title}");
+    assert!(!title.ends_with("\\…"), "{title}");
 }

@@ -525,23 +525,33 @@ async fn jira_issue_exists(
             }
             _ => {}
         }
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let Some(body) = capped_json(resp).await else {
+            return Err(retry(
+                "searching Jira for an earlier attempt: the answer was cut off".to_string(),
+            ));
+        };
         return Ok(body["issues"].as_array().is_some_and(|i| !i.is_empty()));
     }
     Err(hold("Jira has no search API at this URL".to_string()))
 }
 
-/// The body of `resp` as JSON, reading at most `max` bytes: an error body
-/// only needs to say which field was refused. Null when longer or not JSON.
-async fn capped_json(mut resp: reqwest::Response, max: usize) -> Value {
+/// The largest response body read: an error or search body only needs to
+/// say which field was refused, or how long to wait.
+const MAX_BODY: usize = 64 * 1024;
+
+/// The body of `resp` as JSON, reading at most `MAX_BODY` bytes: Null when
+/// longer or not JSON. `None` when the connection failed mid-body, so the
+/// caller retries instead of judging a partial answer.
+async fn capped_json(mut resp: reqwest::Response) -> Option<Value> {
     let mut buf = Vec::new();
-    while let Ok(Some(chunk)) = resp.chunk().await {
-        if buf.len() + chunk.len() > max {
-            return Value::Null;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) if buf.len() + chunk.len() > MAX_BODY => return Some(Value::Null),
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => return Some(serde_json::from_slice(&buf).unwrap_or(Value::Null)),
+            Err(_) => return None,
         }
-        buf.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&buf).unwrap_or(Value::Null)
 }
 
 /// A client that connects only to `addrs` for `url`'s host and never follows
@@ -569,6 +579,22 @@ pub(crate) enum Blame {
     Channel,
 }
 
+/// What a refusal body says, for the reason shown in the console: Jira's
+/// messages and refused fields, or Telegram's description. At most 300
+/// characters; `attempt` scrubs secrets from it.
+fn refusal(body: &Value) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for m in body["errorMessages"].as_array().into_iter().flatten() {
+        parts.extend(m.as_str().map(str::to_string));
+    }
+    for (k, v) in body["errors"].as_object().into_iter().flatten() {
+        parts.push(format!("{k}: {}", v.as_str().unwrap_or_default()));
+    }
+    parts.extend(body["description"].as_str().map(str::to_string));
+    let joined = parts.join("; ");
+    (!joined.is_empty()).then(|| joined.chars().take(300).collect())
+}
+
 /// Who a client error from `ch` blames, given the response body (JSON, or
 /// null). Every channel type decides here, with no catch-all arm: a new type
 /// must choose, because dropping an alert for a channel's mistake loses it
@@ -581,13 +607,25 @@ pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode, body: &Value) -> Bla
     let bad_request = status == StatusCode::BAD_REQUEST;
     match ch {
         // Jira names the fields it refused. Heimdall fills only the summary
-        // and the description from the alert; every other field (the
-        // project, issue type, labels, or a field the project requires) is
-        // the channel's setup, and so is a refusal that names no field.
+        // and the description from the alert; any other field (the project,
+        // issue type, labels, or a field the project requires) is the
+        // channel's setup. A refusal with only a message and no field is
+        // about this issue's content. A body Jira didn't send (unreadable,
+        // too long) can't say, so the queue is held rather than lose it.
         ChannelConfig::Jira(_) if bad_request => {
             let from_alert = |k: &String| matches!(k.as_str(), "summary" | "description");
+            let messages = body["errorMessages"]
+                .as_array()
+                .is_some_and(|m| !m.is_empty());
             match body["errors"].as_object() {
-                Some(e) if !e.is_empty() && e.keys().all(from_alert) => Blame::Alert,
+                Some(e) if !e.is_empty() => {
+                    if e.keys().all(from_alert) {
+                        Blame::Alert
+                    } else {
+                        Blame::Channel
+                    }
+                }
+                _ if messages => Blame::Alert,
                 _ => Blame::Channel,
             }
         }
@@ -684,7 +722,7 @@ async fn send_http(
         let retry_after = match header {
             Some(s) => Some(s),
             None if status == StatusCode::TOO_MANY_REQUESTS => {
-                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let body = capped_json(resp).await.unwrap_or(Value::Null);
                 body["retry_after"]
                     .as_f64()
                     .or(body["parameters"]["retry_after"].as_f64())
@@ -698,9 +736,17 @@ async fn send_http(
             why: format!("{status}"),
         };
     }
-    let body = capped_json(resp, 64 * 1024).await;
+    let Some(body) = capped_json(resp).await else {
+        return Outcome::Retry {
+            retry_after_secs: None,
+            why: format!("{status}, and the connection failed while reading the answer"),
+        };
+    };
     match blame(status, &body) {
-        Blame::Alert => Outcome::Rejected(format!("{status}")),
+        Blame::Alert => Outcome::Rejected(match refusal(&body) {
+            Some(why) => format!("{status}: {why}"),
+            None => format!("{status}"),
+        }),
         Blame::Channel => Outcome::Hold(format!(
             "{status}: check the channel's settings, credentials and permissions"
         )),

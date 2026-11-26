@@ -55,6 +55,21 @@ pub(crate) fn no_mentions(s: &str) -> String {
     out
 }
 
+/// `title` escaped, cut so the escaped text fits in `max` characters without
+/// splitting an escape (which would leave a stray backslash).
+fn escaped_title(title: &str, max: usize) -> String {
+    let mut keep = title.chars().count();
+    loop {
+        let cut: String = title.chars().take(keep).collect();
+        let more = keep < title.chars().count();
+        let esc = escape(&cut) + if more { "…" } else { "" };
+        if esc.chars().count() <= max || keep == 0 {
+            return esc;
+        }
+        keep -= 1;
+    }
+}
+
 pub(crate) const MARKUP: Markup = Markup { escape, bold, link };
 
 /// Attachment colour by severity.
@@ -96,8 +111,7 @@ pub fn render(a: &Alert) -> Value {
     let mut attachment = json!({
         "fallback": no_mentions(&title),
         "color": color(a.severity),
-        // Escaped after cutting, then cut again: escapes lengthen it.
-        "title": truncate(&escape(&title), 250),
+        "title": escaped_title(&a.title, 250),
         "text": join_capped(&lines, TEXT_CHARS, "…"),
         "fields": fields,
         "footer": "Heimdall",

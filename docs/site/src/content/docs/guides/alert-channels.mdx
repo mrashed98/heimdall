@@ -319,14 +319,16 @@ Each issue gets the label `heimdall`, `severity-<level>` for a finding, and a
 random `heimdall-q-<id>` given when it is queued, which lets Heimdall see on a
 retry that an earlier attempt already created it (it searches for that label
 first). The project and issue type are read when the issue is
-created, so changing them also moves issues still in the queue. The weekly
+created, so changing them also moves issues still in the queue (except one
+an earlier, timed-out attempt already created: that one stays where it is). The weekly
 digest is off by default (it would open an issue every week); set
 `digest: true` to have it. The account needs permission to create issues in
 the project, and the create screen needs the Labels field. A 401 or 403, or
 a 400 about any field but the summary or description (the project, the issue
 type, labels, or a field the project requires that Heimdall doesn't fill),
 keeps the issues queued until that is fixed. A 400 about the summary or
-description, such as one too long, drops that issue only.
+description, or that names no field but only gives a message, drops that
+issue only, with Jira's message shown as the reason.
 
 ## Managing channels in the console
 
