@@ -49,13 +49,25 @@ struct DockerScan {
     realm: String,
 }
 
-/// The configured in-process Docker scan (the config was validated).
+/// The configured in-process Docker scan. The config was validated, so a
+/// failure here is a bug; it is logged, never silently ignored.
 fn docker_scan(cfg: &HeimdallConfig) -> Option<DockerScan> {
     let d = cfg.sight.docker.as_ref()?;
+    let host = match d.host.parse() {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("sight.docker.host: {e}; Sight for Docker is off");
+            return None;
+        }
+    };
+    let Some(realm) = cfg.docker_realm() else {
+        tracing::error!("sight.docker has no realm; Sight for Docker is off");
+        return None;
+    };
     Some(DockerScan {
-        host: d.host.parse().ok()?,
+        host,
         name: d.name.clone(),
-        realm: cfg.docker_realm()?.to_string(),
+        realm: realm.to_string(),
     })
 }
 
@@ -349,7 +361,7 @@ async fn docker_once(st: &AppState, d: &DockerScan) -> anyhow::Result<()> {
         removed = out.removed,
         "docker sight ran"
     );
-    record_sync(st, "sight").await?;
+    record_sync(st, "sight-docker").await?;
     Ok(())
 }
 

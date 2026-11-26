@@ -230,6 +230,7 @@ async fn ingest_cluster(
         "services": out.services,
         "added": out.added,
         "removed": out.removed,
+        "skipped": out.skipped,
     })))
 }
 
@@ -239,6 +240,9 @@ pub struct ClusterOutcome {
     pub services: usize,
     pub added: usize,
     pub removed: usize,
+    /// Reported services another origin (the cluster, another Docker host)
+    /// already holds: left alone, and logged.
+    pub skipped: usize,
 }
 
 /// The cluster ingest itself, shared by `/ingest/cluster` and Sight's
@@ -256,16 +260,22 @@ pub async fn ingest_cluster_inner(
     allow_empty: bool,
 ) -> Result<ClusterOutcome, ApiError> {
     check_realm(state, &inv.realm)?;
-    let origin = inv.origin.as_deref().unwrap_or("");
-    if !origin.is_empty()
-        && (!origin.starts_with("docker:")
-            || origin.len() > 200
-            || origin.chars().any(char::is_control))
-    {
-        return Err(ApiError::BadRequest(
-            "origin must be `docker:<host>` (at most 200 characters)".into(),
-        ));
-    }
+    let origin = match inv.origin.as_deref() {
+        None => "",
+        Some(o) => {
+            let host = o.strip_prefix("docker:").unwrap_or_default();
+            if host.trim().is_empty()
+                || host.contains('/')
+                || o.len() > 200
+                || o.chars().any(char::is_control)
+            {
+                return Err(ApiError::BadRequest(
+                    "origin must be `docker:<id>` (no `/`, at most 200 characters)".into(),
+                ));
+            }
+            o
+        }
+    };
     if inv.services.is_empty() && !allow_empty {
         return Err(ApiError::BadRequest(
             "empty cluster inventory: no services (pass allow_empty=true to accept it)".into(),
@@ -275,8 +285,28 @@ pub async fn ingest_cluster_inner(
 
     let mut added = 0;
     let mut removed = 0;
+    let mut skipped = 0;
     let mut listed: HashSet<String> = HashSet::new();
     for svc in &inv.services {
+        // A name another origin still reports (it has cluster rows) is
+        // theirs: taking it over would swap its components, and their sweep
+        // could then never empty it.
+        let owner: Option<String> = sqlx::query_scalar(
+            "SELECT s.origin FROM services s WHERE s.realm = $1 AND s.name = $2 \
+             AND s.origin <> $3 AND EXISTS (SELECT 1 FROM service_components sc \
+             WHERE sc.service_id = s.id AND sc.source = 'cluster')",
+        )
+        .bind(&inv.realm)
+        .bind(&svc.name)
+        .bind(origin)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(owner) = owner {
+            tracing::warn!(realm = %inv.realm, service = %svc.name, owner = %owner, origin = %origin,
+                "a service with this name is reported by another origin; skipped (give the Docker host a unique name)");
+            skipped += 1;
+            continue;
+        }
         listed.insert(svc.name.clone());
         let items: Vec<InventoryItem> = svc
             .items
@@ -320,9 +350,10 @@ pub async fn ingest_cluster_inner(
     tx.commit().await?;
 
     Ok(ClusterOutcome {
-        services: inv.services.len(),
+        services: inv.services.len() - skipped,
         added,
         removed,
+        skipped,
     })
 }
 
@@ -886,12 +917,53 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn origin_must_be_a_docker_host(pool: PgPool) {
         let (_, _, _, st) = setup_with_state(pool).await;
-        for bad in ["k8s:x", "docker:a\nb"] {
+        for bad in [
+            "k8s:x",
+            "docker:a\nb",
+            "docker:",
+            "docker: ",
+            "docker:a/b",
+            "",
+        ] {
             let err =
                 ingest_cluster_inner(&st, &inv(Some(bad), &[("x", "pkg:generic/a@1")]), false)
                     .await
                     .unwrap_err();
             assert!(matches!(err, ApiError::BadRequest(_)), "{bad}: {err:?}");
         }
+    }
+
+    /// A name another origin still holds is skipped, not taken over: the
+    /// cluster's `api` keeps its components when a Docker host reports `api`.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_name_another_origin_holds_is_skipped(pool: PgPool) {
+        let (_, _, pool, st) = setup_with_state(pool).await;
+        ingest_cluster_inner(&st, &inv(None, &[("api", "pkg:generic/a@1")]), false)
+            .await
+            .unwrap();
+        let out = ingest_cluster_inner(
+            &st,
+            &inv(
+                Some("docker:E"),
+                &[("api", "pkg:generic/x@9"), ("vm/web", "pkg:generic/b@1")],
+            ),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!((out.services, out.skipped), (1, 1));
+        let api: Vec<String> = sqlx::query_scalar(
+            "SELECT c.purl FROM services s JOIN service_components sc ON sc.service_id = s.id \
+             JOIN components c ON c.id = sc.component_id WHERE s.name = 'api'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(api, ["pkg:generic/a@1"]);
+        let origin: String = sqlx::query_scalar("SELECT origin FROM services WHERE name = 'api'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(origin, "");
     }
 }

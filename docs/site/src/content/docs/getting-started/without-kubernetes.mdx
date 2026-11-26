@@ -44,16 +44,22 @@ Sight for Docker lists a Docker host's running containers and reports them
 like Sight reports a cluster:
 
 - Each container is a service named `<host>/<name>`. The name is the
-  container's `heimdall.service` label, else its Compose service, else the
-  container name.
+  container's `heimdall.service` label, else `<project>-<service>` from its
+  Compose labels, else the container name. `<host>` is the name Docker
+  reports, or `sight.docker.name` / `--docker-name`.
 - Its image is a component, so its advisories and new releases are found
   like a pod's. An image pulled from a registry (it has a registry digest)
   is also queued for the SBOM scanner; a locally built one is not.
 - The host's OS (Ubuntu or Debian) is a component of the service `<host>`.
 
-A host's scan replaces that host's services only: a realm can hold a
-cluster and any number of Docker hosts. Heimdall only reads from Docker
-(`GET /info`, `/containers/json` and `/images/{id}/json`).
+A host is identified by its Docker engine ID, not its name. A scan replaces
+that daemon's services only, so a realm can hold a cluster and any number of
+Docker hosts, and renaming a host empties its services under the old name.
+A service name another source already holds (the cluster, or another host
+with the same hostname) is skipped and logged, not taken over: give hosts
+that share a hostname their own `name`. Heimdall only reads from Docker
+(`GET /info`, `/containers/json` and `/images/{id}/json`). The Overview's
+feed health shows **Sight for Docker** with its last successful scan.
 
 <Aside type="caution" title="The Docker socket">
 Access to the Docker socket is root on the host. Give Heimdall a read-only
@@ -93,9 +99,9 @@ ingest key:
 heimdall sight --docker --realm prod --push https://heimdall.example.com
 ```
 
-The images it finds can be scanned for SBOMs with `heimdall scan-images`
-(it needs `syft` and access to the registries), on a schedule of your
-choice.
+The images it finds can be scanned for SBOMs with `heimdall scan-images`, on
+a schedule of your choice. It needs `syft`, access to the registries, and
+`HEIMDALL_URL` and `HEIMDALL_API_KEY` (an ingest key), like the CLI.
 
 ## Docker Compose
 

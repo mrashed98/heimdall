@@ -156,10 +156,12 @@ struct SightArgs {
     /// Read a Docker host's running containers instead of a cluster
     #[arg(long)]
     docker: bool,
-    /// Docker Engine API: unix:///path or tcp://host:port
-    #[arg(long, default_value = heimdall::inventory::docker::DEFAULT_HOST)]
-    docker_host: String,
-    /// The host's name in service names (default: the name Docker reports)
+    /// Docker Engine API: unix:///path or tcp://host:port (default: the
+    /// config's sight.docker.host in-process, else the local socket)
+    #[arg(long)]
+    docker_host: Option<String>,
+    /// The host's name in service names (default: the config's
+    /// sight.docker.name in-process, else the name Docker reports)
     #[arg(long)]
     docker_name: Option<String>,
 }
@@ -449,18 +451,28 @@ async fn docker_sight(
 ) -> anyhow::Result<heimdall::ingest::api::ClusterOutcome> {
     use anyhow::Context;
     use heimdall::inventory::docker;
-    if args
+    // In-process, the config's sight.docker fills what the flags leave out,
+    // so a run by hand reports the host under the same name as the server.
+    let configured = state.and_then(|s| s.cfg.sight.docker.as_ref());
+    let name = args
         .docker_name
-        .as_deref()
-        .is_some_and(|n| n.trim().is_empty() || n.contains('/'))
-    {
-        anyhow::bail!("--docker-name must not be empty or contain `/`");
+        .clone()
+        .or_else(|| configured.and_then(|d| d.name.clone()));
+    if name.as_deref().is_some_and(|n| {
+        n.trim().is_empty() || n.contains('/') || n.len() > 100 || n.chars().any(char::is_control)
+    }) {
+        anyhow::bail!(
+            "--docker-name must be 1 to 100 characters, without `/` or control characters"
+        );
     }
     let host: docker::DockerHost = args
         .docker_host
+        .clone()
+        .or_else(|| configured.map(|d| d.host.clone()))
+        .unwrap_or_else(|| docker::DEFAULT_HOST.to_string())
         .parse()
         .map_err(|e: String| anyhow::anyhow!("--docker-host: {e}"))?;
-    let inv = docker::scan(&host, &args.realm, args.docker_name.as_deref()).await?;
+    let inv = docker::scan(&host, &args.realm, name.as_deref()).await?;
     match (args.push.as_deref(), state) {
         (Some(url), _) => {
             let key = std::env::var("HEIMDALL_API_KEY").context("HEIMDALL_API_KEY is not set")?;
@@ -473,6 +485,7 @@ async fn docker_sight(
                 services: n("services"),
                 added: n("added"),
                 removed: n("removed"),
+                skipped: n("skipped"),
             })
         }
         (None, Some(st)) => heimdall::ingest::api::ingest_cluster_inner(st, &inv, true)
@@ -504,10 +517,16 @@ async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
     } else {
         sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?
     };
-    let msg = format!(
+    let mut msg = format!(
         "sight: {} services, {} components added, {} removed",
         out.services, out.added, out.removed
     );
+    if out.skipped > 0 {
+        msg.push_str(&format!(
+            ", {} skipped (another source holds their names)",
+            out.skipped
+        ));
+    }
     print!("{}", render::ok_line(style, &msg));
     Ok(())
 }

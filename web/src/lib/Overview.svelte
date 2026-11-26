@@ -72,7 +72,7 @@
         {:else}<p class="pad muted">No releases recorded yet.</p>{/if}
       </Panel>
       <Panel title="Feed health" flush>
-        <ul class="kv">{#each [['osv', 'OSV'], ['nvd', 'NVD'], ['k8s', 'Kubernetes feed'], ['epss', 'EPSS'], ['sight', 'Sight (cluster inventory)']] as [id, label]}<li><span><span class="dot" class:fresh={!!status.sync[id]}></span>{label}</span><span class="muted small">{date(status.sync[id] ?? null)}</span></li>{/each}</ul>
+        <ul class="kv">{#each [['osv', 'OSV'], ['nvd', 'NVD'], ['k8s', 'Kubernetes feed'], ['epss', 'EPSS'], ['sight', 'Sight (cluster inventory)'], ['sight-docker', 'Sight for Docker']].filter(([id]) => id !== 'sight-docker' || id in (status?.sync ?? {})) as [id, label]}<li><span><span class="dot" class:fresh={!!status.sync[id]}></span>{label}</span><span class="muted small">{date(status.sync[id] ?? null)}</span></li>{/each}</ul>
       </Panel>
       <Panel title="End of life" flush>
         {#if status.eol.length}<ul class="kv">{#each status.eol as w}<li><strong>{typeof w.details.target === 'string' ? w.details.target : (w.ref_id ?? 'End-of-life warning')}</strong><span class="muted small">{w.realm}{w.service ? ` / ${w.service}` : ''}{typeof w.details.eol === 'string' ? ` · ${w.details.eol}` : ''}</span></li>{/each}</ul>

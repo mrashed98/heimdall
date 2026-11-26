@@ -2,11 +2,13 @@
 //! API, as the same inventory Sight sends for a cluster.
 //!
 //! Each running container is a service named `<host>/<name>`, where the
-//! name is the `heimdall.service` label, else the Compose service, else the
-//! container name. Its image is a component, and the host's OS is one too,
-//! under the service `<host>`. The inventory carries the origin
-//! `docker:<host>`, so ingesting it replaces this host's services only: a
-//! realm can hold a cluster and any number of Docker hosts.
+//! name is the `heimdall.service` label, else `<project>-<service>` from
+//! Compose, else the container name. Its image is a component, and the
+//! host's OS is one too, under the service `<host>`. The inventory carries
+//! the origin `docker:<engine ID>`: stable across renames and unique per
+//! daemon, so ingesting it replaces this daemon's services only, and a realm
+//! can hold a cluster and any number of Docker hosts. `<host>` is only for
+//! display: the name Docker reports, or the configured one.
 //!
 //! Only GET requests are made: `/info`, `/containers/json` and
 //! `/images/{id}/json`. A socket proxy that allows just those is enough.
@@ -26,8 +28,36 @@ use crate::ingest::api::ClusterInventory;
 pub const DEFAULT_HOST: &str = "unix:///var/run/docker.sock";
 /// The longest any one API call may take.
 const TIMEOUT: Duration = Duration::from_secs(30);
-/// The largest response read from the Docker socket.
+/// The largest response read from the Docker API.
 const MAX_BODY: usize = 32 * 1024 * 1024;
+
+/// The Docker API answered 404: the object (an image removed after its
+/// container started) no longer exists.
+#[derive(Debug)]
+pub struct NotFound;
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("not found")
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+/// One client for every HTTP Docker host: no proxy from the environment (a
+/// socket proxy sits on a private network) and no redirects (only the
+/// listed API paths are read).
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(TIMEOUT)
+            .build()
+            .expect("a plain HTTP client builds")
+    })
+}
 
 /// Where the Docker Engine API is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,22 +93,36 @@ impl std::str::FromStr for DockerHost {
 impl DockerHost {
     /// GET `path` and parse the JSON body.
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
+        // Paths are built here from fixed text and validated ids; anything
+        // else (a space, a line break) could smuggle a second request.
+        if !path.starts_with('/') || !path.bytes().all(|b| b.is_ascii_graphic()) {
+            bail!("refusing an unexpected Docker API path");
+        }
         let body = match self {
             DockerHost::Unix(sock) => tokio::time::timeout(TIMEOUT, unix_get(sock, path))
                 .await
                 .with_context(|| format!("GET {path} timed out"))??,
             DockerHost::Http(base) => {
-                let resp = reqwest::Client::new()
+                let mut resp = http_client()
                     .get(format!("{base}{path}"))
-                    .timeout(TIMEOUT)
                     .send()
                     .await
                     .with_context(|| format!("GET {path}"))?;
                 let status = resp.status();
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    return Err(anyhow::Error::new(NotFound).context(format!("GET {path}")));
+                }
                 if !status.is_success() {
                     bail!("GET {path}: {status}");
                 }
-                resp.bytes().await?.to_vec()
+                let mut body = Vec::new();
+                while let Some(chunk) = resp.chunk().await? {
+                    if body.len() + chunk.len() > MAX_BODY {
+                        bail!("GET {path}: reply larger than {MAX_BODY} bytes");
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                body
             }
         };
         serde_json::from_slice(&body).with_context(|| format!("GET {path}: not the expected JSON"))
@@ -108,6 +152,9 @@ async fn unix_get(sock: &std::path::Path, path: &str) -> anyhow::Result<Vec<u8>>
         .context("reply has no header end")?;
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head.split_whitespace().nth(1).unwrap_or_default();
+    if status == "404" {
+        return Err(anyhow::Error::new(NotFound).context(format!("GET {path}")));
+    }
     if status != "200" {
         bail!("GET {path}: HTTP {status}");
     }
@@ -117,6 +164,9 @@ async fn unix_get(sock: &std::path::Path, path: &str) -> anyhow::Result<Vec<u8>>
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Info {
+    /// The engine's ID: stable across renames, unique per daemon.
+    #[serde(rename = "ID", default)]
+    pub id: String,
     pub name: String,
     #[serde(default)]
     pub operating_system: String,
@@ -160,7 +210,12 @@ pub async fn collect(host: &DockerHost) -> anyhow::Result<HostObjects> {
         if images.contains_key(&c.image_id) {
             continue;
         }
-        // An image removed after its container started has no record left.
+        if digest_of(&c.image_id).as_deref() != Some(c.image_id.as_str()) {
+            bail!("container image id is not a sha256 digest");
+        }
+        // An image removed after its container started has no record left
+        // (404); any other failure fails the scan rather than report the
+        // host without its images' digests.
         match host
             .get::<Image>(&format!("/images/{}/json", c.image_id))
             .await
@@ -168,7 +223,10 @@ pub async fn collect(host: &DockerHost) -> anyhow::Result<HostObjects> {
             Ok(img) => {
                 images.insert(c.image_id.clone(), img);
             }
-            Err(e) => tracing::warn!(image = %c.image_id, "docker image not readable: {e:#}"),
+            Err(e) if e.downcast_ref::<NotFound>().is_some() => {
+                tracing::warn!(image = %c.image_id, "docker image no longer exists; reported without its digest")
+            }
+            Err(e) => return Err(e),
         }
     }
     Ok(HostObjects {
@@ -178,9 +236,15 @@ pub async fn collect(host: &DockerHost) -> anyhow::Result<HostObjects> {
     })
 }
 
-/// The origin a host's inventory carries.
-pub fn origin(host_name: &str) -> String {
-    format!("docker:{host_name}")
+/// The origin a daemon's inventory carries: its engine ID (the reported
+/// name only if the engine gives no ID).
+pub fn origin(info: &Info) -> String {
+    let id = if info.id.trim().is_empty() {
+        &info.name
+    } else {
+        &info.id
+    };
+    format!("docker:{}", id.trim())
 }
 
 /// A container's service name, before the host prefix.
@@ -190,7 +254,11 @@ fn service_name(c: &Container) -> String {
         return s.trim().to_string();
     }
     if let Some(s) = label("com.docker.compose.service") {
-        return s.trim().to_string();
+        // Two projects on one host may both have a `web`.
+        return match label("com.docker.compose.project") {
+            Some(p) => format!("{}-{}", p.trim(), s.trim()),
+            None => s.trim().to_string(),
+        };
     }
     c.names
         .first()
@@ -200,16 +268,9 @@ fn service_name(c: &Container) -> String {
 }
 
 /// The image of `c` as Sight reports images: the reference with its tag,
-/// and the manifest digest (pullable) when a registry digest is known, else
-/// the local image id (not pullable).
+/// and the manifest digest (pullable) when a registry digest of that same
+/// repository is known, else the local image id (not pullable).
 fn container_image(c: &Container, img: Option<&Image>) -> PodImage {
-    // Started by id (`sha256:...`): name it after a tag the image has.
-    let reference = if digest_of(&c.image).is_some() && !c.image.contains('@') {
-        img.and_then(|i| i.repo_tags.first().cloned())
-            .unwrap_or_else(|| c.image.clone())
-    } else {
-        c.image.clone()
-    };
     let repo = |r: &str| {
         let no_digest = r.split('@').next().unwrap_or(r);
         match no_digest.rsplit_once(':') {
@@ -217,14 +278,31 @@ fn container_image(c: &Container, img: Option<&Image>) -> PodImage {
             _ => no_digest.to_string(),
         }
     };
-    let want = repo(&reference);
     let digests = img.map(|i| i.repo_digests.as_slice()).unwrap_or_default();
-    // The registry digest of the repository the container names, else any.
-    let manifest = digests
-        .iter()
-        .find(|d| repo(d) == want)
-        .or_else(|| digests.first())
-        .and_then(|d| digest_of(d));
+    let tags = img.map(|i| i.repo_tags.as_slice()).unwrap_or_default();
+    // Started by id (`sha256:…` or a short hex prefix of it): no name in
+    // `c.image`, so use a tag the image has, else its registry repository.
+    let bare = c.image.trim_start_matches("sha256:");
+    let by_id = !c.image.contains(['/', ':', '@'])
+        && !bare.is_empty()
+        && bare.bytes().all(|b| b.is_ascii_hexdigit())
+        && c.image_id.trim_start_matches("sha256:").starts_with(bare)
+        || digest_of(&c.image).is_some() && !c.image.contains('@');
+    let reference = match (by_id, tags.first(), digests.first()) {
+        (false, _, _) => c.image.clone(),
+        (true, Some(tag), _) => tag.clone(),
+        (true, None, Some(d)) => repo(d),
+        (true, None, None) => c.image.clone(),
+    };
+    let want = repo(&reference);
+    // Pinned by digest in the reference: that is the manifest digest.
+    let pinned = c.image.split_once('@').and_then(|(_, d)| digest_of(d));
+    let manifest = pinned.or_else(|| {
+        digests
+            .iter()
+            .find(|d| repo(d) == want)
+            .and_then(|d| digest_of(d))
+    });
     match manifest {
         Some(digest) => PodImage {
             image: reference,
@@ -254,7 +332,7 @@ pub fn build_inventory(realm: &str, name: Option<&str>, objs: &HostObjects) -> C
     ClusterInventory {
         realm: realm.to_string(),
         services: services.finish(),
-        origin: Some(origin(&host)),
+        origin: Some(origin(&objs.info)),
     }
 }
 
@@ -276,7 +354,7 @@ mod tests {
     fn objs(containers: Value, images: Value) -> HostObjects {
         HostObjects {
             info: serde_json::from_value(
-                json!({"Name": "vm1", "OperatingSystem": "Ubuntu 24.04.1 LTS"}),
+                json!({"ID": "ENGINE-A", "Name": "vm1", "OperatingSystem": "Ubuntu 24.04.1 LTS"}),
             )
             .unwrap(),
             containers: serde_json::from_value(containers).unwrap(),
@@ -319,7 +397,8 @@ mod tests {
             }),
         );
         let inv = build_inventory("prod", None, &o);
-        assert_eq!(inv.origin.as_deref(), Some("docker:vm1"));
+        // The engine ID, not the name: stable across renames, unique per daemon.
+        assert_eq!(inv.origin.as_deref(), Some("docker:ENGINE-A"));
         let names: Vec<&str> = inv.services.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["vm1", "vm1/billing-db", "vm1/local", "vm1/web"]);
         let get = |n: &str| &inv.services.iter().find(|s| s.name == n).unwrap().items[0];
@@ -342,7 +421,7 @@ mod tests {
     fn a_name_overrides_the_docker_host_name() {
         let o = objs(json!([]), json!({}));
         let inv = build_inventory("prod", Some("edge-1"), &o);
-        assert_eq!(inv.origin.as_deref(), Some("docker:edge-1"));
+        assert_eq!(inv.origin.as_deref(), Some("docker:ENGINE-A"));
         assert_eq!(inv.services[0].name, "edge-1");
     }
 
@@ -398,6 +477,126 @@ mod tests {
             Some(D1)
         );
         let err = host.get::<Value>("/nope").await.unwrap_err();
-        assert!(format!("{err:#}").contains("404"), "{err:#}");
+        assert!(err.downcast_ref::<NotFound>().is_some(), "{err:#}");
+    }
+
+    #[test]
+    fn compose_projects_get_their_own_services() {
+        let c = |project: &str| {
+            json!({"Names": [format!("/{project}-web-1")], "Image": "nginx:1.27", "ImageID": ID,
+                   "Labels": {"com.docker.compose.service": "web", "com.docker.compose.project": project}})
+        };
+        let o = objs(
+            json!([c("shop"), c("blog")]),
+            json!({ ID: {"RepoDigests": [], "RepoTags": []} }),
+        );
+        let names: Vec<String> = build_inventory("prod", None, &o)
+            .services
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["vm1", "vm1/blog-web", "vm1/shop-web"]);
+    }
+
+    #[test]
+    fn image_references_and_digests() {
+        let img = |digests: Value, tags: Value| -> Image {
+            serde_json::from_value(json!({"RepoDigests": digests, "RepoTags": tags})).unwrap()
+        };
+        let ctr = |image: &str| -> Container {
+            serde_json::from_value(json!({"Names": ["/x"], "Image": image, "ImageID": ID})).unwrap()
+        };
+        // Started by a short id: named after the image's registry repository.
+        let i = img(json!([format!("redis@{D1}")]), json!([]));
+        let p = container_image(&ctr("999999999999"), Some(&i));
+        assert_eq!(
+            (p.image.as_str(), p.digest.as_str(), p.pullable),
+            ("redis", D1, true)
+        );
+        // Pinned by digest with no RepoDigests: the pin is the manifest.
+        let p = container_image(
+            &ctr(&format!("redis@{D2}")),
+            Some(&img(json!([]), json!([]))),
+        );
+        assert_eq!((p.digest.as_str(), p.pullable), (D2, true));
+        // Another repository's digest is never borrowed.
+        let i = img(json!([format!("other/repo@{D1}")]), json!(["redis:7"]));
+        let p = container_image(&ctr("redis:7"), Some(&i));
+        assert_eq!((p.digest.as_str(), p.pullable), (ID, false));
+    }
+
+    #[test]
+    fn hosts_with_one_name_have_different_origins() {
+        let mut a = objs(json!([]), json!({}));
+        let mut b = objs(json!([]), json!({}));
+        a.info.id = "ENGINE-A".into();
+        b.info.id = "ENGINE-B".into();
+        assert_ne!(
+            build_inventory("prod", None, &a).origin,
+            build_inventory("prod", None, &b).origin
+        );
+    }
+
+    /// A fake Docker API on a Unix socket answering `replies` by path (404
+    /// for anything else, or `status` for an image path when set).
+    async fn fake_docker(
+        replies: HashMap<String, Value>,
+        image_status: Option<&'static str>,
+    ) -> (tempfile::TempDir, DockerHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("docker.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = s.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let reply = match (replies.get(&path), image_status) {
+                    (_, Some(st)) if path.starts_with("/images/") => {
+                        format!("HTTP/1.0 {st}\r\n\r\n{{}}")
+                    }
+                    (Some(v), _) => format!("HTTP/1.0 200 OK\r\n\r\n{v}"),
+                    (None, _) => "HTTP/1.0 404 Not Found\r\n\r\n{}".to_string(),
+                };
+                s.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let host = format!("unix://{}", sock.display()).parse().unwrap();
+        (dir, host)
+    }
+
+    /// An image removed since its container started (404) is reported
+    /// without its digest; any other inspect failure fails the scan.
+    #[tokio::test]
+    async fn image_inspect_errors_fail_the_scan_but_404_does_not() {
+        let replies = HashMap::from([
+            ("/info".to_string(), json!({"ID": "E", "Name": "vm9"})),
+            (
+                "/containers/json".to_string(),
+                json!([{"Names": ["/app"], "Image": "redis:7", "ImageID": ID}]),
+            ),
+        ]);
+        let (_d, gone) = fake_docker(replies.clone(), Some("404 Not Found")).await;
+        let inv = scan(&gone, "prod", None).await.unwrap();
+        assert_eq!(inv.services[0].items[0].via_image_digest, None);
+        let (_d, broken) = fake_docker(replies, Some("500 Internal Server Error")).await;
+        let err = scan(&broken, "prod", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("500"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn paths_with_spaces_or_line_breaks_are_refused() {
+        let (_d, host) = fake_docker(HashMap::new(), None).await;
+        let err = host
+            .get::<Value>("/info HTTP/1.0\r\nX: y")
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unexpected"), "{err:#}");
     }
 }

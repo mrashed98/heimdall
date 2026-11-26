@@ -67,16 +67,18 @@ impl HeimdallConfig {
             d.host
                 .parse::<crate::inventory::docker::DockerHost>()
                 .map_err(|e| anyhow::anyhow!("sight.docker.host: {e}"))?;
-            if d.name
-                .as_deref()
-                .is_some_and(|n| n.trim().is_empty() || n.contains('/'))
-            {
-                bail!("sight.docker.name must not be empty or contain `/`");
+            if d.name.as_deref().is_some_and(|n| {
+                n.trim().is_empty()
+                    || n.contains('/')
+                    || n.len() > 100
+                    || n.chars().any(char::is_control)
+            }) {
+                bail!("sight.docker.name must be 1 to 100 characters, without `/` or control characters");
             }
-            if let Some(r) = self.docker_realm() {
-                if !self.realms.iter().any(|x| x == r) {
-                    bail!("sight.docker.realm: `{r}` is not in realms");
-                }
+            match self.docker_realm() {
+                Some(r) if self.realms.iter().any(|x| x == r) => {}
+                Some(r) => bail!("sight.docker.realm: `{r}` is not in realms"),
+                None => bail!("sight.docker needs a realm: set sight.docker.realm"),
             }
         }
         if self.digest.hour > 23 {

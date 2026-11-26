@@ -122,6 +122,7 @@ pub async fn run(
                 services: n("services"),
                 added: n("added"),
                 removed: n("removed"),
+                skipped: n("skipped"),
             })
         }
         // A real cluster always has pods (DNS, the CNI), so an empty scan is a
@@ -470,8 +471,9 @@ pub(crate) fn distro_purl(os_image: &str) -> Option<String> {
     } else {
         return None;
     };
-    let number = Regex::new(r"\d+(\.\d+)*").expect("static regex");
-    number
+    static NUMBER: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\d+(\.\d+)*").expect("static regex"));
+    NUMBER
         .find(image)
         .map(|m| format!("pkg:generic/{distro}@{}", m.as_str()))
 }
