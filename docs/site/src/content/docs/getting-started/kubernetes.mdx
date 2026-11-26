@@ -64,7 +64,7 @@ pulls by default (its `appVersion`), and the chart's own version is the same.
 
 3. **Install the chart.**
 
-   Each release publishes the chart to GHCR as an OCI chart:
+   Each release from 0.4.0 on publishes the chart to GHCR as an OCI chart:
 
    ```bash
    helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.3.2 \
@@ -75,7 +75,7 @@ pulls by default (its `appVersion`), and the chart's own version is the same.
      -f my-values.yaml
    ```
 
-   To install from a checkout instead (for example a branch), use
+   For an earlier release, or a branch, install from a checkout instead: use
    `deploy/helm/heimdall` in place of the `oci://` reference and drop
    `--version`.
 

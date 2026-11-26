@@ -64,20 +64,26 @@ of these.
 ## Releases
 
 Releases come from merges to `main` (`.github/workflows/release.yml`, with
-[release-please](https://github.com/googleapis/release-please)):
+[release-please](https://github.com/googleapis/release-please)). It needs
+*Settings → Actions → General → Allow GitHub Actions to create and approve pull
+requests* turned on (or a `RELEASE_TOKEN` secret, see the workflow) to open its
+pull request.
 
 1. Each merge updates one open pull request, `chore(release): vX.Y.Z`. Its version comes from the
    pull request titles since the last release (`feat:` bumps the minor version and `fix:` the
    patch while Heimdall is below 1.0), and it updates `CHANGELOG.md`, `Cargo.toml`,
    `Cargo.lock` and, through `scripts/release_version.py set`, the chart, the docs and the gate
    action. It also moves the notes under **Unreleased** in the docs changelog to that version.
-2. Merging that pull request tags `vX.Y.Z` and publishes the release: static Linux binaries and
+2. Merging that pull request tags `vX.Y.Z` and creates the release as a draft. Every CI check
+   runs on the tag; only if all pass are the files published and the release made public:
+   static Linux binaries and
    `SHA256SUMS` on GitHub Releases, multi-arch images on GHCR, and the Helm chart at
    `oci://ghcr.io/mrashed98/charts/heimdall`.
 
 Write user-facing notes under **Unreleased** in `docs/site/src/content/docs/project/changelog.md`.
-CI runs `scripts/release_version.py check`, so a version string anywhere in the repo that
-disagrees with `Cargo.toml` fails the build; add new ones to the script's list. To republish an
+CI runs `scripts/release_version.py check`, so a version string it lists that disagrees with
+`Cargo.toml` fails the build. It only knows the places in its `PLACES` list: when you write a
+version number somewhere new, add it there. To republish an
 existing release's files, run the release workflow by hand with its tag.
 
 ## License

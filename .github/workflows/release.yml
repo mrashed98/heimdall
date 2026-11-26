@@ -2,12 +2,15 @@ name: release
 # Releases on merge to main, through release-please:
 # - Every push to main updates one release PR ("chore(release): vX.Y.Z") from
 #   the Conventional Commit titles since the last release (feat: minor,
-#   fix: patch while below 1.0), and `release_version.py set` brings every
-#   version string in the repo along.
-# - Merging that PR tags vX.Y.Z and creates the GitHub release; the jobs below
-#   then build and publish the binaries, images and Helm chart.
+#   fix: patch while below 1.0), and `release_version.py set` brings the
+#   version strings it lists along.
+# - Merging that PR tags vX.Y.Z and creates the GitHub release, which is
+#   turned into a draft at once. Every CI check then runs on the tag; only
+#   if they all pass are the binaries, images and Helm chart published and
+#   the release made public. A failed run leaves a draft, never a public
+#   release without files.
 # - Run it by hand (workflow_dispatch) with an existing tag to rebuild and
-#   republish that release's artifacts.
+#   republish that release's files. That never moves `latest`.
 on:
   push:
     branches: [main]
@@ -20,6 +23,9 @@ on:
 permissions:
   contents: read
 
+# One release run at a time per trigger. A push run that waits here may be
+# replaced by a newer one; that is fine, since release-please rebuilds its
+# PR from main's head each run.
 concurrency:
   group: release-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: false
@@ -45,6 +51,12 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - name: Keep the new release a draft until its files are published
+        if: steps.rp.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rp.outputs.tag_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=true
 
   # release-please bumps Cargo.toml and Cargo.lock; this brings the chart,
   # the docs and the gate action to the same version on the release PR.
@@ -62,10 +74,11 @@ jobs:
       - run: python3 scripts/release_version.py set
       - name: Commit if anything changed
         run: |
-          git diff --quiet && exit 0
+          git add -A
+          git diff --cached --quiet && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore(release): bring every version string along"
+          git commit -m "chore(release): bring every listed version string along"
           git push
 
   # The tag to publish: the one release-please just created, or the input.
@@ -76,25 +89,50 @@ jobs:
     outputs:
       tag: ${{ steps.t.outputs.tag }}
       version: ${{ steps.t.outputs.version }}
+      latest: ${{ steps.t.outputs.latest }}
     steps:
+      # Values from the input only ever reach the shell through env, and the
+      # tag must be exactly vMAJOR.MINOR.PATCH before anything else uses it.
       - id: t
         env:
           TAG: ${{ needs.please.outputs.tag || inputs.tag }}
+          EVENT: ${{ github.event_name }}
         run: |
-          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::not a release tag: $TAG"; exit 1;; esac
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release tag: $TAG"
+            exit 1
+          fi
+          # Only release-please's own new release moves `latest`.
+          latest=false; [ "$EVENT" = push ] && latest=true
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.t.outputs.tag }}
-      - name: Every version string matches the tag
+      - name: The tag, the chart and the crate name the same version
+        env:
+          VERSION: ${{ steps.t.outputs.version }}
         run: |
           crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
-          [ "$crate" = "${{ steps.t.outputs.version }}" ] || { echo "::error::Cargo.toml is $crate, tag is ${{ steps.t.outputs.tag }}"; exit 1; }
-          python3 scripts/release_version.py check
+          chart="$(sed -n 's/^version: *\(.*\)$/\1/p' deploy/helm/heimdall/Chart.yaml)"
+          app="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/heimdall/Chart.yaml)"
+          echo "tag=$VERSION cargo=$crate chart=$chart appVersion=$app"
+          for v in "$crate" "$chart" "$app"; do
+            [ "$v" = "$VERSION" ] || { echo "::error::version mismatch with the tag"; exit 1; }
+          done
+
+  # Every CI check, on the tag. Nothing below runs unless they all pass.
+  ci:
+    needs: target
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.target.outputs.tag }}
 
   binaries:
-    needs: target
+    needs: [target, ci]
     strategy:
       matrix:
         include:
@@ -126,7 +164,7 @@ jobs:
           if-no-files-found: error
 
   chart:
-    needs: target
+    needs: [target, ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -138,35 +176,18 @@ jobs:
       - uses: azure/setup-helm@v5
       - run: helm package deploy/helm/heimdall --destination dist
       - name: Push to oci://ghcr.io/<owner>/charts
+        env:
+          VERSION: ${{ needs.target.outputs.version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm push "dist/heimdall-${{ needs.target.outputs.version }}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          echo "$TOKEN" | helm registry login ghcr.io -u "$ACTOR" --password-stdin
+          helm push "dist/heimdall-${VERSION}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
       - uses: actions/upload-artifact@v7
         with:
           name: chart
           path: dist/heimdall-*.tgz
           if-no-files-found: error
-
-  # One job attaches every file, so the matrix jobs never race on the release.
-  assets:
-    needs: [target, binaries, chart]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          merge-multiple: true
-      - name: Checksums
-        run: sha256sum heimdall-linux-* heimdall-*.tgz > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.target.outputs.tag }}
-          files: |
-            heimdall-linux-*
-            heimdall-*.tgz
-            SHA256SUMS
-          fail_on_unmatched_files: true
 
   # Images copy in the binaries the binaries job built natively, so no Rust
   # compile runs under QEMU (that took ~1.5 h per image).
@@ -197,10 +218,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # Tagged with the version without the `v` (0.4.0): the tag the chart's
-      # default (`.Chart.AppVersion`) pulls.
+      # Tagged with the version without the `v` (0.4.0), the tag the chart's
+      # default (`.Chart.AppVersion`) pulls, and `latest` only for a new
+      # release (never for a republished old one).
       - id: meta
-        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ needs.target.outputs.version }}
+          LATEST: ${{ needs.target.outputs.latest }}
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          for name in server scanner; do
+            image="$repo"; [ "$name" = scanner ] && image="$repo-scanner"
+            {
+              echo "${name}<<EOF"
+              echo "$image:$VERSION"
+              [ "$LATEST" = true ] && echo "$image:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          done
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -208,9 +243,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BIN_SOURCE=prebuilt
-          tags: |
-            ${{ steps.meta.outputs.repo }}:${{ needs.target.outputs.version }}
-            ${{ steps.meta.outputs.repo }}:latest
+          tags: ${{ steps.meta.outputs.server }}
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -218,6 +251,26 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BIN_SOURCE=prebuilt
-          tags: |
-            ${{ steps.meta.outputs.repo }}-scanner:${{ needs.target.outputs.version }}
-            ${{ steps.meta.outputs.repo }}-scanner:latest
+          tags: ${{ steps.meta.outputs.scanner }}
+
+  # Attach every file, then make the release public. Last, so a release is
+  # only ever public with its binaries, chart and images in place.
+  publish:
+    needs: [target, binaries, chart, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum heimdall-linux-* heimdall-*.tgz > SHA256SUMS && cat SHA256SUMS
+      - name: Attach the files and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.target.outputs.tag }}
+          LATEST: ${{ needs.target.outputs.latest }}
+        run: |
+          gh release upload "$TAG" heimdall-linux-* heimdall-*.tgz SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --latest="$LATEST" --repo "$GITHUB_REPOSITORY"

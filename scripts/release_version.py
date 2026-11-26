@@ -50,10 +50,17 @@ def crate_version() -> str:
     return m.group(1)
 
 
+def read(file: str) -> str:
+    try:
+        return (ROOT / file).read_text()
+    except FileNotFoundError:
+        sys.exit(f"{file}: listed in scripts/release_version.py but missing; update PLACES")
+
+
 def check(want: str) -> list[str]:
     errors = []
     for file, pattern in PLACES:
-        text = (ROOT / file).read_text()
+        text = read(file)
         found = [m.group("v") for m in re.finditer(pattern, text, re.M)]
         if not found:
             errors.append(f"{file}: no match for {pattern}")
@@ -64,7 +71,7 @@ def check(want: str) -> list[str]:
 def set_version(want: str) -> None:
     for file in sorted({f for f, _ in PLACES}):
         path = ROOT / file
-        text = path.read_text()
+        text = read(file)
         for f, pattern in PLACES:
             if f == file:
                 text = re.sub(
@@ -84,7 +91,7 @@ def move_unreleased(want: str) -> None:
     it when missing), leaving Unreleased empty. Running it again moves only
     notes added since."""
     path = ROOT / CHANGELOG
-    text = path.read_text()
+    text = read(CHANGELOG)
     head = "## Unreleased\n"
     if head not in text:
         sys.exit(f"{CHANGELOG}: no '## Unreleased' heading")

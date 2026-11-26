@@ -223,8 +223,9 @@ Create a Secret (SOPS-managed in a real setup) with these keys, then install:
 | Channel secrets | One per `*_env` key of a `channels[]` entry (webhook URLs, bot token, routing key, HMAC secret, SMTP or Alertmanager credentials) |
 | `HEIMDALL_API_KEY` | An **ingest-scope** key, used by the scanner CronJob |
 
-The chart is published to GHCR with each release (or use
-`deploy/helm/heimdall` from a checkout, without `--version`):
+The chart is published to GHCR with each release from 0.4.0 on (for earlier
+ones, or a branch, use `deploy/helm/heimdall` from a checkout, without
+`--version`):
 
 ```bash
 helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.3.2 \
