@@ -93,6 +93,22 @@ pub fn secret_values(ch: &ChannelConfig, secrets: &Secrets) -> Vec<String> {
         .collect()
 }
 
+/// The host and port `ch` sends to, or `None` when it is not known yet (a
+/// URL held in a secret that is not set) or does not parse.
+pub fn destination(ch: &ChannelConfig, secrets: &Secrets) -> Option<(String, u16)> {
+    let url = match ch {
+        ChannelConfig::Teams(c) => secret(&c.webhook_env, secrets)?,
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => secret(&c.webhook_env, secrets)?,
+        ChannelConfig::Telegram(c) => c.api_url.clone().unwrap_or(telegram::API_URL.to_string()),
+        ChannelConfig::PagerDuty(c) => c.url.clone().unwrap_or(pagerduty::EVENTS_URL.to_string()),
+        ChannelConfig::Alertmanager(c) => c.url.clone(),
+        ChannelConfig::Webhook(c) => secret(&c.url_env, secrets)?,
+        ChannelConfig::Email(c) => return Some((c.host.clone(), c.port())),
+    };
+    let u = reqwest::Url::parse(&url).ok()?;
+    Some((u.host_str()?.to_string(), u.port_or_known_default()?))
+}
+
 /// HTTP authentication added to a request (never put in the URL).
 #[derive(Debug, Clone, PartialEq)]
 pub enum HttpAuth {

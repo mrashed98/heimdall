@@ -12,6 +12,7 @@ use super::digest::maybe_send;
 use super::outbox::drain_once;
 use super::store::{Channels, UiState};
 use super::*;
+use crate::egress::{Egress, Origin};
 use crate::inventory::store::{replace_components, upsert_service, InventoryItem};
 use crate::model::Source;
 use crate::secrets::SecretKey;
@@ -535,7 +536,7 @@ async fn drain_429_honours_retry_after(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_429", &server);
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.retry, 1);
@@ -560,7 +561,7 @@ async fn drain_5xx_backs_off_exponentially(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     let row = &outbox(&pool).await[0];
@@ -568,7 +569,7 @@ async fn drain_5xx_backs_off_exponentially(pool: PgPool) {
     // 30 s x 2^2
     assert_eq!(row.next_attempt_at, now() + Duration::seconds(120));
     // Not due yet: nothing is sent.
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -584,12 +585,12 @@ async fn drain_sends_exactly_once_after_restart(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_OK", &server);
     queued(&pool).await;
-    let first = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let first = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(first.sent, 1);
     // A fresh client, as after a restart.
-    let again = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let again = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(again.sent, 0);
@@ -606,7 +607,7 @@ async fn drain_other_4xx_marks_failed(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_400", &server);
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.failed, 1);
@@ -619,7 +620,7 @@ async fn drain_other_4xx_marks_failed(pool: PgPool) {
 async fn drain_without_webhook_leaves_rows_queued(pool: PgPool) {
     let c = one_route("NOTIFY_HOOK_UNSET_NEVER_DEFINED");
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -634,7 +635,7 @@ async fn drain_network_error_retries(pool: PgPool) {
     std::env::set_var("NOTIFY_HOOK_DOWN", "http://127.0.0.1:9/hook");
     let c = one_route("NOTIFY_HOOK_DOWN");
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.retry, 1);
@@ -651,7 +652,7 @@ async fn drain_huge_retry_after_is_clamped(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_HUGE", &server);
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.retry, 1);
@@ -1231,7 +1232,7 @@ async fn ui_channel_is_delivered_like_a_config_one(pool: PgPool) {
     let rows = outbox(&pool).await;
     assert_eq!(rows[0].route, "s");
     make_due(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!((r.sent, r.channel_type), (1, Some("slack")));
@@ -1263,7 +1264,7 @@ async fn ui_channel_rows_stay_queued_without_key(pool: PgPool) {
     assert_eq!(enqueue_alerts(&pool, &c, &ch).await.unwrap(), 1);
     assert!(notified_status(&pool, f).await.0);
     make_due(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -1311,7 +1312,7 @@ async fn unreadable_secret_keeps_rows_queued(pool: PgPool) {
     vuln(&pool, "prod", "api", "critical").await;
     assert_eq!(enqueue_alerts(&pool, &c, &ch).await.unwrap(), 1);
     make_due(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r, outbox::DrainResult::default());
@@ -1457,7 +1458,7 @@ async fn retry_records_last_error(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_ERR503", &server);
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.retry, 1);
@@ -1480,7 +1481,7 @@ async fn rejected_records_last_error(pool: PgPool) {
         .await;
     let c = with_webhook("NOTIFY_HOOK_ERR400", &server);
     queued(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &chans(&c), now())
+    let r = drain_once(&pool, &Egress::default(), &c, &chans(&c), now())
         .await
         .unwrap();
     assert_eq!(r.failed, 1);
@@ -1516,7 +1517,7 @@ async fn last_error_is_redacted(pool: PgPool) {
         json!({"chat_id": "1", "text": "x"}),
     )
     .await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r.retry, 1);
@@ -1543,7 +1544,7 @@ async fn last_error_never_holds_a_webhook_url(pool: PgPool) {
     queued_for(&pool, "down", "slack", json!({})).await;
     queued_for(&pool, "five", "slack", json!({})).await;
     for _ in 0..2 {
-        let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+        let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
             .await
             .unwrap();
         assert_eq!(r.retry, 1);
@@ -1563,11 +1564,11 @@ async fn last_error_never_holds_a_webhook_url(pool: PgPool) {
     // The test send redacts the same way.
     let mailer = outbox_mailer(&ch);
     let d = outbox::Delivery {
-        http: &reqwest::Client::new(),
+        egress: &Egress::default(),
         mailer: &mailer,
     };
     let s = ch.list.iter().find(|x| x.name() == "down").unwrap();
-    let err = outbox::send_now(&d, s, &ch.secrets, now())
+    let err = outbox::send_now(&d, s, Origin::Console, &ch.secrets, now())
         .await
         .unwrap_err();
     assert!(
@@ -1682,7 +1683,7 @@ async fn delete_discards_queued_rows(pool: PgPool) {
     ui_slack(&pool, &c, &k, "s", &url).await;
     let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
     make_due(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r.sent, 0);
@@ -1726,7 +1727,7 @@ async fn create_discards_orphaned_rows_for_same_name_and_type(pool: PgPool) {
 
     let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
     make_due(&pool).await;
-    let r = drain_once(&pool, &reqwest::Client::new(), &c, &ch, now())
+    let r = drain_once(&pool, &Egress::default(), &c, &ch, now())
         .await
         .unwrap();
     assert_eq!(r.sent, 0);
@@ -1792,16 +1793,16 @@ async fn send_now_reports_errors(pool: PgPool) {
     ui_slack(&pool, &c, &k, "good", &format!("{}/hook", good.uri())).await;
     let ch = store::load(&pool, &c, Some(&k)).await.unwrap();
     let mailer = outbox_mailer(&ch);
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
     let d = outbox::Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &mailer,
     };
-    let err = outbox::send_now(&d, &ch.list[0], &ch.secrets, now())
+    let err = outbox::send_now(&d, &ch.list[0], Origin::Console, &ch.secrets, now())
         .await
         .unwrap_err();
     assert!(err.contains("400"), "{err}");
-    outbox::send_now(&d, &ch.list[1], &ch.secrets, now())
+    outbox::send_now(&d, &ch.list[1], Origin::Console, &ch.secrets, now())
         .await
         .unwrap();
     let body: Value =

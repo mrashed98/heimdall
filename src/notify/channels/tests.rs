@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, Request as WireRequest, ResponseTemplate};
 use super::email::{MailError, Mailer};
 use super::*;
 use crate::config::{EmailChannel, HeimdallConfig};
+use crate::egress::{Egress, Origin};
 use crate::model::{FindingKind, Severity};
 use crate::notify::alert::{Alert, Line, Link, Section};
 use crate::notify::outbox::{drain_with, Delivery, DrainResult};
@@ -596,6 +597,8 @@ async fn row(pool: &PgPool, id: i64) -> Row {
 }
 
 /// A mailer that records messages and answers with `reply`.
+/// Records messages instead of sending them. Its channels use `localhost`,
+/// since delivery resolves the host (and checks it) before the mailer runs.
 struct FakeMailer {
     sent: Mutex<Vec<Vec<u8>>>,
     reply: Result<(), MailError>,
@@ -605,6 +608,7 @@ impl Mailer for FakeMailer {
     fn send<'a>(
         &'a self,
         _ch: &'a EmailChannel,
+        _addrs: &'a [std::net::SocketAddr],
         msg: lettre::Message,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), MailError>> + Send + 'a>>
     {
@@ -622,10 +626,10 @@ fn mailer(reply: Result<(), MailError>) -> FakeMailer {
 }
 
 async fn drain(pool: &PgPool, c: &HeimdallConfig) -> DrainResult {
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
     let m = mailer(Ok(()));
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &m,
     };
     drain_with(pool, &d, c, &chans(c), now()).await.unwrap()
@@ -932,15 +936,15 @@ async fn webhook_without_secret_is_unsigned_and_5xx_backs_off(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn email_goes_through_the_mailer(pool: PgPool) {
     let c = cfg(
-        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: localhost, \
                  from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
     );
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
 
     let ok = mailer(Ok(()));
     let id = queue(&pool, "mail", "email", &email::render(&vuln_alert())).await;
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &ok,
     };
     assert_eq!(
@@ -959,7 +963,7 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
     let flaky = mailer(Err(MailError::Transient("421 try later".into())));
     let id = queue(&pool, "mail", "email", &email::render(&vuln_alert())).await;
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &flaky,
     };
     assert_eq!(
@@ -973,7 +977,7 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
 
     let refusing = mailer(Err(MailError::Permanent("550 no such user".into())));
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &refusing,
     };
     sqlx::query("UPDATE outbox SET next_attempt_at = '2000-01-01' WHERE id = $1")
@@ -994,13 +998,13 @@ async fn email_goes_through_the_mailer(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn smtp_auth_failure_holds_the_backlog(pool: PgPool) {
     let c = cfg(
-        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: localhost, \
                  from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
     );
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
     let bad_login = mailer(Err(MailError::Auth("535 bad credentials".into())));
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &bad_login,
     };
     let ids = [
@@ -1232,7 +1236,7 @@ async fn digest_and_first_run_go_to_every_covering_channel(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
     let c = cfg(
-        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: smtp.example.com, \
+        "realms: [prod]\nchannels:\n  - {type: email, name: mail, host: localhost, \
                  security: starttls, username_env: SCRUB_USER, password_env: SCRUB_PW, \
                  from: heimdall@example.com, to: [ops@example.com], min_severity: high}\n",
     );
@@ -1242,9 +1246,9 @@ async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
     let echo = mailer(Err(MailError::Auth(
         "535 rejected ops-mailer / hunter2-pw".into(),
     )));
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &echo,
     };
     let id = queue(&pool, "mail", "email", &email::render(&vuln_alert())).await;
@@ -1269,7 +1273,7 @@ async fn last_error_scrubs_a_secret_the_server_echoed(pool: PgPool) {
 #[tokio::test]
 async fn test_send_scrubs_a_console_secret_the_server_echoed() {
     let mail = ch(
-        "{type: email, name: mail, host: smtp.example.com, security: starttls, \
+        "{type: email, name: mail, host: localhost, security: starttls, \
          username_env: 'ui:mail:username', password_env: 'ui:mail:password', \
          from: heimdall@example.com, to: [ops@example.com], min_severity: high}",
     );
@@ -1280,12 +1284,12 @@ async fn test_send_scrubs_a_console_secret_the_server_echoed() {
     let echo = mailer(Err(MailError::Auth(
         "535 rejected ops-mailer / hunter2-pw".into(),
     )));
-    let http = reqwest::Client::new();
+    let egress = Egress::default();
     let d = Delivery {
-        http: &http,
+        egress: &egress,
         mailer: &echo,
     };
-    let err = crate::notify::outbox::send_now(&d, &mail, &secrets, now())
+    let err = crate::notify::outbox::send_now(&d, &mail, Origin::Console, &secrets, now())
         .await
         .unwrap_err();
     assert!(err.contains("535"), "{err}");

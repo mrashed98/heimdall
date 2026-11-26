@@ -6,11 +6,13 @@
 //! it is sent.
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
 use lettre::message::{header::ContentType, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde_json::{json, Value};
 
@@ -158,9 +160,12 @@ pub fn classify(code: Option<u16>, permanent: bool, why: String) -> MailError {
 
 /// Sends mail. Behind a trait so the outbox can be tested without a server.
 pub trait Mailer: Send + Sync {
+    /// Send `msg` through the server of `ch`, connecting to `addrs` (its
+    /// host, already resolved and checked) in order until one answers.
     fn send<'a>(
         &'a self,
         ch: &'a EmailChannel,
+        addrs: &'a [SocketAddr],
         msg: Message,
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>>;
 }
@@ -176,32 +181,62 @@ impl Mailer for SmtpMailer<'_> {
     fn send<'a>(
         &'a self,
         ch: &'a EmailChannel,
+        addrs: &'a [SocketAddr],
         msg: Message,
     ) -> Pin<Box<dyn Future<Output = Result<(), MailError>> + Send + 'a>> {
         Box::pin(async move {
-            let transport =
-                transport(ch, self.secrets).map_err(|e| MailError::Transient(e.to_string()))?;
-            transport
-                .send(msg)
-                .await
-                .map(|_| ())
-                .map_err(|e| classify(e.status().map(u16::from), e.is_permanent(), e.to_string()))
+            // One deadline for the whole send, however many addresses: a
+            // blackholed first address must not stall the outbox per address.
+            let deadline = tokio::time::Instant::now() + SEND_TIMEOUT;
+            let mut last = MailError::Transient("no address to connect to".to_string());
+            for &addr in addrs {
+                let transport = match transport(ch, addr, self.secrets) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        last = MailError::Transient(e.to_string());
+                        continue;
+                    }
+                };
+                let sent = tokio::time::timeout_at(deadline, transport.send(msg.clone())).await;
+                let Ok(sent) = sent else {
+                    return Err(MailError::Transient("timed out".to_string()));
+                };
+                match sent {
+                    Ok(_) => return Ok(()),
+                    // No SMTP reply: this address did not answer; try the next.
+                    Err(e) if e.status().is_none() && !e.is_permanent() => {
+                        last = MailError::Transient(e.to_string());
+                    }
+                    Err(e) => {
+                        return Err(classify(
+                            e.status().map(u16::from),
+                            e.is_permanent(),
+                            e.to_string(),
+                        ))
+                    }
+                }
+            }
+            Err(last)
         })
     }
 }
 
+/// Connects to `addr`; the certificate is still checked against `ch.host`.
 fn transport(
     ch: &EmailChannel,
+    addr: SocketAddr,
     secrets: &Secrets,
 ) -> anyhow::Result<AsyncSmtpTransport<Tokio1Executor>> {
-    let mut b = match ch.security {
-        // STARTTLS is required, never opportunistic: no silent downgrade.
-        SmtpSecurity::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&ch.host)?,
-        SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&ch.host)?,
-        SmtpSecurity::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&ch.host),
-    }
-    .port(ch.port())
-    .timeout(Some(SEND_TIMEOUT));
+    let tls = || TlsParameters::new(ch.host.clone());
+    let mut b = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(addr.ip().to_string())
+        .port(addr.port())
+        .tls(match ch.security {
+            // STARTTLS is required, never opportunistic: no silent downgrade.
+            SmtpSecurity::Starttls => Tls::Required(tls()?),
+            SmtpSecurity::Tls => Tls::Wrapper(tls()?),
+            SmtpSecurity::None => Tls::None,
+        })
+        .timeout(Some(SEND_TIMEOUT));
     if let (Some(u), Some(p)) = (&ch.username_env, &ch.password_env) {
         let user = secret(u, secrets).ok_or_else(|| anyhow::anyhow!("{u} is not set"))?;
         let pass = secret(p, secrets).ok_or_else(|| anyhow::anyhow!("{p} is not set"))?;

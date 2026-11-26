@@ -6,6 +6,7 @@ mod channels_api;
 pub mod client;
 pub mod config;
 pub mod db;
+pub mod egress;
 pub mod error;
 pub mod gate;
 pub mod ingest;

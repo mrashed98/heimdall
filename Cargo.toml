@@ -70,3 +70,5 @@ http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6.5"
+# A paused clock in tests (#[tokio::test(start_paused = true)]).
+tokio = { version = "1", features = ["test-util"] }
