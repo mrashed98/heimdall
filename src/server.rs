@@ -1012,7 +1012,22 @@ mod tests {
     /// says here why it has no realm data. Reads the router's source.
     #[test]
     fn every_read_route_is_checked_for_realm_scope() {
-        let source = [include_str!("server.rs"), include_str!("ui_data.rs")].concat();
+        // Every Rust file under src/, so a route in a new module is seen too.
+        fn rust_files(dir: &std::path::Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push_str(&std::fs::read_to_string(&path).unwrap());
+                }
+            }
+        }
+        let mut source = String::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut source,
+        );
         let test = &source[source
             .find(concat!(
                 "async fn session_read_access_",
@@ -1020,7 +1035,8 @@ mod tests {
             ))
             .unwrap()..];
         let test = &test[..test.find("\n    }\n").unwrap()];
-        let route = regex::Regex::new(r#"\.route\(\s*"(/api/v1/[^"]*)",\s*get\("#).unwrap();
+        // `get(` anywhere in the method chain: `get(h)`, `post(h).get(h)`, ...
+        let route = regex::Regex::new(r#"\.route\(\s*"(/api/v1/[^"]*)",\s*[^)]*?\bget\("#).unwrap();
         let mut missing = Vec::new();
         for path in route.captures_iter(&source).map(|c| c[1].to_owned()) {
             if NOT_REALM_SCOPED.iter().any(|(p, _)| *p == path) {
