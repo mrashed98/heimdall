@@ -21,3 +21,5 @@ CREATE TABLE service_daily (
     unknown integer NOT NULL,
     PRIMARY KEY (service_id, day)
 );
+-- Retention deletes by day alone.
+CREATE INDEX service_daily_day_idx ON service_daily (day);

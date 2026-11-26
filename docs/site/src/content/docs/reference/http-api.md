@@ -170,8 +170,11 @@ Scope `read`. `404` if the service does not exist. Rows:
 
 Scope `read`. Open findings per severity at the end of each day (UTC), per
 realm, oldest first. Heimdall records today's counts after every matcher run,
-so a day holds the last counts taken that day. A day with no row is one the
-server did not run; it is not a day with zero findings.
+the one at startup included, so a day holds the last counts taken that day. A
+day with no row is one the server did not run; it is not a day with zero
+findings. A realm added to the config has no rows for the days before it was
+added, so a total across realms for those days covers only the realms
+configured then.
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -186,8 +189,9 @@ Rows older than `retention.trends_days` are deleted.
 
 ### `GET /api/v1/services/{id}/trend`
 
-Scope `read`. The same counts for one service, without `realm`. `days` as
-above. `404` if the service is not in a realm the caller can read.
+Scope `read`. The same counts for one service, without `realm`. `days` and
+`realms` as above. `404` if the service is not in one of those realms, or the
+caller cannot read its realm; a realm not in the config is a `400`.
 
 ### `GET /api/v1/components`
 
