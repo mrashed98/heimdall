@@ -79,14 +79,19 @@ async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<U
 const COMPONENT_SEARCH_CAP: usize = 10_000;
 /// Every route by which a service in realms `$2` carries a component: its own
 /// rows (any source), and the contents of the images those rows run. `image`
-/// is the image's reference when the route goes through one.
-const CARRIERS: &str = "WITH carriers AS ( \
+/// is the image's reference when the route goes through one. `only` narrows
+/// the component ids (SQL over `$1`), so a page reads only its own routes.
+fn carriers(only: &str) -> String {
+    format!("WITH carriers AS ( \
     SELECT sc.service_id, sc.component_id, i.image_ref AS image FROM service_components sc \
       JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) LEFT JOIN image_sboms i ON i.digest=sc.via_image_digest \
+      WHERE {only} \
     UNION ALL \
     SELECT sc.service_id, ic.component_id, i.image_ref FROM service_components sc \
       JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) \
-      JOIN image_components ic ON ic.digest=sc.via_image_digest JOIN image_sboms i ON i.digest=ic.digest)";
+      JOIN image_components ic ON ic.digest=sc.via_image_digest JOIN image_sboms i ON i.digest=ic.digest \
+      WHERE {} )", only.replace("sc.component_id", "ic.component_id"))
+}
 /// Components whose package URL contains `search`, each with the services and
 /// images that carry it in the caller's realms, directly or inside an image.
 /// `version_lt` keeps versions below it, compared the way the matcher compares
@@ -98,7 +103,7 @@ async fn component_search(State(state): State<AppState>, p: Principal, Query(q):
     let below = given(&q.version_lt).map(str::trim).filter(|v| !v.is_empty());
     let (limit, offset) = (parse_limit(&q.limit)? as usize, parse_offset(&q.offset)? as usize);
     let pattern = format!("%{}%", search.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-    let sql = format!("{CARRIERS} SELECT c.id,c.purl,c.version FROM components c WHERE c.purl ILIKE $1 AND c.id IN (SELECT component_id FROM carriers) ORDER BY c.name_key, c.version, c.id LIMIT $3");
+    let sql = format!("{} SELECT c.id,c.purl,c.version FROM components c WHERE c.purl ILIKE $1 AND c.id IN (SELECT component_id FROM carriers) ORDER BY c.name_key, c.version, c.id LIMIT $3", carriers("true"));
     let candidates: Vec<(i64, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(pattern).bind(&realms).bind(COMPONENT_SEARCH_CAP as i64 + 1).fetch_all(&state.pool).await?;
     if candidates.len() > COMPONENT_SEARCH_CAP { return Err(ApiError::BadRequest(format!("more than {COMPONENT_SEARCH_CAP} components match; narrow the search"))); }
@@ -109,9 +114,9 @@ async fn component_search(State(state): State<AppState>, p: Principal, Query(q):
     let page: Vec<i64> = candidates.into_iter()
         .filter(|(_, purl, version)| below.is_none_or(|b| below_version(purl, version, b)))
         .skip(offset).take(limit).map(|(id, _, _)| id).collect();
-    let sql = format!("{CARRIERS} SELECT row_to_json(t) FROM (SELECT c.purl,c.name_key,c.ecosystem,c.version, \
+    let sql = format!("{} SELECT row_to_json(t) FROM (SELECT c.purl,c.name_key,c.ecosystem,c.version, \
         (SELECT coalesce(json_agg(json_build_object('id',s.id,'name',s.name,'realm',s.realm) ORDER BY s.realm,s.name),'[]') FROM services s WHERE s.id IN (SELECT service_id FROM carriers WHERE component_id=c.id)) AS services, \
         (SELECT coalesce(array_agg(DISTINCT image ORDER BY image),'{{}}') FROM carriers WHERE component_id=c.id AND image IS NOT NULL) AS images \
-        FROM unnest($1::bigint[]) WITH ORDINALITY AS p(id,n) JOIN components c ON c.id=p.id ORDER BY p.n) t");
+        FROM unnest($1::bigint[]) WITH ORDINALITY AS p(id,n) JOIN components c ON c.id=p.id ORDER BY p.n) t", carriers("sc.component_id=ANY($1)"));
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(page).bind(&realms).fetch_all(&state.pool).await?))
 }
