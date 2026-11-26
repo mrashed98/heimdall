@@ -57,13 +57,11 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
       # The version strings listed in scripts/release_version.py match
-      # Cargo.toml. (Skipped only for tags made before the scripts existed.)
-      - if: hashFiles('scripts/release_version.py') != ''
-        run: python3 scripts/release_version.py check
+      # Cargo.toml.
+      - run: python3 scripts/release_version.py check
       # Every link from the docs to a file of this repo points at a file
       # that exists.
-      - if: hashFiles('scripts/check_repo_links.py') != ''
-        run: python3 scripts/check_repo_links.py
+      - run: python3 scripts/check_repo_links.py
 
   clippy:
     runs-on: ubuntu-latest

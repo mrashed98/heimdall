@@ -24,7 +24,8 @@ def main() -> None:
             continue
         for n, line in enumerate(path.read_text().splitlines(), 1):
             for target in LINK.findall(line):
-                if not (ROOT / unquote(target).rstrip("/")).exists():
+                path_in_repo = (ROOT / unquote(target).rstrip("/")).resolve()
+                if not path_in_repo.is_relative_to(ROOT) or not path_in_repo.exists():
                     bad.append(f"{path.relative_to(ROOT)}:{n}: links to {target}, which is not in the repo")
     for b in bad:
         print(b)
