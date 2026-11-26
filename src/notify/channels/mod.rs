@@ -122,6 +122,23 @@ pub fn destination(ch: &ChannelConfig, secrets: &Secrets) -> Option<(String, u16
     Some((u.host_str()?.to_string(), u.port_or_known_default()?))
 }
 
+/// How `c` authenticates: basic auth with the account email when
+/// `username_env` is set (Jira Cloud), else a bearer token (Data Center).
+pub fn jira_auth(c: &crate::config::JiraChannel, secrets: &Secrets) -> anyhow::Result<HttpAuth> {
+    let need = |var: &str| secret(var, secrets).ok_or_else(|| anyhow::anyhow!("{var} is not set"));
+    let token = need(&c.token_env)?;
+    Ok(match &c.username_env {
+        Some(u) => HttpAuth::Basic(need(u)?, token),
+        None => HttpAuth::Bearer(token),
+    })
+}
+
+/// The label on the Jira issue created for outbox row `id`, so a retry can
+/// tell that an earlier attempt already created it.
+pub fn jira_row_label(id: i64) -> String {
+    format!("heimdall-outbox-{id}")
+}
+
 /// HTTP authentication added to a request (never put in the URL).
 #[derive(Debug, Clone, PartialEq)]
 pub enum HttpAuth {
@@ -170,15 +187,12 @@ pub fn request(
             http(need(&c.webhook_env)?, json(payload))
         }
         ChannelConfig::Jira(c) => {
-            let token = need(&c.token_env)?;
-            let auth = match &c.username_env {
-                Some(u) => HttpAuth::Basic(need(u)?, token),
-                None => HttpAuth::Bearer(token),
-            };
+            let auth = jira_auth(c, secrets)?;
             let redact = match &auth {
                 HttpAuth::Basic(u, p) => vec![u.clone(), p.clone()],
                 HttpAuth::Bearer(t) => vec![t.clone()],
             };
+            let auth = Some(auth);
             let mut issue = payload.clone();
             issue["fields"]["project"] = serde_json::json!({"key": c.project});
             issue["fields"]["issuetype"] = serde_json::json!({
@@ -188,7 +202,7 @@ pub fn request(
                 url: format!("{}/rest/api/2/issue", c.url.trim_end_matches('/')),
                 body: json(&issue),
                 headers: Vec::new(),
-                auth: Some(auth),
+                auth,
                 redact,
             }
         }

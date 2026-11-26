@@ -477,8 +477,24 @@ impl ChannelConfig {
             }
             ChannelConfig::Jira(c) => {
                 check_url(&format!("{key}.url"), &c.url)?;
-                if c.project.trim().is_empty() {
-                    bail!("{key}.project must not be empty");
+                let u = url::Url::parse(&c.url)?;
+                if u.query().is_some() || u.fragment().is_some() {
+                    bail!("{key}.url must be the site URL, without a query or fragment");
+                }
+                // Jira project keys: an uppercase letter, then uppercase
+                // letters, digits or `_` (a lowercase key never matches).
+                let p = c.project.as_bytes();
+                if p.len() < 2
+                    || !p[0].is_ascii_uppercase()
+                    || !p
+                        .iter()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+                {
+                    bail!(
+                        "{key}.project must be a Jira project key such as SEC (uppercase \
+                         letters, digits and _), got `{}`",
+                        c.project
+                    );
                 }
                 if c.issue_type.as_deref().is_some_and(|t| t.trim().is_empty()) {
                     bail!("{key}.issue_type must not be empty when set");

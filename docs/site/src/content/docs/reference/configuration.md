@@ -131,7 +131,7 @@ Every channel has:
 | `name` | string | Channel name, unique across `teams` and `channels`. **Required.** |
 | `realms` | list of strings | Realms this channel covers. Empty means all. Default `[]`. |
 | `min_severity` | `critical`, `high`, `medium`, `low`, `unknown` | Lowest severity the channel receives. **Required.** |
-| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty` and `alertmanager`. Also accepted on `teams` routes. |
+| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty`, `alertmanager` and `jira`. Also accepted on `teams` routes. |
 
 And, by type (keys of other types are rejected):
 

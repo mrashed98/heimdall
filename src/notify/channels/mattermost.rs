@@ -41,6 +41,20 @@ fn link(text: &str, url: &str) -> String {
     format!("[{}]({})", escape(text), url.replace(')', "%29"))
 }
 
+/// `s` with every word-initial `@` broken, and nothing else changed.
+pub(crate) fn no_mentions(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        out.push(c);
+        if c == '@' && !prev.is_some_and(char::is_alphanumeric) {
+            out.push('\u{2060}');
+        }
+        prev = Some(c);
+    }
+    out
+}
+
 pub(crate) const MARKUP: Markup = Markup { escape, bold, link };
 
 /// Attachment colour by severity.
@@ -73,13 +87,15 @@ pub fn render(a: &Alert) -> Value {
     }
     let realms = a.realms();
     if !realms.is_empty() {
-        fields.push(json!({"short": true, "title": "Realm", "value": escape(&realms.join(", "))}));
+        fields.push(json!({"short": true, "title": "Realm", "value": truncate(&escape(&realms.join(", ")), 1024)}));
     }
-    let title = truncate(&a.title, 250);
+    // `fallback` (push and desktop notifications) and `title` are plain
+    // text: Markdown escapes would show as backslashes there.
+    let title = no_mentions(&truncate(&a.title, 250));
     let mut attachment = json!({
-        "fallback": escape(&title),
+        "fallback": title,
         "color": color(a.severity),
-        "title": escape(&title),
+        "title": title,
         "text": join_capped(&lines, TEXT_CHARS, "…"),
         "fields": fields,
         "footer": "Heimdall",

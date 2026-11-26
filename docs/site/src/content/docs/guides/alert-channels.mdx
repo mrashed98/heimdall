@@ -58,8 +58,8 @@ console](#managing-channels-in-the-console)).
 - **The weekly digest and the first-run summary** go to every channel covering
   the realm whose `digest` is on, whatever its `min_severity`. `digest`
   defaults to `true`, except for the paging types (`pagerduty`,
-  `alertmanager`), where a weekly summary would page someone; set
-  `digest: true` there to opt in, or `digest: false` on any channel to opt out.
+  `alertmanager`), where a weekly summary would page someone, and `jira`,
+  where it would open an issue every week; set `digest: true` there to opt in, or `digest: false` on any channel to opt out.
   Medium and low findings of a realm that no digest channel covers stay
   pending until one does.
 - **Links:** only links Heimdall makes itself (the advisory, the release notes)
@@ -69,11 +69,13 @@ console](#managing-channels-in-the-console)).
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
-  channel rejects (a 4xx other than 401, 403 and 429, a permanent SMTP error)
-  is not retried and counts in `heimdall_notify_failures_total{channel_type}`.
-  A 401 or 403 means the channel's credentials or permissions are wrong, not
-  the message: the channel's queue waits and retries with the usual backoff
-  until they are fixed, and nothing is discarded.
+  channel rejects (a 4xx other than 401, 403, 404, 410 and 429, and for Jira
+  400; a permanent SMTP error) is not retried and counts in
+  `heimdall_notify_failures_total{channel_type}`. A 401, 403, 404 or 410 (and
+  Jira's 400, a wrong project or issue type) means the channel itself is wrong:
+  its credentials, permissions or settings, or a deleted webhook or chat. The
+  channel's queue then waits and retries with the usual backoff until it is
+  fixed, and nothing is discarded.
 - **Destinations are checked** before every send: see
   [Where channels may send](#where-channels-may-send).
 - **A missing variable** keeps that channel's messages queued until it is set.
@@ -270,7 +272,8 @@ delays mail but never discards it. Fix the credentials and the backlog goes out.
 `type: mattermost`, `webhook_env` (an [incoming
 webhook](https://developers.mattermost.com/integrate/webhooks/incoming/) URL:
 *Integrations → Incoming Webhooks*). One message attachment per alert,
-coloured by severity, with the severity and realm as fields. Text is
+coloured by severity, with the severity (for findings) and the realms (when
+the alert has any) as fields. Text is
 Markdown-escaped, and an `@` that starts a word is broken with an invisible
 character, so an advisory saying `@channel` or `@all` never notifies anyone.
 
@@ -307,8 +310,10 @@ and Jira Data Center both accept.
 ```
 
 The summary is the alert's title; the description lists the findings in wiki
-markup, with links to the advisory. Each issue gets the labels `heimdall` and
-`severity-<level>`. The project and issue type are read when the issue is
+markup, with the links the alert has (the advisory, or the release notes).
+Each issue gets the label `heimdall`, `severity-<level>` for a finding, and
+`heimdall-outbox-<n>`, which lets Heimdall see on a retry that an earlier
+attempt already created the issue. The project and issue type are read when the issue is
 created, so changing them also moves issues still in the queue. The weekly
 digest is off by default (it would open an issue every week); set
 `digest: true` to have it. The account needs permission to create issues in

@@ -158,7 +158,8 @@ pub async fn drain_with(
     } else {
         Origin::Console
     };
-    match attempt(d, ch, origin, &card, now, &chans.secrets).await {
+    let row = RowRef { id, attempts };
+    match attempt(d, ch, origin, &card, Some(row), now, &chans.secrets).await {
         Outcome::Sent => {
             sqlx::query("UPDATE outbox SET sent_at = $2 WHERE id = $1")
                 .bind(id)
@@ -245,18 +246,42 @@ async fn attempt(
     ch: &ChannelConfig,
     origin: Origin,
     payload: &Value,
+    row: Option<RowRef>,
     now: DateTime<Utc>,
     secrets: &Secrets,
 ) -> Outcome {
     let mut hide = channels::secret_values(ch, secrets);
-    let outcome = match channels::request(ch, payload, now, secrets) {
-        Ok(req) => {
-            if let Request::Http { redact, .. } = &req {
-                hide.extend(redact.iter().cloned());
-            }
-            send(d, ch, origin, req).await
+    let mut payload = payload.clone();
+    let mut done = None;
+    // A Jira create can succeed after the request timed out on our side:
+    // label the issue with its row, and on a retry look for it first.
+    if let (ChannelConfig::Jira(c), Some(r)) = (ch, row) {
+        let label = channels::jira_row_label(r.id);
+        if let Some(labels) = payload["fields"]["labels"].as_array_mut() {
+            labels.push(Value::String(label.clone()));
         }
-        Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
+        if r.attempts > 0 {
+            done = match jira_issue_exists(d, c, origin, secrets, &label).await {
+                Ok(true) => Some(Outcome::Sent),
+                Ok(false) => None,
+                Err(why) => Some(Outcome::Retry {
+                    retry_after_secs: None,
+                    why,
+                }),
+            };
+        }
+    }
+    let outcome = match done {
+        Some(o) => o,
+        None => match channels::request(ch, &payload, now, secrets) {
+            Ok(req) => {
+                if let Request::Http { redact, .. } = &req {
+                    hide.extend(redact.iter().cloned());
+                }
+                send(d, ch, origin, req).await
+            }
+            Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
+        },
     };
     // Longest first, so a URL goes before a token inside it.
     hide.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -284,7 +309,7 @@ pub async fn send_now(
     now: DateTime<Utc>,
 ) -> Result<(), String> {
     let payload = channels::render(ch, &Alert::test(now));
-    match attempt(d, ch, origin, &payload, now, secrets).await {
+    match attempt(d, ch, origin, &payload, None, now, secrets).await {
         Outcome::Sent => Ok(()),
         Outcome::Retry { why, .. } | Outcome::Hold(why) | Outcome::Rejected(why) => Err(why),
     }
@@ -387,7 +412,16 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request
                 Ok(a) => a,
                 Err(why) => return Outcome::Hold(why),
             };
-            send_http(&parsed, &addrs, body, &headers, auth.as_ref(), &redact).await
+            send_http(
+                |s| blame(ch, s),
+                &parsed,
+                &addrs,
+                body,
+                &headers,
+                auth.as_ref(),
+                &redact,
+            )
+            .await
         }
         Request::Email(msg) => {
             let ChannelConfig::Email(c) = ch else {
@@ -418,9 +452,121 @@ fn scrub(mut s: String, secrets: &[String]) -> String {
     s
 }
 
+/// The outbox row an attempt is for (none for a test send).
+#[derive(Debug, Clone, Copy)]
+struct RowRef {
+    id: i64,
+    attempts: i32,
+}
+
+/// Whether Jira already has the issue labelled `label` (an earlier attempt
+/// created it). Tries the current search API, then the Data Center one. A
+/// query Jira refuses (400) counts as not found: a duplicate issue is better
+/// than an alert never sent.
+async fn jira_issue_exists(
+    d: &Delivery<'_>,
+    c: &crate::config::JiraChannel,
+    origin: Origin,
+    secrets: &Secrets,
+    label: &str,
+) -> Result<bool, String> {
+    let auth = channels::jira_auth(c, secrets).map_err(|e| format!("{e:#}"))?;
+    let base = c.url.trim_end_matches('/');
+    for path in ["/rest/api/2/search/jql", "/rest/api/2/search"] {
+        let url = reqwest::Url::parse_with_params(
+            &format!("{base}{path}"),
+            &[
+                ("jql", format!("labels = \"{label}\"")),
+                ("maxResults", "1".to_string()),
+                ("fields", "key".to_string()),
+            ],
+        )
+        .map_err(|_| "the channel URL is not a valid URL".to_string())?;
+        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+            return Err("the channel URL has no host".to_string());
+        };
+        let addrs = d.egress.resolve(host, port, origin).await?;
+        let http = pinned_client(&url, &addrs)?;
+        let rb = http
+            .get(url.clone())
+            .timeout(std::time::Duration::from_secs(SEND_TIMEOUT_SECS));
+        let rb = match &auth {
+            HttpAuth::Basic(u, p) => rb.basic_auth(u, Some(p)),
+            HttpAuth::Bearer(t) => rb.bearer_auth(t),
+        };
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| format!("searching Jira for an earlier attempt: {}", e.without_url()))?;
+        match resp.status() {
+            StatusCode::NOT_FOUND => continue,
+            StatusCode::BAD_REQUEST => return Ok(false),
+            s if !s.is_success() => {
+                return Err(format!("searching Jira for an earlier attempt: {s}"))
+            }
+            _ => {}
+        }
+        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        return Ok(body["issues"].as_array().is_some_and(|i| !i.is_empty()));
+    }
+    Err("Jira has no search API at this URL".to_string())
+}
+
+/// A client that connects only to `addrs` for `url`'s host and never follows
+/// a redirect.
+fn pinned_client(
+    url: &reqwest::Url,
+    addrs: &[std::net::SocketAddr],
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .resolve_to_addrs(url.host_str().unwrap_or_default(), addrs)
+        .build()
+        .map_err(|e| format!("building the http client: {e}"))
+}
+
+/// Whose fault an HTTP client error (4xx other than 429) is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blame {
+    /// The server refused this alert's payload: sending it again would fail
+    /// again, so it is dropped (marked failed) and the queue moves on.
+    Alert,
+    /// The channel is misconfigured or gone. Every alert would fail the
+    /// same way, so the queue is held until it is fixed and nothing is lost.
+    Channel,
+}
+
+/// Who a client error from `ch` blames. Every channel type decides here,
+/// with no catch-all arm: a new type must choose, because dropping an alert
+/// for a channel's mistake loses it for good.
+pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode) -> Blame {
+    // Credentials, permissions, a deleted webhook or chat: never the alert.
+    if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
+        return Blame::Channel;
+    }
+    match ch {
+        // Jira answers 400 for a wrong project key, issue type or a field
+        // the create screen lacks: the channel's settings, not the issue.
+        ChannelConfig::Jira(_) if status == StatusCode::BAD_REQUEST => Blame::Channel,
+        ChannelConfig::Jira(_)
+        | ChannelConfig::Teams(_)
+        | ChannelConfig::Slack(_)
+        | ChannelConfig::Discord(_)
+        | ChannelConfig::Mattermost(_)
+        | ChannelConfig::Telegram(_)
+        | ChannelConfig::PagerDuty(_)
+        | ChannelConfig::Alertmanager(_)
+        | ChannelConfig::Webhook(_)
+        | ChannelConfig::Email(_) => Blame::Alert,
+    }
+}
+
 /// POST `body` to `url`, connecting only to `addrs` (checked by `Egress`)
-/// and never following a redirect, which could lead anywhere.
+/// and never following a redirect, which could lead anywhere. `blame`
+/// decides what a client error means (see [`blame`]).
 async fn send_http(
+    blame: impl Fn(StatusCode) -> Blame,
     url: &reqwest::Url,
     addrs: &[std::net::SocketAddr],
     body: Vec<u8>,
@@ -428,17 +574,12 @@ async fn send_http(
     auth: Option<&HttpAuth>,
     redact: &[String],
 ) -> Outcome {
-    let http = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .resolve_to_addrs(url.host_str().unwrap_or_default(), addrs)
-        .build()
-    {
+    let http = match pinned_client(url, addrs) {
         Ok(c) => c,
-        Err(e) => {
+        Err(why) => {
             return Outcome::Retry {
                 retry_after_secs: None,
-                why: format!("building the http client: {e}"),
+                why,
             }
         }
     };
@@ -476,14 +617,6 @@ async fn send_http(
             "{status}: redirects are not followed; use the URL it redirects to"
         ));
     }
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        // A credential or permission problem of the channel, not of this
-        // alert: hold the queue until it is fixed, as for a refused SMTP
-        // login, instead of discarding every alert meanwhile.
-        return Outcome::Hold(format!(
-            "{status}: check the channel's credentials and permissions"
-        ));
-    }
     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
         // Retry-After in seconds, at most the backoff cap so a huge value
         // can neither overflow the date nor park the row for days. The
@@ -512,7 +645,12 @@ async fn send_http(
             why: format!("{status}"),
         };
     }
-    Outcome::Rejected(format!("{status}"))
+    match blame(status) {
+        Blame::Alert => Outcome::Rejected(format!("{status}")),
+        Blame::Channel => Outcome::Hold(format!(
+            "{status}: check the channel's settings, credentials and permissions"
+        )),
+    }
 }
 
 /// The delay before the next attempt: 30 s doubled per earlier attempt,
@@ -545,7 +683,16 @@ mod tests {
             .resolve(&host, url.port_or_known_default().unwrap(), Origin::Config)
             .await
             .unwrap();
-        send_http(&url, &addrs, b"{}".to_vec(), &[], None, redact).await
+        send_http(
+            |_| Blame::Alert,
+            &url,
+            &addrs,
+            b"{}".to_vec(),
+            &[],
+            None,
+            redact,
+        )
+        .await
     }
 
     /// The connection goes to the checked addresses, not to whatever the
@@ -560,7 +707,16 @@ mod tests {
             .await;
         let addr = *server.address();
         let url = reqwest::Url::parse(&format!("http://pinned.invalid:{}/", addr.port())).unwrap();
-        let out = send_http(&url, &[addr], b"{}".to_vec(), &[], None, &[]).await;
+        let out = send_http(
+            |_| Blame::Alert,
+            &url,
+            &[addr],
+            b"{}".to_vec(),
+            &[],
+            None,
+            &[],
+        )
+        .await;
         assert_eq!(out, Outcome::Sent);
         server.verify().await;
     }

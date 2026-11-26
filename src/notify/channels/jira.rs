@@ -18,9 +18,32 @@ const SUMMARY_CHARS: usize = 255;
 /// The issue type when the channel sets none.
 pub const DEFAULT_ISSUE_TYPE: &str = "Task";
 
-/// Backslash-escape every character wiki markup gives a meaning to.
+/// Backslash-escape every character wiki markup gives a meaning to, and
+/// the block markers a line can start with (`h1.` to `h6.`, `bq.`).
 pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let t = line.trim_start();
+        let block = t.starts_with("bq.")
+            || (t.len() >= 3
+                && t.as_bytes()[0] == b'h'
+                && (b'1'..=b'6').contains(&t.as_bytes()[1])
+                && t.as_bytes()[2] == b'.');
+        if block {
+            out.push_str(&line[..line.len() - t.len()]);
+            out.push('\\');
+            escape_chars(t, &mut out);
+        } else {
+            escape_chars(line, &mut out);
+        }
+    }
+    out
+}
+
+fn escape_chars(s: &str, out: &mut String) {
     for c in s.chars() {
         if matches!(
             c,
@@ -43,7 +66,6 @@ pub(crate) fn escape(s: &str) -> String {
         }
         out.push(c);
     }
-    out
 }
 
 fn bold(s: &str) -> String {

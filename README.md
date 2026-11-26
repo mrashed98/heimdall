@@ -81,7 +81,8 @@ channels:
 ```
 
 Also `discord` and `mattermost` (`webhook_env`), `telegram` (`bot_token_env`,
-`chat_id`) and `jira` (`url`, `project`, `token_env`, one issue per alert).
+`chat_id`) and `jira` (`url`, `project`, `token_env`, plus `username_env` for
+Jira Cloud; one issue per alert).
 Each channel gets its own queued copy with the same pacing, retries and
 exactly-once delivery; the weekly digest goes to every channel covering the
 realm (paging channels, PagerDuty and Alertmanager, only with `digest: true`).
