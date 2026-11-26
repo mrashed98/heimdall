@@ -427,7 +427,8 @@ response ever contains a secret value or the value of an environment variable.
   `to`), without `type`, `name`, `realms`, `min_severity`, `digest` or any
   `*_env` key.
 - `secrets`: each secret field of the type, as `{ "set": true | false }`. For
-  `teams`, `slack`, `discord` and `webhook` the URL is a secret.
+  `teams`, `slack`, `discord`, `mattermost` and `webhook` the URL is a secret;
+  for `jira` the secrets are `username` (optional) and `token`.
 - `missing_env`: for a config channel, the names of its variables that are not
   set. Always empty for a console channel.
 - `state`: `ok`; `key_missing` (the channel holds secrets and there is no key);

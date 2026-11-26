@@ -46,6 +46,15 @@ pub(crate) async fn push(
     card: &Value,
     channel: &ChannelConfig,
 ) -> anyhow::Result<i64> {
+    // Each Jira issue gets its own random label, stored with the row, so a
+    // retry can find an issue an earlier timed-out attempt created.
+    let mut card = card.clone();
+    if let ChannelConfig::Jira(_) = channel {
+        if let Some(labels) = card["fields"]["labels"].as_array_mut() {
+            labels.push(Value::String(channels::new_jira_attempt_label()));
+        }
+    }
+    let card = &card;
     let id = sqlx::query_scalar(
         "INSERT INTO outbox (group_key, card, route, channel_type) \
          VALUES ($1, $2, $3, $4) RETURNING id",
@@ -158,7 +167,8 @@ pub async fn drain_with(
     } else {
         Origin::Console
     };
-    match attempt(d, ch, origin, &card, now, &chans.secrets).await {
+    let row = RowRef { attempts };
+    match attempt(d, ch, origin, &card, Some(row), now, &chans.secrets).await {
         Outcome::Sent => {
             sqlx::query("UPDATE outbox SET sent_at = $2 WHERE id = $1")
                 .bind(id)
@@ -245,18 +255,34 @@ async fn attempt(
     ch: &ChannelConfig,
     origin: Origin,
     payload: &Value,
+    row: Option<RowRef>,
     now: DateTime<Utc>,
     secrets: &Secrets,
 ) -> Outcome {
     let mut hide = channels::secret_values(ch, secrets);
-    let outcome = match channels::request(ch, payload, now, secrets) {
-        Ok(req) => {
-            if let Request::Http { redact, .. } = &req {
-                hide.extend(redact.iter().cloned());
-            }
-            send(d, ch, origin, req).await
+    let mut done = None;
+    // A Jira create can succeed after the request timed out on our side: on
+    // a retry, look for the issue by the row's attempt label first.
+    if let (ChannelConfig::Jira(c), Some(r)) = (ch, row) {
+        if let (true, Some(label)) = (r.attempts > 0, channels::jira_attempt_label(payload)) {
+            done = match jira_issue_exists(d, c, origin, secrets, label).await {
+                Ok(true) => Some(Outcome::Sent),
+                Ok(false) => None,
+                Err(o) => Some(o),
+            };
         }
-        Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
+    }
+    let outcome = match done {
+        Some(o) => o,
+        None => match channels::request(ch, payload, now, secrets) {
+            Ok(req) => {
+                if let Request::Http { redact, .. } = &req {
+                    hide.extend(redact.iter().cloned());
+                }
+                send(d, ch, origin, req).await
+            }
+            Err(e) => Outcome::Rejected(format!("cannot build the request: {e:#}")),
+        },
     };
     // Longest first, so a URL goes before a token inside it.
     hide.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -284,7 +310,7 @@ pub async fn send_now(
     now: DateTime<Utc>,
 ) -> Result<(), String> {
     let payload = channels::render(ch, &Alert::test(now));
-    match attempt(d, ch, origin, &payload, now, secrets).await {
+    match attempt(d, ch, origin, &payload, None, now, secrets).await {
         Outcome::Sent => Ok(()),
         Outcome::Retry { why, .. } | Outcome::Hold(why) | Outcome::Rejected(why) => Err(why),
     }
@@ -387,7 +413,16 @@ async fn send(d: &Delivery<'_>, ch: &ChannelConfig, origin: Origin, req: Request
                 Ok(a) => a,
                 Err(why) => return Outcome::Hold(why),
             };
-            send_http(&parsed, &addrs, body, &headers, auth.as_ref(), &redact).await
+            send_http(
+                |s, b| blame(ch, s, b),
+                &parsed,
+                &addrs,
+                body,
+                &headers,
+                auth.as_ref(),
+                &redact,
+            )
+            .await
         }
         Request::Email(msg) => {
             let ChannelConfig::Email(c) = ch else {
@@ -418,9 +453,224 @@ fn scrub(mut s: String, secrets: &[String]) -> String {
     s
 }
 
+/// The outbox row an attempt is for (none for a test send).
+#[derive(Debug, Clone, Copy)]
+struct RowRef {
+    attempts: i32,
+}
+
+/// Whether Jira already has the issue labelled `label` (an earlier attempt
+/// created it). Tries the current search API,
+/// then the Data Center one. Failures follow the send rules: a refused
+/// destination or a channel-fault status holds the queue, 429 and 5xx retry.
+/// A query Jira refuses (400) counts as not found: a duplicate issue is
+/// better than an alert never sent.
+async fn jira_issue_exists(
+    d: &Delivery<'_>,
+    c: &crate::config::JiraChannel,
+    origin: Origin,
+    secrets: &Secrets,
+    label: &str,
+) -> Result<bool, Outcome> {
+    let hold = |why: String| Outcome::Hold(why);
+    let retry = |why: String| Outcome::Retry {
+        retry_after_secs: None,
+        why,
+    };
+    let auth = channels::jira_auth(c, secrets).map_err(|e| hold(format!("{e:#}")))?;
+    let base = c.url.trim_end_matches('/');
+    for path in ["/rest/api/2/search/jql", "/rest/api/2/search"] {
+        let url = reqwest::Url::parse_with_params(
+            &format!("{base}{path}"),
+            &[
+                // The label is random per queued issue, so it alone finds the
+                // issue, even if the channel's project changed since.
+                ("jql", format!("labels = \"{label}\"")),
+                ("maxResults", "1".to_string()),
+                ("fields", "key".to_string()),
+            ],
+        )
+        .map_err(|_| hold("the channel URL is not a valid URL".to_string()))?;
+        let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+            return Err(hold("the channel URL has no host".to_string()));
+        };
+        let addrs = d.egress.resolve(host, port, origin).await.map_err(hold)?;
+        let http = pinned_client(&url, &addrs).map_err(retry)?;
+        let rb = http
+            .get(url.clone())
+            .timeout(std::time::Duration::from_secs(SEND_TIMEOUT_SECS));
+        let rb = match &auth {
+            HttpAuth::Basic(u, p) => rb.basic_auth(u, Some(p)),
+            HttpAuth::Bearer(t) => rb.bearer_auth(t),
+        };
+        let resp = rb.send().await.map_err(|e| {
+            retry(format!(
+                "searching Jira for an earlier attempt: {}",
+                e.without_url()
+            ))
+        })?;
+        let status = resp.status();
+        match status.as_u16() {
+            404 => continue,
+            400 => return Ok(false),
+            401 | 403 => {
+                return Err(hold(format!(
+                    "{status}: check the channel's settings, credentials and permissions"
+                )))
+            }
+            _ if !status.is_success() => {
+                // Honour the server's wait, as a send does.
+                let retry_after_secs = resp
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .map(|s| s.clamp(0, BACKOFF_CAP_SECS));
+                return Err(Outcome::Retry {
+                    retry_after_secs,
+                    why: format!("searching Jira for an earlier attempt: {status}"),
+                });
+            }
+            _ => {}
+        }
+        // An answer that can't be read, or has no issue list, says nothing
+        // about an earlier issue: retry rather than risk a duplicate.
+        let Some(Some(issues)) = capped_json(resp)
+            .await
+            .map(|b| b["issues"].as_array().map(|i| !i.is_empty()))
+        else {
+            return Err(retry(
+                "searching Jira for an earlier attempt: no readable answer".to_string(),
+            ));
+        };
+        return Ok(issues);
+    }
+    Err(hold("Jira has no search API at this URL".to_string()))
+}
+
+/// The largest response body read: an error or search body only needs to
+/// say which field was refused, or how long to wait.
+const MAX_BODY: usize = 64 * 1024;
+
+/// The body of `resp` as JSON, reading at most `MAX_BODY` bytes: Null when
+/// longer or not JSON. `None` when the connection failed mid-body, so the
+/// caller retries instead of judging a partial answer.
+async fn capped_json(mut resp: reqwest::Response) -> Option<Value> {
+    let mut buf = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) if buf.len() + chunk.len() > MAX_BODY => return Some(Value::Null),
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => return Some(serde_json::from_slice(&buf).unwrap_or(Value::Null)),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// A client that connects only to `addrs` for `url`'s host and never follows
+/// a redirect.
+fn pinned_client(
+    url: &reqwest::Url,
+    addrs: &[std::net::SocketAddr],
+) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .resolve_to_addrs(url.host_str().unwrap_or_default(), addrs)
+        .build()
+        .map_err(|e| format!("building the http client: {e}"))
+}
+
+/// Whose fault an HTTP client error (4xx other than 429) is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Blame {
+    /// The server refused this alert's payload: sending it again would fail
+    /// again, so it is dropped (marked failed) and the queue moves on.
+    Alert,
+    /// The channel is misconfigured or gone. Every alert would fail the
+    /// same way, so the queue is held until it is fixed and nothing is lost.
+    Channel,
+}
+
+/// What a refusal body says, for the reason shown in the console: Jira's
+/// messages and refused fields, or Telegram's description. At most 300
+/// characters; `attempt` scrubs secrets from it.
+fn refusal(body: &Value) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for m in body["errorMessages"].as_array().into_iter().flatten() {
+        parts.extend(m.as_str().map(str::to_string));
+    }
+    for (k, v) in body["errors"].as_object().into_iter().flatten() {
+        parts.push(format!("{k}: {}", v.as_str().unwrap_or_default()));
+    }
+    parts.extend(body["description"].as_str().map(str::to_string));
+    let joined = parts.join("; ");
+    (!joined.is_empty()).then(|| joined.chars().take(300).collect())
+}
+
+/// Who a client error from `ch` blames, given the response body (JSON, or
+/// null). Every channel type decides here, with no catch-all arm: a new type
+/// must choose, because dropping an alert for a channel's mistake loses it
+/// for good.
+pub(crate) fn blame(ch: &ChannelConfig, status: StatusCode, body: &Value) -> Blame {
+    // Credentials, permissions, a deleted webhook or chat: never the alert.
+    if matches!(status.as_u16(), 401 | 403 | 404 | 410) {
+        return Blame::Channel;
+    }
+    let bad_request = status == StatusCode::BAD_REQUEST;
+    match ch {
+        // Jira names the fields it refused. Heimdall fills only the summary
+        // and the description from the alert; any other field (the project,
+        // issue type, labels, or a field the project requires) is the
+        // channel's setup. A refusal with only a message and no field is
+        // about this issue's content. A body Jira didn't send (unreadable,
+        // too long) can't say, so the queue is held rather than lose it.
+        ChannelConfig::Jira(_) if bad_request => {
+            let from_alert = |k: &String| matches!(k.as_str(), "summary" | "description");
+            let messages = body["errorMessages"]
+                .as_array()
+                .is_some_and(|m| !m.is_empty());
+            match body["errors"].as_object() {
+                Some(e) if !e.is_empty() => {
+                    if e.keys().all(from_alert) {
+                        Blame::Alert
+                    } else {
+                        Blame::Channel
+                    }
+                }
+                _ if messages => Blame::Alert,
+                _ => Blame::Channel,
+            }
+        }
+        // A deleted chat, a bot removed from it, or a group that became a
+        // supergroup (its chat_id changed).
+        ChannelConfig::Telegram(_)
+            if bad_request
+                && (body["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("chat not found"))
+                    || body["parameters"]["migrate_to_chat_id"].is_i64()) =>
+        {
+            Blame::Channel
+        }
+        ChannelConfig::Jira(_)
+        | ChannelConfig::Teams(_)
+        | ChannelConfig::Slack(_)
+        | ChannelConfig::Discord(_)
+        | ChannelConfig::Mattermost(_)
+        | ChannelConfig::Telegram(_)
+        | ChannelConfig::PagerDuty(_)
+        | ChannelConfig::Alertmanager(_)
+        | ChannelConfig::Webhook(_)
+        | ChannelConfig::Email(_) => Blame::Alert,
+    }
+}
+
 /// POST `body` to `url`, connecting only to `addrs` (checked by `Egress`)
-/// and never following a redirect, which could lead anywhere.
+/// and never following a redirect, which could lead anywhere. `blame`
+/// decides what a client error means (see [`blame`]).
 async fn send_http(
+    blame: impl Fn(StatusCode, &Value) -> Blame,
     url: &reqwest::Url,
     addrs: &[std::net::SocketAddr],
     body: Vec<u8>,
@@ -428,17 +678,12 @@ async fn send_http(
     auth: Option<&HttpAuth>,
     redact: &[String],
 ) -> Outcome {
-    let http = match reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .resolve_to_addrs(url.host_str().unwrap_or_default(), addrs)
-        .build()
-    {
+    let http = match pinned_client(url, addrs) {
         Ok(c) => c,
-        Err(e) => {
+        Err(why) => {
             return Outcome::Retry {
                 retry_after_secs: None,
-                why: format!("building the http client: {e}"),
+                why,
             }
         }
     };
@@ -490,7 +735,7 @@ async fn send_http(
         let retry_after = match header {
             Some(s) => Some(s),
             None if status == StatusCode::TOO_MANY_REQUESTS => {
-                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let body = capped_json(resp).await.unwrap_or(Value::Null);
                 body["retry_after"]
                     .as_f64()
                     .or(body["parameters"]["retry_after"].as_f64())
@@ -504,7 +749,21 @@ async fn send_http(
             why: format!("{status}"),
         };
     }
-    Outcome::Rejected(format!("{status}"))
+    let Some(body) = capped_json(resp).await else {
+        return Outcome::Retry {
+            retry_after_secs: None,
+            why: format!("{status}, and the connection failed while reading the answer"),
+        };
+    };
+    match blame(status, &body) {
+        Blame::Alert => Outcome::Rejected(match refusal(&body) {
+            Some(why) => format!("{status}: {why}"),
+            None => format!("{status}"),
+        }),
+        Blame::Channel => Outcome::Hold(format!(
+            "{status}: check the channel's settings, credentials and permissions"
+        )),
+    }
 }
 
 /// The delay before the next attempt: 30 s doubled per earlier attempt,
@@ -537,7 +796,16 @@ mod tests {
             .resolve(&host, url.port_or_known_default().unwrap(), Origin::Config)
             .await
             .unwrap();
-        send_http(&url, &addrs, b"{}".to_vec(), &[], None, redact).await
+        send_http(
+            |_, _| Blame::Alert,
+            &url,
+            &addrs,
+            b"{}".to_vec(),
+            &[],
+            None,
+            redact,
+        )
+        .await
     }
 
     /// The connection goes to the checked addresses, not to whatever the
@@ -552,7 +820,16 @@ mod tests {
             .await;
         let addr = *server.address();
         let url = reqwest::Url::parse(&format!("http://pinned.invalid:{}/", addr.port())).unwrap();
-        let out = send_http(&url, &[addr], b"{}".to_vec(), &[], None, &[]).await;
+        let out = send_http(
+            |_, _| Blame::Alert,
+            &url,
+            &[addr],
+            b"{}".to_vec(),
+            &[],
+            None,
+            &[],
+        )
+        .await;
         assert_eq!(out, Outcome::Sent);
         server.verify().await;
     }

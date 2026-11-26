@@ -26,8 +26,8 @@ It does four things:
 4. **Blocks bad builds.** `heimdall gate` (Hofund) fails a CI build when it
    finds vulnerabilities, using the same data.
 
-Alerts go to Microsoft Teams, Slack, Discord, Telegram, PagerDuty, Prometheus
-Alertmanager, a generic webhook or email, routed per realm and severity,
+Alerts go to Microsoft Teams, Slack, Discord, Mattermost, Telegram, PagerDuty,
+Prometheus Alertmanager, Jira, a generic webhook or email, routed per realm and severity,
 grouped per advisory or release so one CVE is one alert, and sent once. Heimdall is **not
 exposed to the internet**: CI runs on self-hosted runners that reach the
 in-cluster Service.
@@ -80,7 +80,9 @@ channels:
     min_severity: high
 ```
 
-Also `discord` (`webhook_env`) and `telegram` (`bot_token_env`, `chat_id`).
+Also `discord` and `mattermost` (`webhook_env`), `telegram` (`bot_token_env`,
+`chat_id`) and `jira` (`url`, `project`, `token_env`, plus `username_env` for
+Jira Cloud; one issue per alert).
 Each channel gets its own queued copy with the same pacing, retries and
 exactly-once delivery; the weekly digest goes to every channel covering the
 realm (paging channels, PagerDuty and Alertmanager, only with `digest: true`).
@@ -114,7 +116,7 @@ Code modules use plain names so the source is easy to navigate. See also
 | **Bifröst** | The ingest API: everything entering Heimdall (SBOM uploads, cluster inventory) crosses it | `ingest` |
 | **Sight** | Inventory scanning: what is actually running (cluster scanner + image SBOM job) | `inventory` |
 | **Watchers** | Pollers for new releases and new advisories ("Heimdall hears the grass grow") | `watchers` |
-| **Gjallarhorn** | The notifier: alerts on Teams, Slack, Discord, Telegram, PagerDuty, Alertmanager, webhooks or email, and the weekly digest | `notify` |
+| **Gjallarhorn** | The notifier: alerts on Teams, Slack, Discord, Mattermost, Telegram, PagerDuty, Alertmanager, Jira, webhooks or email, and the weekly digest | `notify` |
 | **Hofund** | The CI gate that blocks a build at the bridge | `gate` |
 | **Oath** | A suppression: ignore or snooze a CVE, with a reason | `oath` |
 
@@ -264,7 +266,7 @@ is a complete example.
 | `admins` | `[]` | Key names allowed to hold an `admin` key (besides `bootstrap`). One key per person. Removing a name disables their admin keys on the next request. Oaths record the admin's name. |
 | `own_registries` | `[]` | Registry hosts or `host/org` prefixes (e.g. `ghcr.io/mrashed98`). Those images are CVE-scanned but never release-watched. |
 | `teams[]` | `[]` | Teams routes. Each: `name`, `webhook_env` (name of the env var holding the webhook URL), `realms` (empty = all), `min_severity` (`critical`, `high`, `medium`, `low`). |
-| `channels[]` | `[]` | Alert channels of any `type`: `teams`, `slack`, `discord`, `telegram`, `pagerduty`, `alertmanager`, `webhook`, `email`. Each: `name` (unique across `teams` and `channels`), `realms`, `min_severity`, plus its type's keys. Secrets only via `*_env` keys. See [Alert channels](#alert-channels). |
+| `channels[]` | `[]` | Alert channels of any `type`: `teams`, `slack`, `discord`, `mattermost`, `telegram`, `pagerduty`, `alertmanager`, `jira`, `webhook`, `email`. Each: `name` (unique across `teams` and `channels`), `realms`, `min_severity`, plus its type's keys. Secrets only via `*_env` keys. See [Alert channels](#alert-channels). |
 | `watchers.github[]` | `[]` | `repo`, `inventory_name`, optional `major_component` (see below), optional `cpe`. |
 | `watchers.endoflife[]` | `[]` | `product`, `inventory_name`, optional `major_component`, `cpe`, and `repo` (GitHub repo for release notes). |
 | `watchers.tf_registry[]` | `[]` | `registry` (`registry.terraform.io` or `registry.opentofu.org`), `kind` (`provider` or `module`), `source`, `current` (version you run). |

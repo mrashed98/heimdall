@@ -349,7 +349,7 @@
                 {/if}
               </div>
             {:else}
-              <Input label={field.label} type={draft.visible[field.key] ? 'text' : 'password'} bind:value={draft.values[field.key]} required={field.required || change === 'replace'} autocomplete="new-password" spellcheck={false} hint="This value can't be shown again." />
+              <Input label={field.label} type={draft.visible[field.key] ? 'text' : 'password'} bind:value={draft.values[field.key]} required={field.required || change === 'replace'} autocomplete="new-password" spellcheck={false} hint={field.hint ? `${field.hint} This value can't be shown again.` : "This value can't be shown again."} />
               <div class="controls">
                 <Button size="sm" variant="ghost" aria-label={`${draft.visible[field.key] ? 'Hide' : 'Show'} ${field.label}`} onclick={() => draft.visible[field.key] = !draft.visible[field.key]}>{draft.visible[field.key] ? 'Hide' : 'Show'}</Button>
                 {#if signing}

@@ -6,6 +6,8 @@
 pub mod alertmanager;
 pub mod discord;
 pub mod email;
+pub mod jira;
+pub mod mattermost;
 pub mod pagerduty;
 pub mod slack;
 pub mod telegram;
@@ -29,6 +31,8 @@ pub fn render(ch: &ChannelConfig, a: &Alert) -> Value {
         ChannelConfig::Teams(_) => teams::render(a),
         ChannelConfig::Slack(_) => slack::render(a),
         ChannelConfig::Discord(_) => discord::render(a),
+        ChannelConfig::Mattermost(_) => mattermost::render(a),
+        ChannelConfig::Jira(_) => jira::render(a),
         ChannelConfig::Telegram(_) => telegram::render(a),
         ChannelConfig::PagerDuty(_) => pagerduty::render(a),
         ChannelConfig::Alertmanager(_) => alertmanager::render(a),
@@ -55,7 +59,13 @@ fn secret_vars(ch: &ChannelConfig) -> Vec<&str> {
     let mut required: Vec<&str> = Vec::new();
     match ch {
         ChannelConfig::Teams(c) => required.push(&c.webhook_env),
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => required.push(&c.webhook_env),
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
+            required.push(&c.webhook_env)
+        }
+        ChannelConfig::Jira(c) => {
+            required.push(&c.token_env);
+            required.extend(c.username_env.as_deref());
+        }
         ChannelConfig::Telegram(c) => required.push(&c.bot_token_env),
         ChannelConfig::PagerDuty(c) => required.push(&c.routing_key_env),
         ChannelConfig::Alertmanager(c) => {
@@ -98,7 +108,10 @@ pub fn secret_values(ch: &ChannelConfig, secrets: &Secrets) -> Vec<String> {
 pub fn destination(ch: &ChannelConfig, secrets: &Secrets) -> Option<(String, u16)> {
     let url = match ch {
         ChannelConfig::Teams(c) => secret(&c.webhook_env, secrets)?,
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => secret(&c.webhook_env, secrets)?,
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
+            secret(&c.webhook_env, secrets)?
+        }
+        ChannelConfig::Jira(c) => c.url.clone(),
         ChannelConfig::Telegram(c) => c.api_url.clone().unwrap_or(telegram::API_URL.to_string()),
         ChannelConfig::PagerDuty(c) => c.url.clone().unwrap_or(pagerduty::EVENTS_URL.to_string()),
         ChannelConfig::Alertmanager(c) => c.url.clone(),
@@ -107,6 +120,38 @@ pub fn destination(ch: &ChannelConfig, secrets: &Secrets) -> Option<(String, u16
     };
     let u = reqwest::Url::parse(&url).ok()?;
     Some((u.host_str()?.to_string(), u.port_or_known_default()?))
+}
+
+/// How `c` authenticates: basic auth with the account email when
+/// `username_env` is set (Jira Cloud), else a bearer token (Data Center).
+pub fn jira_auth(c: &crate::config::JiraChannel, secrets: &Secrets) -> anyhow::Result<HttpAuth> {
+    let need = |var: &str| secret(var, secrets).ok_or_else(|| anyhow::anyhow!("{var} is not set"));
+    let token = need(&c.token_env)?;
+    Ok(match &c.username_env {
+        Some(u) => HttpAuth::Basic(need(u)?, token),
+        None => HttpAuth::Bearer(token),
+    })
+}
+
+/// The prefix of the random label each queued Jira issue carries, so a retry
+/// can tell that an earlier attempt already created it.
+const JIRA_ATTEMPT_PREFIX: &str = "heimdall-q-";
+
+/// A new random attempt label. Random rather than the outbox id: ids repeat
+/// across installs (staging and prod) and database restores sharing a site.
+pub fn new_jira_attempt_label() -> String {
+    let b: [u8; 8] = rand::random();
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{JIRA_ATTEMPT_PREFIX}{hex}")
+}
+
+/// The attempt label of a queued Jira payload, if it has one.
+pub fn jira_attempt_label(payload: &Value) -> Option<&str> {
+    payload["fields"]["labels"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|l| l.starts_with(JIRA_ATTEMPT_PREFIX))
 }
 
 /// HTTP authentication added to a request (never put in the URL).
@@ -153,8 +198,29 @@ pub fn request(
     };
     Ok(match ch {
         ChannelConfig::Teams(c) => http(need(&c.webhook_env)?, json(payload)),
-        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => {
+        ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
             http(need(&c.webhook_env)?, json(payload))
+        }
+        ChannelConfig::Jira(c) => {
+            let auth = jira_auth(c, secrets)?;
+            let redact = match &auth {
+                HttpAuth::Basic(u, p) => vec![u.clone(), p.clone()],
+                HttpAuth::Bearer(t) => vec![t.clone()],
+            };
+            let auth = Some(auth);
+            let mut issue = payload.clone();
+            // Jira keys are uppercase; a lowercase one in the config still works.
+            issue["fields"]["project"] = serde_json::json!({"key": c.project.to_ascii_uppercase()});
+            issue["fields"]["issuetype"] = serde_json::json!({
+                "name": c.issue_type.as_deref().unwrap_or(jira::DEFAULT_ISSUE_TYPE)
+            });
+            Request::Http {
+                url: format!("{}/rest/api/2/issue", c.url.trim_end_matches('/')),
+                body: json(&issue),
+                headers: Vec::new(),
+                auth,
+                redact,
+            }
         }
         ChannelConfig::Telegram(c) => {
             let token = need(&c.bot_token_env)?;

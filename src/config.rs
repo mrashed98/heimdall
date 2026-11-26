@@ -426,6 +426,12 @@ fn check_url(key: &str, raw: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether a channel of type `kind` gets the digest when its `digest` key is
+/// unset.
+pub fn digest_by_default(kind: &str) -> bool {
+    !matches!(kind, "pagerduty" | "alertmanager" | "jira")
+}
+
 /// One alert channel. `type` picks the kind; every kind has `name`,
 /// `realms` (empty: all) and `min_severity`. Secrets are never written
 /// inline: `*_env` keys name the environment variable that holds them.
@@ -440,6 +446,8 @@ pub enum ChannelConfig {
     Alertmanager(AlertmanagerChannel),
     Webhook(GenericWebhookChannel),
     Email(EmailChannel),
+    Mattermost(WebhookChannel),
+    Jira(JiraChannel),
 }
 
 /// The fields every channel type shares.
@@ -447,12 +455,15 @@ macro_rules! common {
     ($self:ident, $c:ident => $e:expr) => {
         match $self {
             ChannelConfig::Teams($c) => $e,
-            ChannelConfig::Slack($c) | ChannelConfig::Discord($c) => $e,
+            ChannelConfig::Slack($c)
+            | ChannelConfig::Discord($c)
+            | ChannelConfig::Mattermost($c) => $e,
             ChannelConfig::Telegram($c) => $e,
             ChannelConfig::PagerDuty($c) => $e,
             ChannelConfig::Alertmanager($c) => $e,
             ChannelConfig::Webhook($c) => $e,
             ChannelConfig::Email($c) => $e,
+            ChannelConfig::Jira($c) => $e,
         }
     };
 }
@@ -482,19 +493,19 @@ impl ChannelConfig {
             ChannelConfig::Alertmanager(_) => "alertmanager",
             ChannelConfig::Webhook(_) => "webhook",
             ChannelConfig::Email(_) => "email",
+            ChannelConfig::Mattermost(_) => "mattermost",
+            ChannelConfig::Jira(_) => "jira",
         }
     }
 
     /// Does this channel cover `realm`? An empty realm list covers all.
     /// Does this channel receive the weekly digest and the first-run
     /// summary? The `digest` key, else true except for paging channels
-    /// (PagerDuty, Alertmanager), where a weekly summary would page someone.
+    /// (PagerDuty, Alertmanager), where a weekly summary would page someone,
+    /// and Jira, where it would open an issue every week.
     pub fn wants_digest(&self) -> bool {
         let explicit = common!(self, c => c.digest);
-        explicit.unwrap_or(!matches!(
-            self,
-            ChannelConfig::PagerDuty(_) | ChannelConfig::Alertmanager(_)
-        ))
+        explicit.unwrap_or(digest_by_default(self.type_name()))
     }
 
     pub fn covers(&self, realm: &str) -> bool {
@@ -507,8 +518,33 @@ impl ChannelConfig {
         use anyhow::bail;
         match self {
             ChannelConfig::Teams(c) => check_env(&format!("{key}.webhook_env"), &c.webhook_env),
-            ChannelConfig::Slack(c) | ChannelConfig::Discord(c) => {
+            ChannelConfig::Slack(c) | ChannelConfig::Discord(c) | ChannelConfig::Mattermost(c) => {
                 check_env(&format!("{key}.webhook_env"), &c.webhook_env)
+            }
+            ChannelConfig::Jira(c) => {
+                check_url(&format!("{key}.url"), &c.url)?;
+                let u = url::Url::parse(&c.url)?;
+                if u.query().is_some() || u.fragment().is_some() {
+                    bail!("{key}.url must be the site URL, without a query or fragment");
+                }
+                // Jira project keys: a letter, then letters, digits or `_`.
+                // Sent uppercase, so `sec` works for `SEC`.
+                let p = c.project.as_bytes();
+                if p.len() < 2
+                    || !p[0].is_ascii_alphabetic()
+                    || !p.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                {
+                    bail!(
+                        "{key}.project must be a Jira project key such as SEC (letters, \
+                         digits and _, starting with a letter), got `{}`",
+                        c.project
+                    );
+                }
+                if c.issue_type.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    bail!("{key}.issue_type must not be empty when set");
+                }
+                check_env(&format!("{key}.token_env"), &c.token_env)?;
+                check_opt_env(&format!("{key}.username_env"), &c.username_env)
             }
             ChannelConfig::Telegram(c) => {
                 check_env(&format!("{key}.bot_token_env"), &c.bot_token_env)?;
@@ -581,7 +617,29 @@ impl ChannelConfig {
     }
 }
 
-/// Slack or Discord: an incoming webhook whose URL is the secret.
+/// Jira: one issue per alert. With `username_env` the token is sent with
+/// basic auth (Jira Cloud: the account email and an API token); without it,
+/// as a bearer token (Jira Data Center: a personal access token).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JiraChannel {
+    pub name: String,
+    /// The site, e.g. `https://example.atlassian.net`.
+    pub url: String,
+    /// Project key, e.g. `SEC`.
+    pub project: String,
+    /// Issue type name. Default: `Task`.
+    pub issue_type: Option<String>,
+    pub username_env: Option<String>,
+    pub token_env: String,
+    #[serde(default)]
+    pub realms: Vec<String>,
+    pub min_severity: Severity,
+    /// Receive the weekly digest and the first-run summary. Default: false.
+    pub digest: Option<bool>,
+}
+
+/// Slack, Discord or Mattermost: an incoming webhook whose URL is the secret.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookChannel {
@@ -1118,7 +1176,7 @@ channels:\n\
             .collect();
         assert!(block.len() > 5, "example block not found");
         let cfg = load_str(&format!("realms: [dev-k3s]\n{}", block.join("\n"))).unwrap();
-        assert_eq!(cfg.channels.len(), 6);
+        assert_eq!(cfg.channels.len(), 8);
     }
 
     #[test]

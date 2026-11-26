@@ -127,17 +127,17 @@ Every channel has:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `type` | `teams`, `slack`, `discord`, `telegram`, `pagerduty`, `alertmanager`, `webhook`, `email` | The kind of channel. **Required.** |
+| `type` | `teams`, `slack`, `discord`, `mattermost`, `telegram`, `pagerduty`, `alertmanager`, `jira`, `webhook`, `email` | The kind of channel. **Required.** |
 | `name` | string | Channel name, unique across `teams` and `channels`. **Required.** |
 | `realms` | list of strings | Realms this channel covers. Empty means all. Default `[]`. |
 | `min_severity` | `critical`, `high`, `medium`, `low`, `unknown` | Lowest severity the channel receives. **Required.** |
-| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty` and `alertmanager`. Also accepted on `teams` routes. |
+| `digest` | boolean | Receive the weekly digest and the first-run summary. Default `true`, except `false` for `pagerduty`, `alertmanager` and `jira`. Also accepted on `teams` routes. |
 
 And, by type (keys of other types are rejected):
 
 | Type | Key | Type | Meaning |
 |---|---|---|---|
-| `teams`, `slack`, `discord` | `webhook_env` | string | Variable holding the webhook URL. **Required.** |
+| `teams`, `slack`, `discord`, `mattermost` | `webhook_env` | string | Variable holding the webhook URL. **Required.** |
 | `telegram` | `bot_token_env` | string | Variable holding the bot token. **Required.** |
 | `telegram` | `chat_id` | integer or string | Chat id (`-1001234567890`) or `@channelname`. **Required.** |
 | `telegram` | `api_url` | URL | Bot API base. Default `https://api.telegram.org`. |
@@ -155,6 +155,11 @@ And, by type (keys of other types are rejected):
 | `email` | `username_env`, `password_env` | string | Variables holding the SMTP login (both or neither; not with `security: none`). |
 | `email` | `from` | string | Sender address. **Required.** |
 | `email` | `to` | list of strings | Recipients, at least one. **Required.** |
+| `jira` | `url` | URL | Jira site, e.g. `https://example.atlassian.net`. No credentials in it. **Required.** |
+| `jira` | `project` | string | Project key, such as `SEC`; sent uppercase. **Required.** |
+| `jira` | `issue_type` | string | Issue type name. Default `Task`. |
+| `jira` | `token_env` | string | Variable holding the API token or personal access token. **Required.** |
+| `jira` | `username_env` | string | Variable holding the account email (Jira Cloud: basic auth). Without it the token is sent as a bearer token. |
 
 ```yaml
 channels:
