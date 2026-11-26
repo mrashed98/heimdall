@@ -262,6 +262,20 @@ registries:
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `sight.realm` | string | first of `realms` | The realm of the cluster Heimdall itself runs in. In-process Sight scans it, and is skipped when no cluster is reachable. |
+| `sight.docker.host` | string | `unix:///var/run/docker.sock` | The Docker Engine API to read: a socket (`unix://`) or a socket proxy (`tcp://host:2375`). Plain HTTP only. Setting `sight.docker` turns Sight for Docker on. |
+| `sight.docker.name` | string | the name Docker reports | The host's name in service names (`<name>/<service>`). No `/`. |
+| `sight.docker.realm` | string | `sight.realm` | The realm the host's containers belong to. Must be in `realms`. |
+
+Sight for Docker runs on the Sight schedule (`schedules.sight_minutes`). It
+only reads (`GET /info`, `/containers/json`, `/images/{id}/json`). See
+[Sight for Docker](/heimdall/getting-started/without-kubernetes/#sight-for-docker).
+
+```yaml
+sight:
+  docker:
+    host: tcp://docker-proxy:2375
+    name: vm1
+```
 
 ## `schedules`
 

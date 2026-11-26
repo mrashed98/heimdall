@@ -9,6 +9,12 @@ each version, with the binaries and container image tags.
 
 ## Unreleased
 
+- **Sight for Docker.** Heimdall can read a Docker host's running containers
+  (`sight.docker` in `heimdall.yaml`, or `heimdall sight --docker`) and track
+  them like a cluster's pods: each container is a service `<host>/<name>`.
+  A host's scan only replaces that host's services, so a realm can hold a
+  cluster and Docker hosts together. See [Sight for
+  Docker](/heimdall/getting-started/without-kubernetes/#sight-for-docker).
 - **Alert channels in the console.** Settings → Alert channels lists every
   channel, from `heimdall.yaml` and from the console, with its delivery health.
   Admins can add, edit, delete and test channels of every type there, with no

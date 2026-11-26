@@ -199,7 +199,8 @@ Docker Compose (Heimdall and Postgres on one host) and a hardened systemd unit
 for the static release binary are in `deploy/compose/` and `deploy/systemd/`.
 See [Install without Kubernetes](https://mrashed98.github.io/heimdall/getting-started/without-kubernetes/);
 outside a cluster, the inventory comes from SBOM uploads, declared components,
-and `heimdall sight --push` from any cluster you also run.
+`heimdall sight --push` from any cluster you also run, and Sight for Docker,
+which reads a Docker host's running containers.
 
 ## Deploy on Kubernetes (Helm)
 

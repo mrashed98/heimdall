@@ -19,6 +19,8 @@ Everything works the same except reading a cluster:
   client` at startup and skips it. If you also run a cluster elsewhere, run
   `heimdall sight --realm <realm> --push <this server's URL>` there (with
   `HEIMDALL_API_KEY` set) and it sends that cluster's inventory here.
+- **Docker hosts instead.** [Sight for Docker](#sight-for-docker) reads the
+  containers a Docker host runs, including the one Heimdall itself runs on.
 - **What you run comes from:**
   - SBOMs uploaded from CI, by [`heimdall gate`](/heimdall/guides/ci-gate/) or
     by `POST /api/v1/ingest/sbom` (see the
@@ -31,10 +33,69 @@ Everything works the same except reading a cluster:
     [`watchers`](/heimdall/reference/configuration/#watchers), which need no
     inventory at all.
 - **No image scanner job.** `heimdall scan-images` scans the images Sight
-  found, so without a cluster it has nothing to do. Upload image SBOMs from CI
-  instead.
+  found. Without a cluster it only has work when [Sight for
+  Docker](#sight-for-docker) is on; otherwise upload image SBOMs from CI.
 
 Alerts, the web console, oaths, the CI gate and the API are unchanged.
+
+## Sight for Docker
+
+Sight for Docker lists a Docker host's running containers and reports them
+like Sight reports a cluster:
+
+- Each container is a service named `<host>/<name>`. The name is the
+  container's `heimdall.service` label, else its Compose service, else the
+  container name.
+- Its image is a component, so its advisories and new releases are found
+  like a pod's. An image pulled from a registry (it has a registry digest)
+  is also queued for the SBOM scanner; a locally built one is not.
+- The host's OS (Ubuntu or Debian) is a component of the service `<host>`.
+
+A host's scan replaces that host's services only: a realm can hold a
+cluster and any number of Docker hosts. Heimdall only reads from Docker
+(`GET /info`, `/containers/json` and `/images/{id}/json`).
+
+<Aside type="caution" title="The Docker socket">
+Access to the Docker socket is root on the host. Give Heimdall a read-only
+socket proxy rather than the socket itself.
+</Aside>
+
+With the Compose install, add a socket proxy next to Heimdall:
+
+```yaml
+services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    restart: unless-stopped
+    environment:
+      INFO: 1
+      CONTAINERS: 1
+      IMAGES: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+```
+
+and point Heimdall at it in `heimdall.yaml`:
+
+```yaml
+sight:
+  docker:
+    host: tcp://docker-proxy:2375
+    name: vm1        # optional; default: the name Docker reports
+```
+
+It runs at startup and then every `schedules.sight_minutes` (15 by
+default). To report other Docker hosts to this server, run this on each
+of them (from cron or a systemd timer), with `HEIMDALL_API_KEY` set to an
+ingest key:
+
+```bash
+heimdall sight --docker --realm prod --push https://heimdall.example.com
+```
+
+The images it finds can be scanned for SBOMs with `heimdall scan-images`
+(it needs `syft` and access to the registries), on a schedule of your
+choice.
 
 ## Docker Compose
 

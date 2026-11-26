@@ -142,13 +142,19 @@ only once.
 
 ## `heimdall sight`
 
-Scan a cluster and ingest its inventory.
+Scan a cluster, or with `--docker` a Docker host, and ingest its inventory.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--realm NAME` | required | Realm the cluster belongs to. |
+| `--realm NAME` | required | Realm the cluster or host belongs to. |
 | `--push URL` | off | POST to this Heimdall instead of ingesting in-process (scout mode). Needs `HEIMDALL_API_KEY`. |
 | `--config FILE` | `heimdall.yaml` | Config path, for in-process mode (also needs `DATABASE_URL`). |
+| `--docker` | off | Read a Docker host's running containers instead of a cluster. |
+| `--docker-host URL` | `unix:///var/run/docker.sock` | The Docker Engine API, `unix://` or `tcp://`. |
+| `--docker-name NAME` | the name Docker reports | The host's name in service names. |
+
+A Docker scan replaces only that host's services, so it never empties a
+cluster's or another host's, and a host running nothing is a valid scan.
 
 Prints `sight: N services, N components added, N removed`.
 
