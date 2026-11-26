@@ -398,8 +398,19 @@ async fn jira_issue_rejected_for_its_own_content_moves_on(pool: PgPool) {
         server.uri()
     ));
     let id = queue(&pool, "j", "jira", &render(&c.channels[0], &vuln_alert())).await;
+    let next = queue(&pool, "j", "jira", &render(&c.channels[0], &major_alert())).await;
     assert_eq!(drain(&pool, &c).await.failed, 1);
     assert_eq!(row(&pool, id).await.card["failed"], json!(true));
+    // The next issue is tried right away, not held behind the refused one.
+    server.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"key": "SEC-9"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(drain(&pool, &c).await.sent, 1);
+    assert!(row(&pool, next).await.sent_at.is_some());
+    server.verify().await;
 }
 
 /// Queuing gives each Jira issue a random label (stored with the row, never

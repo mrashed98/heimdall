@@ -69,14 +69,16 @@ console](#managing-channels-in-the-console)).
 - **Delivery** goes through the database outbox: about one message every 2
   seconds, retries with a growing delay (30 s doubling to 1 h), `Retry-After`
   honoured (clamped to 1 h), exactly once even across restarts. A message the
-  channel rejects (a 4xx other than those below, or a permanent SMTP error) is
-  not retried and counts in `heimdall_notify_failures_total{channel_type}`.
+  channel rejects (a 4xx other than 429, which is retried, and those below; or
+  a permanent SMTP error) is not retried and counts in
+  `heimdall_notify_failures_total{channel_type}`.
 - **A broken channel keeps its alerts.** Some answers mean the channel is
   wrong, not the message: 401, 403, 404 and 410 from any channel (bad
   credentials or permissions, or a webhook deleted where the service answers
-  404 or 410, as Slack and Discord do), a Jira 400 about anything but the
-  summary or description, and Telegram's `chat not found` or a group that
-  became a supergroup (update `chat_id`). The channel's queue then
+  404 or 410, as Slack and Discord do), a Jira 400 that names a field other
+  than the summary or description (or names none and gives no message), and
+  Telegram's `chat not found` or a group that became a supergroup (update
+  `chat_id`). The channel's queue then
   waits and retries with the usual backoff until it is fixed, and nothing is
   discarded. A service that answers a deleted webhook with a plain 400 can't
   be told apart from a refused message, so that alert is dropped.
@@ -324,11 +326,12 @@ an earlier, timed-out attempt already created: that one stays where it is). The 
 digest is off by default (it would open an issue every week); set
 `digest: true` to have it. The account needs permission to create issues in
 the project, and the create screen needs the Labels field. A 401 or 403, or
-a 400 about any field but the summary or description (the project, the issue
-type, labels, or a field the project requires that Heimdall doesn't fill),
-keeps the issues queued until that is fixed. A 400 about the summary or
-description, or that names no field but only gives a message, drops that
-issue only, with Jira's message shown as the reason.
+a 400 that names any field but the summary or description (the project, the
+issue type, labels, or a field the project requires that Heimdall doesn't
+fill), keeps the issues queued until that is fixed; so does a 400 Heimdall
+can't read. A 400 that names only the summary or description (whatever its
+messages say), or names no field but gives a message, drops that issue only,
+with Jira's message shown as the reason.
 
 ## Managing channels in the console
 

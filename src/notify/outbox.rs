@@ -519,18 +519,31 @@ async fn jira_issue_exists(
                 )))
             }
             _ if !status.is_success() => {
-                return Err(retry(format!(
-                    "searching Jira for an earlier attempt: {status}"
-                )))
+                // Honour the server's wait, as a send does.
+                let retry_after_secs = resp
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                    .map(|s| s.clamp(0, BACKOFF_CAP_SECS));
+                return Err(Outcome::Retry {
+                    retry_after_secs,
+                    why: format!("searching Jira for an earlier attempt: {status}"),
+                });
             }
             _ => {}
         }
-        let Some(body) = capped_json(resp).await else {
+        // An answer that can't be read, or has no issue list, says nothing
+        // about an earlier issue: retry rather than risk a duplicate.
+        let Some(Some(issues)) = capped_json(resp)
+            .await
+            .map(|b| b["issues"].as_array().map(|i| !i.is_empty()))
+        else {
             return Err(retry(
-                "searching Jira for an earlier attempt: the answer was cut off".to_string(),
+                "searching Jira for an earlier attempt: no readable answer".to_string(),
             ));
         };
-        return Ok(body["issues"].as_array().is_some_and(|i| !i.is_empty()));
+        return Ok(issues);
     }
     Err(hold("Jira has no search API at this URL".to_string()))
 }
