@@ -210,8 +210,8 @@ Images are built from `deploy/Dockerfile` (server, distroless, static musl
 binary) and `deploy/Dockerfile.scanner` (syft + `heimdall scan-images`).
 
 ```bash
-docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.3.2 .
-docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.3.2 .
+docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.4.0 .
+docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.4.0 .
 ```
 
 Create a Secret (SOPS-managed in a real setup) with these keys, then install:
@@ -231,7 +231,7 @@ ones, or a branch, use `deploy/helm/heimdall` from a checkout, without
 `--version`):
 
 ```bash
-helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.3.2 \
+helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.4.0 \
   -n heimdall --create-namespace \
   --set image.repository=ghcr.io/mrashed98/heimdall \
   --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \
@@ -343,7 +343,7 @@ gradient over the letters (shown below in plain text):
 █████  ████     █    █ █ █  █   █  █████  █      █
 █   █  █        █    █   █  █   █  █   █  █      █
 █   █  █████  █████  █   █  ████   █   █  █████  █████
-the watcher at the Bifröst · v0.3.2
+the watcher at the Bifröst · v0.4.0
 ```
 
 Output is coloured when stdout is a terminal, and in CI where there is no
@@ -454,7 +454,7 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@v4
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.2
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.4.0
         with:
           service: api
           realm: dev-k3s
@@ -465,10 +465,10 @@ jobs:
 **Monorepos:** call the action once per service, each with its own `path`:
 
 ```yaml
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.2
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.4.0
         with: { service: api, realm: dev-k3s, path: services/api,
                 heimdall-url: "${{ vars.HEIMDALL_URL }}", api-key: "${{ secrets.HEIMDALL_API_KEY }}" }
-      - uses: mrashed98/heimdall/.github/actions/gate@v0.3.2
+      - uses: mrashed98/heimdall/.github/actions/gate@v0.4.0
         with: { service: web, realm: dev-k3s, path: services/web,
                 heimdall-url: "${{ vars.HEIMDALL_URL }}", api-key: "${{ secrets.HEIMDALL_API_KEY }}" }
 ```
@@ -564,8 +564,8 @@ Releases come from merging the release pull request that release-please keeps
 open on `main` (see [CONTRIBUTING](CONTRIBUTING.md#releases)). Each release
 attaches static linux binaries (`heimdall-linux-amd64`, `heimdall-linux-arm64`),
 the chart and `SHA256SUMS` to the GitHub release, pushes multi-arch images to
-ghcr tagged with the version without the `v` (tag `v0.3.2`
-gives `heimdall:0.3.2`, the tag the chart pulls by default) and `latest`, and pushes
+ghcr tagged with the version without the `v` (tag `v0.4.0`
+gives `heimdall:0.4.0`, the tag the chart pulls by default) and `latest`, and pushes
 the chart to `oci://ghcr.io/mrashed98/charts/heimdall`.
 
 ## Contributing, security and license

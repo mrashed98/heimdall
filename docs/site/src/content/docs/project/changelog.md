@@ -11,6 +11,8 @@ binaries, checksums, container image tags and the Helm chart of each version.
 
 ## Unreleased
 
+## 0.4.0
+
 - **Sight for Docker.** Heimdall can read a Docker host's running containers
   (`sight.docker` in `heimdall.yaml`, or `heimdall sight --docker`) and track
   them like a cluster's pods: each container is a service `<host>/<name>`.
@@ -53,3 +55,4 @@ binaries, checksums, container image tags and the Helm chart of each version.
   `console_channels.allowed_hosts` limits where console channels may send. See
   [Where channels may send](/heimdall/guides/alert-channels/#where-channels-may-send)
   and [ADR 0006](/heimdall/decisions/0006-channel-destinations/).
+
