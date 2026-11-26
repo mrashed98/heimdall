@@ -8,8 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const dirs = process.argv.length > 2 ? process.argv.slice(2) : ['web/src', 'docs/site/src'];
-const exts = /\.(svelte|ts|astro)$/;
+const exts = /\.(svelte|ts|js|astro)$/;
 const q = `['"\`]`;
+// An empty array or object literal, optionally parenthesized or cast (`[] as Row[]`).
+const EMPTY = String.raw`(?:\(\s*)?(?:\[\s*\]|\{\s*\})(?:\s*as\s+[\w<>\[\]]+)?(?:\s*\))?`;
 
 const rules = [
   {
@@ -31,10 +33,12 @@ const rules = [
   {
     // A failed request turned into empty data shows a false empty state
     // ("Nothing with a fix is open", "the first point appears after...") (PR #75, twice).
-    // Any arrow parameter list (none, bare, typed, async), and function() {}.
-    test: /\.catch\(\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*=>\s*(?:\[\s*\]|\{\s*\}|\(\s*\[\s*\]\s*\))|\.catch\(\s*(?:async\s+)?function\s*\w*\s*\([^)]*\)\s*\{\s*\}/g,
-    bad: ['.catch(() => [])', '.catch(e => [])', '.catch((error: unknown) => {})', '.catch(async () => [] as Row[])', '.catch(function () {})', '.catch(() => ([]))'],
-    good: ['.catch(() => null)', '.catch((e) => { failed = true; })'],
+    // An empty value as the failure handler, in any form: `.catch(cb)`,
+    // `.then(ok, cb)`, or a try/catch block that only sets one.
+    test: new RegExp(String.raw`(?:\.catch\(\s*|\.then\([^;]*?,\s*)(?:async\s+)?(?:\([^)]*\)|\w+|function\s*\w*\s*\([^)]*\))\s*(?:=>\s*)?(?:${EMPTY}|\{\s*(?:return\s+${EMPTY}\s*;?)?\s*\})\s*\)|\bcatch\s*(?:\([^)]*\))?\s*\{\s*[\w.]+\s*=\s*${EMPTY}\s*;?\s*\}`, 'g'),
+    bad: ['.catch(() => [])', '.catch(e => [])', '.catch((error: unknown) => {})', '.catch(async () => [] as Row[])', '.catch(function () {})',
+      '.catch(() => ([]))', '.catch(() => ({}))', '.catch(() => { return []; })', '.catch(e => { return {} })', '.then(ok, () => [])', 'try { load() } catch { rows = [] }', 'catch (e) { this.items = [] }'],
+    good: ['.catch(() => null)', '.catch((e) => { failed = true; })', '.then((d) => [d])', 'catch (e) { failed = true }', '.catch(() => [fallback])'],
     skip: f => /\.test\.ts$/.test(f),
     fix: 'a failed request must not look like empty data: .catch(() => null) and show that it could not be loaded, or let the page ErrorState handle it',
   },
