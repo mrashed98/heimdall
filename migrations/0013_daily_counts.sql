@@ -1,4 +1,5 @@
--- Open findings per severity at the end of each UTC day, for trend charts.
+-- Open findings per severity per UTC day, as of the last matcher pass that day,
+-- for trend charts.
 -- The matcher upserts today's row after every run; retention drops old days.
 CREATE TABLE realm_daily (
     realm text NOT NULL,

@@ -66,7 +66,7 @@
       </Panel>
     </div>
     <Panel title="Open findings over 90 days">
-      {#snippet actions()}End of each day, UTC{/snippet}
+      {#snippet actions()}Last count each day, UTC{/snippet}
       {#if trend === null}<p class="muted small">Trend data could not be loaded.</p>
       {:else if recorded.length}
         <div class="trends">

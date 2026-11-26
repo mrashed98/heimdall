@@ -20,6 +20,11 @@ describe('trend series', () => {
     expect(lineShape(v(null, null))).toEqual({ runs: [], lone: [], last: -1 });
     expect(lineShape(v(0))).toEqual({ runs: [], lone: [0], last: 0 });
   });
+  it('ends on the newest row when the browser clock is behind the server', () => {
+    const rows = [{ day: '2026-11-27', realm: 'prod', critical: 4, high: 0, ...zero }];
+    const series = dailySeries(rows, 2, new Date('2026-11-26T23:59:00Z'));
+    expect(series.map(d => [d.day, d.critical])).toEqual([['2026-11-26', null], ['2026-11-27', 4]]);
+  });
   it('rounds the axis up to 1, 2 or 5 times a power of ten', () => {
     expect([0, 1, 3, 7, 12, 180, 501].map(niceMax)).toEqual([1, 1, 5, 10, 20, 200, 1000]);
   });

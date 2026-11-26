@@ -1,5 +1,5 @@
 <script lang="ts">
- import { api } from './api'; import ComponentSearch from './ComponentSearch.svelte'; import { dailySeries, type TrendRow } from './trends'; import TrendChart from './TrendChart.svelte'; import { dataUrl, nextSort } from './data-pages';
+ import { api, ApiError } from './api'; import ComponentSearch from './ComponentSearch.svelte'; import { dailySeries, type TrendRow } from './trends'; import TrendChart from './TrendChart.svelte'; import { dataUrl, nextSort } from './data-pages';
  import { Badge, DataTable, EmptyState, ErrorState, Pagination, Panel, SEVERITIES, Skeleton, Tabs } from './ui';
  let { realms, serviceId }: {realms:string[], serviceId:number|null} = $props();
  type Row = {id:number,name:string,realm:string,critical:number,high:number,medium:number,low:number,unknown:number};
@@ -9,7 +9,7 @@
  let rows=$state<Row[]>([]), items=$state<Detail[]>([]), offset=$state(0), sort=$state('realm'), order=$state('asc'), section=$state('components'), loading=$state(true), failed=$state(false), revision=$state(0);
  let url=$derived(dataUrl(serviceId ? `/api/v1/ui/services/${serviceId}/${section}` : '/api/v1/ui/services',realms,offset,sort,order));
  $effect(()=>{realms.join(','); serviceId; offset=0; section='components'; sort=serviceId?'purl':'realm'; order='asc';});
- $effect(()=>{const id=serviceId; const rs=realms.join(','); info=null; if(!id)return; let active=true; api<{name:string,realm:string}[]>(dataUrl(`/api/v1/ui/services/${id}/info`,rs ? rs.split(',') : [],0,'name','asc')).catch(()=>null).then(data=>{if(active)info=data?.[0] ?? null;}); trend=null; trendFailed=false; api<TrendRow[]>(`/api/v1/services/${id}/trend?days=90${rs ? '&realms='+encodeURIComponent(rs) : ''}`).catch(()=>null).then(data=>{if(active){trend=data; trendFailed=data===null;}}); return ()=>{active=false};});
+ $effect(()=>{const id=serviceId; const rs=realms.join(','); info=null; if(!id)return; let active=true; api<{name:string,realm:string}[]>(dataUrl(`/api/v1/ui/services/${id}/info`,rs ? rs.split(',') : [],0,'name','asc')).catch(()=>null).then(data=>{if(active)info=data?.[0] ?? null;}); trend=null; trendFailed=false; api<TrendRow[]>(`/api/v1/services/${id}/trend?days=90${rs ? '&realms='+encodeURIComponent(rs) : ''}`).then(data=>{if(active)trend=data;},(e:unknown)=>{if(!active)return; trend=null; trendFailed=!(e instanceof ApiError && e.status===404);}); return ()=>{active=false};});
  $effect(()=>{const target=url; revision; let active=true;loading=true;failed=false;api<Row[]|Detail[]>(target).then(data=>{if(active){if(serviceId) items=data as Detail[];else rows=data as Row[];loading=false;}}).catch(()=>{if(active){failed=true;loading=false;}});return ()=>{active=false};});
  function changeSort(field:string){[sort,order]=nextSort(sort,order,field);offset=0;}
  function sortState(field:string):'ascending'|'descending'|'none'{return sort===field?(order==='asc'?'ascending':'descending'):'none';}
