@@ -9,5 +9,7 @@
       "package-name": "heimdall",
       "changelog-path": "CHANGELOG.md"
     }
-  }
+  },
+  "draft": true,
+  "force-tag-creation": true
 }

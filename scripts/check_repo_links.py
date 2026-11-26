@@ -10,10 +10,11 @@ will add, or one that was moved, used to ship as a 404.
 import pathlib
 import re
 import sys
+from urllib.parse import unquote
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SKIP = {"node_modules", "dist", "target", ".git", ".astro", "superpowers"}
-LINK = re.compile(r"github\.com/mrashed98/heimdall/(?:blob|tree|edit)/main/([^)\s\"'#>?]+)")
+LINK = re.compile(r"github\.com/[^/\s]+/heimdall/(?:blob|tree|edit)/main/([^)\s\"'#>?]+)", re.I)
 
 
 def main() -> None:
@@ -23,7 +24,7 @@ def main() -> None:
             continue
         for n, line in enumerate(path.read_text().splitlines(), 1):
             for target in LINK.findall(line):
-                if not (ROOT / target.rstrip("/")).exists():
+                if not (ROOT / unquote(target).rstrip("/")).exists():
                     bad.append(f"{path.relative_to(ROOT)}:{n}: links to {target}, which is not in the repo")
     for b in bad:
         print(b)

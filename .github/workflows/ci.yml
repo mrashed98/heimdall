@@ -17,9 +17,10 @@ permissions:
   contents: read
 
 concurrency:
-  # github.workflow is the caller's when called, so a release run never
-  # cancels (or is cancelled by) the push run on main.
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # github.workflow is the caller's when called, and inputs.ref the release
+  # tag, so a release run never cancels (or is cancelled by) the push run on
+  # main or another release's checks.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 env:

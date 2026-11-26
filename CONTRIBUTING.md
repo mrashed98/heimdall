@@ -83,8 +83,10 @@ pull request.
 Write user-facing notes under **Unreleased** in `docs/site/src/content/docs/project/changelog.md`.
 CI runs `scripts/release_version.py check`, so a version string it lists that disagrees with
 `Cargo.toml` fails the build. It only knows the places in its `PLACES` list: when you write a
-version number somewhere new, add it there. To republish an
-existing release's files, run the release workflow by hand with its tag.
+version number somewhere new, add it there. To finish a failed
+release or republish one's files, run the release workflow by hand with its tag. That run
+skips the CI gate (it trusts the tag), and moves `latest` only if the tag is the highest
+release.
 
 ## License
 
