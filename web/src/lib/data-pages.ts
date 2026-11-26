@@ -11,3 +11,10 @@ export function nextSort(current: string, order: string, field: string): [string
 export function expiryError(date: string): string {
   return !date || date <= new Date().toISOString().slice(0, 10) ? 'Choose a date after today (UTC).' : '';
 }
+/** Where a component runs: package URL text, optionally only versions below `below`. */
+export function componentUrl(search: string, below: string, realms: string[], offset: number): string {
+  const q = new URLSearchParams({search: search.trim(), limit: String(PAGE_SIZE), offset: String(offset)});
+  if (below.trim()) q.set('version_lt', below.trim());
+  if (realms.length) q.set('realms', realms.join(','));
+  return `/api/v1/components?${q}`;
+}

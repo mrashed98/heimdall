@@ -5,6 +5,7 @@ struct UiQuery {
     realms: Option<String>, limit: Option<String>, offset: Option<String>,
     sort: Option<String>, order: Option<String>, kind: Option<String>, tab: Option<String>,
     days: Option<String>,
+    search: Option<String>, version_lt: Option<String>,
 }
 fn ui_data_routes() -> Router<AppState> {
     Router::new().route("/api/v1/ui/services", get(ui_services))
@@ -13,6 +14,7 @@ fn ui_data_routes() -> Router<AppState> {
         .route("/api/v1/ui/oaths", get(ui_oaths))
         .route("/api/v1/trends", get(realm_trends))
         .route("/api/v1/services/{id}/trend", get(service_trend))
+        .route("/api/v1/components", get(component_search))
 }
 fn ui_realms(state: &AppState, p: &Principal, q: &UiQuery) -> Result<Vec<String>, ApiError> {
     p.require_read()?;
@@ -98,4 +100,50 @@ async fn service_trend(State(state): State<AppState>, p: Principal, UrlPath(id):
     if !exists { return Err(ApiError::NotFound); }
     let sql = format!("SELECT row_to_json(t) FROM (SELECT {TREND_COLUMNS} FROM service_daily WHERE service_id=$1 AND {TREND_SINCE} ORDER BY day) t");
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(id).bind(trend_days(&q)?).fetch_all(&state.pool).await?))
+}
+/// A search matching more components than this is refused, so one request
+/// never holds a whole inventory in memory; the caller narrows the text.
+const COMPONENT_SEARCH_CAP: usize = 10_000;
+/// Every route by which a service in realms `$2` carries a component: its own
+/// rows (any source), and the contents of the images those rows run. `image`
+/// is the image's reference when the route goes through one. `only` narrows
+/// the component ids (SQL over `$1`), so a page reads only its own routes.
+fn carriers(only: &str) -> String {
+    format!("WITH carriers AS ( \
+    SELECT sc.service_id, sc.component_id, i.image_ref AS image FROM service_components sc \
+      JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) LEFT JOIN image_sboms i ON i.digest=sc.via_image_digest \
+      WHERE {only} \
+    UNION ALL \
+    SELECT sc.service_id, ic.component_id, i.image_ref FROM service_components sc \
+      JOIN services s ON s.id=sc.service_id AND s.realm=ANY($2) \
+      JOIN image_components ic ON ic.digest=sc.via_image_digest JOIN image_sboms i ON i.digest=ic.digest \
+      WHERE {} )", only.replace("sc.component_id", "ic.component_id"))
+}
+/// Components whose package URL contains `search`, each with the services and
+/// images that carry it in the caller's realms, directly or inside an image.
+/// `version_lt` keeps versions below it, compared the way the matcher compares
+/// that package's versions.
+async fn component_search(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let search = given(&q.search).map(str::trim).unwrap_or("");
+    if search.chars().count() < 2 || search.contains('\0') { return Err(ApiError::BadRequest("search needs at least 2 characters and no NUL".into())); }
+    let below = given(&q.version_lt).map(str::trim).filter(|v| !v.is_empty());
+    let (limit, offset) = (parse_limit(&q.limit)? as usize, parse_offset(&q.offset)? as usize);
+    let pattern = format!("%{}%", search.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let sql = format!("{} SELECT c.id,c.purl,c.version FROM components c WHERE c.purl ILIKE $1 AND c.id IN (SELECT component_id FROM carriers) ORDER BY c.name_key, c.version, c.id LIMIT $3", carriers("true"));
+    let candidates: Vec<(i64, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(pattern).bind(&realms).bind(COMPONENT_SEARCH_CAP as i64 + 1).fetch_all(&state.pool).await?;
+    if candidates.len() > COMPONENT_SEARCH_CAP { return Err(ApiError::BadRequest(format!("more than {COMPONENT_SEARCH_CAP} components match; narrow the search"))); }
+    let below_version = |purl: &str, version: &str, b: &str| {
+        let ecosystem = crate::purl::osv_package(purl).map_or_else(|| "generic".to_owned(), |p| p.ecosystem);
+        crate::version::compare(&ecosystem, version, b) == Some(std::cmp::Ordering::Less)
+    };
+    let page: Vec<i64> = candidates.into_iter()
+        .filter(|(_, purl, version)| below.is_none_or(|b| below_version(purl, version, b)))
+        .skip(offset).take(limit).map(|(id, _, _)| id).collect();
+    let sql = format!("{} SELECT row_to_json(t) FROM (SELECT c.purl,c.name_key,c.ecosystem,c.version, \
+        (SELECT coalesce(json_agg(json_build_object('id',s.id,'name',s.name,'realm',s.realm) ORDER BY s.realm,s.name),'[]') FROM services s WHERE s.id IN (SELECT service_id FROM carriers WHERE component_id=c.id)) AS services, \
+        (SELECT coalesce(array_agg(DISTINCT image ORDER BY image),'{{}}') FROM carriers WHERE component_id=c.id AND image IS NOT NULL) AS images \
+        FROM unnest($1::bigint[]) WITH ORDINALITY AS p(id,n) JOIN components c ON c.id=p.id ORDER BY p.n) t", carriers("sc.component_id=ANY($1)"));
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(page).bind(&realms).fetch_all(&state.pool).await?))
 }

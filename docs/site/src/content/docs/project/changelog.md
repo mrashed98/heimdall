@@ -18,6 +18,11 @@ binaries, checksums, container image tags and the Helm chart of each version.
   `GET /api/v1/services/{id}/trend` and kept for `retention.trends_days`
   (365 by default). See the
   [HTTP API](/heimdall/reference/http-api/#get-apiv1trends).
+- **Component search.** Inventory → Find a component lists every service and
+  image carrying a package, optionally only versions below a given one ("where
+  do we run log4j-core below 2.17?"), within the realms you can read. The same
+  search is `GET /api/v1/components`; see the
+  [HTTP API](/heimdall/reference/http-api/#get-apiv1components).
 
 ## 0.4.0
 

@@ -1,5 +1,5 @@
 <script lang="ts">
- import { api } from './api'; import { dailySeries, type TrendRow } from './trends'; import TrendChart from './TrendChart.svelte'; import { dataUrl, nextSort } from './data-pages';
+ import { api } from './api'; import ComponentSearch from './ComponentSearch.svelte'; import { dailySeries, type TrendRow } from './trends'; import TrendChart from './TrendChart.svelte'; import { dataUrl, nextSort } from './data-pages';
  import { Badge, DataTable, EmptyState, ErrorState, Pagination, Panel, SEVERITIES, Skeleton, Tabs } from './ui';
  let { realms, serviceId }: {realms:string[], serviceId:number|null} = $props();
  type Row = {id:number,name:string,realm:string,critical:number,high:number,medium:number,low:number,unknown:number};
@@ -19,6 +19,7 @@
  {#if serviceId}<a class="back" href={'/services'+location.search}>← All services</a><h2>{info ? info.name : 'Service inventory'}{#if info}<span class="realm"> · {info.realm}</span>{/if}</h2>
   {#if spark.some(p=>p.value!==null)}<div class="spark"><span>Open critical + high, 90 days</span><TrendChart compact label="Open critical and high findings" color="var(--sev-high)" points={spark}/></div>{/if}
   <Tabs label="Service inventory sections" current={section} change={selectSection} items={[{id:'components',label:'Components'},{id:'images',label:'Images'},{id:'findings',label:'Findings'}]} />{/if}
+ {#if !serviceId}<ComponentSearch {realms}/>{/if}
  <Panel flush>
  {#if loading}<Skeleton/>{:else if failed}<ErrorState retry={()=>revision++}/>{:else if serviceId}
   {#if !items.length}<EmptyState title={`No ${section} recorded`} body="Sight, CI uploads and declared components fill this in."/>{:else}<DataTable label={`Service ${section}`}><thead><tr>{#each (section==='components'?[['source','Source'],['purl','Package URL'],['version','Version']]:section==='images'?[['image','Image'],['digest','Digest']]:[['advisory','Advisory'],['severity','Severity'],['kind','Kind'],['opened','Opened']]) as [field,label]}<th aria-sort={sortState(field)}><button onclick={()=>changeSort(field)}>{label}</button></th>{/each}</tr></thead><tbody>{#each items as item}<tr>{#if section==='components'}<td>{item.source}</td><td class="mono">{item.purl}</td><td class="mono">{item.version}</td>{:else if section==='images'}<td class="mono">{item.image ?? 'Image reference unavailable'}</td><td class="mono">{item.digest}</td>{:else}<td class="mono">{item.ref_id ?? '—'}</td><td><Badge severity={item.severity ?? 'unknown'}/></td><td>{item.kind}</td><td>{item.opened_at?.slice(0,10)}</td>{/if}</tr>{/each}</tbody></DataTable>{/if}
