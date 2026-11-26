@@ -63,8 +63,22 @@ of these.
 
 ## Releases
 
-Maintainers tag releases as `vMAJOR.MINOR.PATCH`. A tag builds the release binaries and the
-multi-arch container images and publishes them to GitHub Releases and GHCR.
+Releases come from merges to `main` (`.github/workflows/release.yml`, with
+[release-please](https://github.com/googleapis/release-please)):
+
+1. Each merge updates one open pull request, `chore(release): vX.Y.Z`. Its version comes from the
+   pull request titles since the last release (`feat:` bumps the minor version and `fix:` the
+   patch while Heimdall is below 1.0), and it updates `CHANGELOG.md`, `Cargo.toml`,
+   `Cargo.lock` and, through `scripts/release_version.py set`, the chart, the docs and the gate
+   action. It also moves the notes under **Unreleased** in the docs changelog to that version.
+2. Merging that pull request tags `vX.Y.Z` and publishes the release: static Linux binaries and
+   `SHA256SUMS` on GitHub Releases, multi-arch images on GHCR, and the Helm chart at
+   `oci://ghcr.io/mrashed98/charts/heimdall`.
+
+Write user-facing notes under **Unreleased** in `docs/site/src/content/docs/project/changelog.md`.
+CI runs `scripts/release_version.py check`, so a version string anywhere in the repo that
+disagrees with `Cargo.toml` fails the build; add new ones to the script's list. To republish an
+existing release's files, run the release workflow by hand with its tag.
 
 ## License
 

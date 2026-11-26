@@ -1,0 +1,223 @@
+name: release
+# Releases on merge to main, through release-please:
+# - Every push to main updates one release PR ("chore(release): vX.Y.Z") from
+#   the Conventional Commit titles since the last release (feat: minor,
+#   fix: patch while below 1.0), and `release_version.py set` brings every
+#   version string in the repo along.
+# - Merging that PR tags vX.Y.Z and creates the GitHub release; the jobs below
+#   then build and publish the binaries, images and Helm chart.
+# - Run it by hand (workflow_dispatch) with an existing tag to rebuild and
+#   republish that release's artifacts.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re)publish, such as v0.4.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+      pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName || '' }}
+    steps:
+      # RELEASE_TOKEN (a fine-grained token with contents and pull-requests
+      # write) is optional: with it, CI runs on the release PR; with the
+      # default token GitHub does not start workflows for that PR.
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # release-please bumps Cargo.toml and Cargo.lock; this brings the chart,
+  # the docs and the gate action to the same version on the release PR.
+  versions:
+    needs: please
+    if: needs.please.outputs.pr_branch != '' && needs.please.outputs.release_created != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.please.outputs.pr_branch }}
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+      - run: python3 scripts/release_version.py set
+      - name: Commit if anything changed
+        run: |
+          git diff --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): bring every version string along"
+          git push
+
+  # The tag to publish: the one release-please just created, or the input.
+  target:
+    needs: please
+    if: always() && (needs.please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+      version: ${{ steps.t.outputs.version }}
+    steps:
+      - id: t
+        env:
+          TAG: ${{ needs.please.outputs.tag || inputs.tag }}
+        run: |
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "::error::not a release tag: $TAG"; exit 1;; esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.t.outputs.tag }}
+      - name: Every version string matches the tag
+        run: |
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          [ "$crate" = "${{ steps.t.outputs.version }}" ] || { echo "::error::Cargo.toml is $crate, tag is ${{ steps.t.outputs.tag }}"; exit 1; }
+          python3 scripts/release_version.py check
+
+  binaries:
+    needs: target
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: heimdall-linux-amd64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: heimdall-linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.target.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # build.rs embeds web/dist; without it the binary serves a placeholder page.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: web
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --bin heimdall --target ${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/heimdall ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  chart:
+    needs: target
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.target.outputs.tag }}
+      - uses: azure/setup-helm@v5
+      - run: helm package deploy/helm/heimdall --destination dist
+      - name: Push to oci://ghcr.io/<owner>/charts
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm push "dist/heimdall-${{ needs.target.outputs.version }}.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chart
+          path: dist/heimdall-*.tgz
+          if-no-files-found: error
+
+  # One job attaches every file, so the matrix jobs never race on the release.
+  assets:
+    needs: [target, binaries, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum heimdall-linux-* heimdall-*.tgz > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.target.outputs.tag }}
+          files: |
+            heimdall-linux-*
+            heimdall-*.tgz
+            SHA256SUMS
+          fail_on_unmatched_files: true
+
+  # Images copy in the binaries the binaries job built natively, so no Rust
+  # compile runs under QEMU (that took ~1.5 h per image).
+  images:
+    needs: [target, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.target.outputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: heimdall-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Name binaries by Docker arch
+        run: |
+          mv dist/heimdall-linux-amd64 dist/heimdall-amd64
+          mv dist/heimdall-linux-arm64 dist/heimdall-arm64
+          chmod +x dist/heimdall-*
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Tagged with the version without the `v` (0.4.0): the tag the chart's
+      # default (`.Chart.AppVersion`) pulls.
+      - id: meta
+        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BIN_SOURCE=prebuilt
+          tags: |
+            ${{ steps.meta.outputs.repo }}:${{ needs.target.outputs.version }}
+            ${{ steps.meta.outputs.repo }}:latest
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile.scanner
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BIN_SOURCE=prebuilt
+          tags: |
+            ${{ steps.meta.outputs.repo }}-scanner:${{ needs.target.outputs.version }}
+            ${{ steps.meta.outputs.repo }}-scanner:latest
