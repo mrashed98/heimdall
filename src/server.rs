@@ -1170,6 +1170,150 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn component_search_lists_where_a_component_runs(pool: PgPool) {
+        use crate::inventory::store::upsert_service;
+        let api = upsert_service(&pool, "prod", "api").await.unwrap();
+        let worker = upsert_service(&pool, "prod", "worker").await.unwrap();
+        let batch = upsert_service(&pool, "dev", "batch").await.unwrap();
+        sqlx::query("INSERT INTO image_sboms(digest,image_ref) VALUES ('sha256:a','acme/api:1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (service, version, digest) in [
+            (api, "2.9.1", Some("sha256:a")),
+            (worker, "2.9.1", None),
+            (worker, "2.17.1", None),
+            (batch, "2.14.0", None),
+            (batch, "2.9.1", None),
+        ] {
+            sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ($1,'pkg:maven/org.apache.logging.log4j/log4j-core','maven',$2) ON CONFLICT (purl) DO NOTHING")
+                .bind(format!("pkg:maven/org.apache.logging.log4j/log4j-core@{version}"))
+                .bind(version)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO service_components(service_id,component_id,source,via_image_digest) SELECT $1,id,'cluster',$2 FROM components WHERE purl=$3")
+                .bind(service)
+                .bind(digest)
+                .bind(format!("pkg:maven/org.apache.logging.log4j/log4j-core@{version}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:npm/left_pad@1.0.0','pkg:npm/left_pad','npm','1.0.0'),('pkg:npm/leftxpad@1.0.0','pkg:npm/leftxpad','npm','1.0.0')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_components(service_id,component_id,source) SELECT $1,id,'ci' FROM components WHERE ecosystem='npm'")
+            .bind(api)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Inside an image's SBOM only, and two Ubuntu revisions dpkg orders
+        // differently from semver (`-0ubuntu8` is not a pre-release).
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:deb/ubuntu/libc6@2.39-0ubuntu8?distro=ubuntu-24.04','pkg:deb/ubuntu/libc6','deb','2.39-0ubuntu8'),('pkg:deb/ubuntu/libc6@2.38-1ubuntu6?distro=ubuntu-24.04','pkg:deb/ubuntu/libc6','deb','2.38-1ubuntu6')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO image_components(digest,component_id) SELECT 'sha256:a',id FROM components WHERE ecosystem='deb'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let app = router(state(pool));
+        let search = |path: &'static str| {
+            let (app, key) = (&app, &key);
+            async move {
+                let (status, body) = get(app, path, Some(key)).await;
+                (
+                    status,
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default(),
+                )
+            }
+        };
+        let versions = |rows: &serde_json::Value| -> Vec<String> {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["version"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let (status, rows) = search("/api/v1/components?search=LOG4J-core").await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(versions(&rows), ["2.14.0", "2.17.1", "2.9.1"]);
+        let old = &rows[2];
+        assert_eq!(old["services"].as_array().unwrap().len(), 3, "{old}");
+        assert_eq!(old["services"][0]["realm"], "dev");
+        assert_eq!(old["images"], serde_json::json!(["acme/api:1"]));
+
+        // Versions compare as versions: 2.9.1 is below 2.17, though "2.9.1" > "2.17" as text.
+        let (_, rows) = search("/api/v1/components?search=log4j&version_lt=2.17").await;
+        assert_eq!(versions(&rows), ["2.14.0", "2.9.1"]);
+        // Paging counts only the rows the version filter kept.
+        let (_, rows) = search("/api/v1/components?search=log4j&version_lt=2.17&offset=1").await;
+        assert_eq!(versions(&rows), ["2.9.1"]);
+
+        // Other realms' services, and components only they carry, stay hidden.
+        let (_, rows) = search("/api/v1/components?search=log4j&realms=prod").await;
+        assert_eq!(versions(&rows), ["2.17.1", "2.9.1"]);
+        let names: Vec<&str> = rows[1]["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["api", "worker"]);
+
+        // `_` and `%` are matched as text, not as wildcards.
+        let (_, rows) = search("/api/v1/components?search=left_pad").await;
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+        assert_eq!(rows[0]["purl"], "pkg:npm/left_pad@1.0.0");
+        assert_eq!(rows[0]["images"], serde_json::json!([]));
+        assert!(search("/api/v1/components?search=%25%25")
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // Found through the image that carries it, with that image and its service.
+        let (_, rows) = search("/api/v1/components?search=libc6").await;
+        assert_eq!(
+            versions(&rows),
+            ["2.38-1ubuntu6", "2.39-0ubuntu8"],
+            "{rows}"
+        );
+        assert_eq!(rows[1]["services"][0]["name"], "api");
+        assert_eq!(rows[1]["images"], serde_json::json!(["acme/api:1"]));
+        // dpkg order: 2.39-0ubuntu8 is above 2.39 (semver would call it a pre-release below it).
+        let (_, rows) = search("/api/v1/components?search=libc6&version_lt=2.39").await;
+        assert_eq!(versions(&rows), ["2.38-1ubuntu6"]);
+        assert_eq!(
+            search("/api/v1/components?search=a%00b").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            search("/api/v1/components?search=l").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            search("/api/v1/components").await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            search("/api/v1/components?search=log4j&realms=nope")
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            get(&app, "/api/v1/components?search=log4j", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn data_page_projections_page_filter_and_sort(pool: PgPool) {
         seed_finding(&pool, "prod", "api", "a", "critical").await;
         seed_finding(&pool, "prod", "api", "b", "high").await;
