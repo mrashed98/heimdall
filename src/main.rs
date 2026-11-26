@@ -153,6 +153,15 @@ struct SightArgs {
     /// Path to heimdall.yaml (in-process mode)
     #[arg(long, default_value = "heimdall.yaml")]
     config: PathBuf,
+    /// Read a Docker host's running containers instead of a cluster
+    #[arg(long)]
+    docker: bool,
+    /// Docker Engine API: unix:///path or tcp://host:port
+    #[arg(long, default_value = heimdall::inventory::docker::DEFAULT_HOST)]
+    docker_host: String,
+    /// The host's name in service names (default: the name Docker reports)
+    #[arg(long)]
+    docker_name: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -432,6 +441,47 @@ async fn run_gate(args: GateArgs) -> anyhow::Result<GateResponse> {
     client.post_json(&path, &body).await
 }
 
+/// Scan a Docker host, then ingest in-process or push like cluster Sight.
+/// A host running nothing is a valid scan: it empties its own services only.
+async fn docker_sight(
+    state: Option<&AppState>,
+    args: &SightArgs,
+) -> anyhow::Result<heimdall::ingest::api::ClusterOutcome> {
+    use anyhow::Context;
+    use heimdall::inventory::docker;
+    if args
+        .docker_name
+        .as_deref()
+        .is_some_and(|n| n.trim().is_empty() || n.contains('/'))
+    {
+        anyhow::bail!("--docker-name must not be empty or contain `/`");
+    }
+    let host: docker::DockerHost = args
+        .docker_host
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("--docker-host: {e}"))?;
+    let inv = docker::scan(&host, &args.realm, args.docker_name.as_deref()).await?;
+    match (args.push.as_deref(), state) {
+        (Some(url), _) => {
+            let key = std::env::var("HEIMDALL_API_KEY").context("HEIMDALL_API_KEY is not set")?;
+            let client = heimdall::client::Client::new(url, key);
+            let r: serde_json::Value = client
+                .post_json("/api/v1/ingest/cluster?allow_empty=true", &inv)
+                .await?;
+            let n = |k: &str| r[k].as_u64().unwrap_or(0) as usize;
+            Ok(heimdall::ingest::api::ClusterOutcome {
+                services: n("services"),
+                added: n("added"),
+                removed: n("removed"),
+            })
+        }
+        (None, Some(st)) => heimdall::ingest::api::ingest_cluster_inner(st, &inv, true)
+            .await
+            .map_err(|e| anyhow::anyhow!("ingest failed: {e:?}")),
+        (None, None) => anyhow::bail!("in-process ingest needs the application state"),
+    }
+}
+
 async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
     use anyhow::Context;
     // Without --push the scan is ingested in-process, which needs the config
@@ -449,7 +499,11 @@ async fn sight(args: SightArgs, style: &Style) -> anyhow::Result<()> {
             ))
         }
     };
-    let out = sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?;
+    let out = if args.docker {
+        docker_sight(state.as_ref(), &args).await?
+    } else {
+        sight::run(state.as_ref(), &args.realm, args.push.as_deref()).await?
+    };
     let msg = format!(
         "sight: {} services, {} components added, {} removed",
         out.services, out.added, out.removed
