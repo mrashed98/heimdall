@@ -3,15 +3,25 @@ on:
   push:
     # main only: PR branches are covered by pull_request (avoids running every check twice).
     branches: [main]
-    tags: ['v*']
   pull_request:
+  # The release workflow runs every check on the release tag before it
+  # publishes anything.
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit or tag to check out (default: the triggering commit)"
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  # github.workflow is the caller's when called, and inputs.ref the release
+  # tag, so a release run never cancels (or is cancelled by) the push run on
+  # main or another release's checks.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
 
 env:
   DATABASE_URL: postgres://heimdall:heimdall@localhost:5432/heimdall
@@ -24,6 +34,8 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -38,15 +50,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --check
+      # The version strings listed in scripts/release_version.py match
+      # Cargo.toml.
+      - run: python3 scripts/release_version.py check
+      # Every link from the docs to a file of this repo points at a file
+      # that exists.
+      - run: python3 scripts/check_repo_links.py
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -71,6 +93,8 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
@@ -82,6 +106,8 @@ jobs:
       CRD_SCHEMAS: https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: azure/setup-helm@v5
       - name: Install kubeconform
         run: |
@@ -123,6 +149,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans sources
@@ -131,6 +159,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: docker/setup-buildx-action@v4
       - name: Build heimdall image (not pushed)
         uses: docker/build-push-action@v7
@@ -150,130 +180,3 @@ jobs:
           push: false
           cache-from: type=gha,scope=scanner
           cache-to: type=gha,mode=max,scope=scanner
-
-  # Everything below runs only for version tags (v0.1.0).
-  # The tag, the chart's appVersion and the crate version must agree: the
-  # chart pulls the image tagged with its appVersion.
-  version:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Tag must be v + Chart.yaml appVersion + Cargo.toml version
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          app="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' deploy/helm/heimdall/Chart.yaml)"
-          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
-          echo "tag=${tag} appVersion=${app} cargo=${crate}"
-          if [ "${tag}" != "v${app}" ] || [ "${tag}" != "v${crate}" ]; then
-            echo "::error::tag ${tag} must equal v${app} (Chart.yaml appVersion) and v${crate} (Cargo.toml)"
-            exit 1
-          fi
-
-  binaries:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [web, fmt, clippy, test, helm, audit, docker, version]
-    strategy:
-      matrix:
-        include:
-          - { runner: ubuntu-latest, target: x86_64-unknown-linux-musl, asset: heimdall-linux-amd64 }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, asset: heimdall-linux-arm64 }
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      # build.rs embeds web/dist; without it the binary serves a placeholder page.
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci && npm run build
-        working-directory: web
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked --bin heimdall --target ${{ matrix.target }}
-      - run: cp target/${{ matrix.target }}/release/heimdall ${{ matrix.asset }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
-          if-no-files-found: error
-
-  # One job creates the release and attaches every binary, so the matrix
-  # jobs never race to create the same release.
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: heimdall-linux-*
-          merge-multiple: true
-      - name: Checksums
-        run: sha256sum heimdall-linux-* > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            heimdall-linux-*
-            SHA256SUMS
-          fail_on_unmatched_files: true
-
-  # Images copy in the binaries the binaries job built natively, so no Rust
-  # compile runs under QEMU (that took ~1.5 h per image).
-  images:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: heimdall-linux-*
-          merge-multiple: true
-          path: dist
-      - name: Name binaries by Docker arch
-        run: |
-          mv dist/heimdall-linux-amd64 dist/heimdall-amd64
-          mv dist/heimdall-linux-arm64 dist/heimdall-arm64
-          chmod +x dist/heimdall-*
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Images are tagged with the version without the `v` (0.1.0), the
-      # tag the chart's default (`.Chart.AppVersion`) pulls.
-      - id: meta
-        run: |
-          echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deploy/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: BIN_SOURCE=prebuilt
-          tags: |
-            ${{ steps.meta.outputs.repo }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.repo }}:latest
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: deploy/Dockerfile.scanner
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: BIN_SOURCE=prebuilt
-          tags: |
-            ${{ steps.meta.outputs.repo }}-scanner:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.repo }}-scanner:latest

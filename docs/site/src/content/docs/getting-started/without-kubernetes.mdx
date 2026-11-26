@@ -163,7 +163,7 @@ repository at `deploy/compose/` and needs Docker Compose 2.24 or later
 The port is bound to `127.0.0.1`. To reach the console from other machines,
 put a reverse proxy with TLS in front of it, or change the port line to
 `"8080:8080"` on a network you trust. To upgrade, set `HEIMDALL_VERSION` in
-`.env` (for example `0.3.2`) and run `docker compose up -d` again; Heimdall
+`.env` to the release number, without the `v`, and run `docker compose up -d` again; Heimdall
 applies its database migrations at startup. Back up the `postgres` volume as
 you would any database.
 

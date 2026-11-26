@@ -226,8 +226,13 @@ Create a Secret (SOPS-managed in a real setup) with these keys, then install:
 | Channel secrets | One per `*_env` key of a `channels[]` entry (webhook URLs, bot token, routing key, HMAC secret, SMTP or Alertmanager credentials) |
 | `HEIMDALL_API_KEY` | An **ingest-scope** key, used by the scanner CronJob |
 
+The chart is published to GHCR with each release from 0.4.0 on (for earlier
+ones, or a branch, use `deploy/helm/heimdall` from a checkout, without
+`--version`):
+
 ```bash
-helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace \
+helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.3.2 \
+  -n heimdall --create-namespace \
   --set image.repository=ghcr.io/mrashed98/heimdall \
   --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \
   --set existingSecret=heimdall-secrets \
@@ -555,13 +560,13 @@ export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Releases are cut by pushing a `v*` tag: CI builds static linux binaries
-(`heimdall-linux-amd64`, `heimdall-linux-arm64`), attached to the GitHub
-release by one job, and multi-arch images pushed to ghcr, tagged with the
-version without the `v` (tag `v0.3.2` gives `heimdall:0.3.2`, the tag the
-chart pulls by default) and `latest`. The tag must equal `v` + `appVersion` in
-`deploy/helm/heimdall/Chart.yaml` + `version` in `Cargo.toml`, or the release
-jobs do not run.
+Releases come from merging the release pull request that release-please keeps
+open on `main` (see [CONTRIBUTING](CONTRIBUTING.md#releases)). Each release
+attaches static linux binaries (`heimdall-linux-amd64`, `heimdall-linux-arm64`),
+the chart and `SHA256SUMS` to the GitHub release, pushes multi-arch images to
+ghcr tagged with the version without the `v` (tag `v0.3.2`
+gives `heimdall:0.3.2`, the tag the chart pulls by default) and `latest`, and pushes
+the chart to `oci://ghcr.io/mrashed98/charts/heimdall`.
 
 ## Contributing, security and license
 

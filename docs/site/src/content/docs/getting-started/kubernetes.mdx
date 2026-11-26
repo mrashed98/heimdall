@@ -23,12 +23,11 @@ The Helm chart lives in the repository at `deploy/helm/heimdall`.
   ```
 
 <Aside type="note">
-Releases are cut by pushing a `v*` tag. CI then builds static Linux binaries
-(`heimdall-linux-amd64`, `heimdall-linux-arm64`) and multi-arch images, and
-pushes the images to GHCR tagged with the version **without the `v`** (tag
-`v0.3.2` gives `heimdall:0.3.2`) and `latest`. That is the tag the chart pulls
-by default (its `appVersion`). A tag build fails unless the tag, the chart's
-`appVersion` and the crate version agree.
+Each release builds static Linux binaries (`heimdall-linux-amd64`,
+`heimdall-linux-arm64`), multi-arch images and the chart. The images are
+pushed to GHCR tagged with the version **without the `v`** (release
+tag `v0.3.2` gives `heimdall:0.3.2`) and `latest`. That is the tag the chart
+pulls by default (its `appVersion`), and the chart's own version is the same.
 </Aside>
 
 ## Install
@@ -65,13 +64,20 @@ by default (its `appVersion`). A tag build fails unless the tag, the chart's
 
 3. **Install the chart.**
 
+   Each release from 0.4.0 on publishes the chart to GHCR as an OCI chart:
+
    ```bash
-   helm install heimdall deploy/helm/heimdall -n heimdall --create-namespace \
+   helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.3.2 \
+     -n heimdall --create-namespace \
      --set image.repository=ghcr.io/mrashed98/heimdall \
      --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \
      --set existingSecret=heimdall-secrets \
      -f my-values.yaml
    ```
+
+   For an earlier release, or a branch, install from a checkout instead: use
+   `deploy/helm/heimdall` in place of the `oci://` reference and drop
+   `--version`.
 
 4. **Create the scanner key and add it to the Secret.** Use the bootstrap key to
    create an ingest key, then add it as `HEIMDALL_API_KEY`:

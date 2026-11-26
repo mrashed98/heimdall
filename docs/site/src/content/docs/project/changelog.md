@@ -3,9 +3,11 @@ title: Changelog
 description: Where to find release notes for each Heimdall version.
 ---
 
-Heimdall does not keep a separate changelog file yet. See
-[GitHub Releases](https://github.com/mrashed98/heimdall/releases) for the notes of
-each version, with the binaries and container image tags.
+The highlights of each version. The full list of changes, generated from
+commit titles, is in
+[CHANGELOG.md](https://github.com/mrashed98/heimdall/blob/main/CHANGELOG.md), and
+[GitHub Releases](https://github.com/mrashed98/heimdall/releases) has the
+binaries, checksums, container image tags and the Helm chart of each version.
 
 ## Unreleased
 
