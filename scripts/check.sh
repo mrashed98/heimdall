@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH:/opt/homebrew/bin"
 export DATABASE_URL="${DATABASE_URL:-postgres://heimdall:heimdall@localhost:5433/heimdall}"
 
-STEPS=(fmt versions links ci-sync clippy test audit web docs helm docker)
+STEPS=(fmt versions links ci-sync scripts clippy test audit web docs helm docker)
 
 need() {
   command -v "$1" >/dev/null || { echo "check.sh: '$1' is not installed; $2" >&2; exit 1; }
@@ -28,6 +28,8 @@ step_fmt() { cargo fmt --check; }
 step_versions() { python3 scripts/release_version.py check; }
 step_links() { python3 scripts/check_repo_links.py; }
 step_ci-sync() { python3 scripts/check_ci_sync.py; }
+# The guards themselves reject every bypass a review has found (selftest.py).
+step_scripts() { python3 scripts/selftest.py; }
 step_clippy() { cargo clippy --all-targets -- -D warnings; }
 step_test() {
   # sqlx test databases are named by test path, so two runs on one server collide.
@@ -89,7 +91,10 @@ while (($#)); do
   case "$1" in
     --list) printf '%s\n' "${STEPS[@]}"; exit 0 ;;
     --dockerfiles) printf '%s\n' "${DOCKERFILES[@]}"; exit 0 ;;
-    --skip) skip+=("$2"); shift 2 ;;
+    --skip)
+      (($# >= 2)) || { echo "check.sh: --skip needs a step (steps: ${STEPS[*]})" >&2; exit 2; }
+      skip+=("$2"); shift 2 ;;
+    -*) echo "check.sh: unknown option '$1' (--list, --dockerfiles, --skip <step>)" >&2; exit 2 ;;
     *) run+=("$1"); shift ;;
   esac
 done

@@ -997,7 +997,8 @@ mod tests {
     }
 
     /// Read routes that hold no per-realm data, with the reason. Every other
-    /// `GET /api/v1` route must be requested in `session_read_access_is_realm_scoped`.
+    /// `GET /api/v1` route must be requested without `realms=` in
+    /// `session_read_access_is_realm_scoped`.
     const NOT_REALM_SCOPED: &[(&str, &str)] = &[
         ("/api/v1/audit", "admin only"),
         ("/api/v1/channels", "admin only"),
@@ -1139,7 +1140,10 @@ mod tests {
                 }
             }
         }
-        assert!(unreadable.is_empty(), "write these route paths as string literals so the realm-scope guard can read them: {unreadable:?}");
+        assert!(
+            unreadable.is_empty(),
+            "write these route paths as string literals so the realm-scope guard can read them: {unreadable:?}"
+        );
         assert!(
             missing.is_empty(),
             "request these without `realms=` as the realm-`a` viewer in session_read_access_is_realm_scoped (and seed realm-b data they must hide), or add them to NOT_REALM_SCOPED with a reason: {missing:?}"

@@ -12,6 +12,7 @@ Anything else fails, so a check added to CI outside check.sh is caught, and
 every check.sh step must be called from CI.
 """
 
+import os
 import pathlib
 import re
 import subprocess
@@ -23,11 +24,14 @@ except ImportError:
     sys.exit("check_ci_sync.py: PyYAML is missing (pip install pyyaml / apt-get install python3-yaml)")
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/docs.yml"]
+# CI_SYNC_WORKFLOWS points at another copy of .github/workflows (the self-test
+# feeds it broken workflows).
+WORKFLOW_DIR = pathlib.Path(os.environ.get("CI_SYNC_WORKFLOWS", ROOT / ".github/workflows"))
+WORKFLOWS = ["ci.yml", "docs.yml"]
 # Commands that install or prepare, not check (matched against the whole run).
 SETUP_RUNS = [
     re.compile(r"npm ci"),
-    re.compile(r'python3 -c "import yaml" \|\| sudo apt-get install -y python3-yaml'),
+    re.compile(r'python3 -c "import yaml" \|\| \(sudo apt-get update && sudo apt-get install -y python3-yaml\)'),
     re.compile(r'curl -sSfL "\S*kubeconform\S*" -o kubeconform\.tar\.gz\n'
                r"tar -xzf kubeconform\.tar\.gz kubeconform\n"
                r"sudo install kubeconform /usr/local/bin/kubeconform"),
@@ -50,18 +54,18 @@ def main() -> None:
     bad, called, ci_docker = [], set(), []
     steps = check_sh("--list")
     for wf in WORKFLOWS:
-        jobs = yaml.safe_load((ROOT / wf).read_text())["jobs"]
+        jobs = yaml.safe_load((WORKFLOW_DIR / wf).read_text())["jobs"]
         for job_name, job in jobs.items():
             for i, step in enumerate(job.get("steps", [])):
                 where = f"{wf}: job {job_name}, step {i + 1}"
+                # A step that checks something must be able to fail the build.
+                gated = [k for k in ("if", "continue-on-error") if k in step or k in job]
                 if "run" in step:
                     cmd = str(step["run"]).strip()
                     m = CALL.fullmatch(cmd)
                     if m:
                         called.update(m.group(1).split())
-                        for key in ("if", "continue-on-error"):
-                            if key in step or key in job:
-                                bad.append(f"{where}: a check.sh step must not have `{key}`, or it cannot fail the build")
+                        bad += [f"{where}: a check step must not have `{k}`, or it cannot fail the build" for k in gated]
                     elif not any(s.fullmatch(cmd) for s in SETUP_RUNS):
                         bad.append(f"{where}: `{cmd.splitlines()[0]}` is a check outside scripts/check.sh; make it a "
                                    "check.sh step and run `scripts/check.sh <step>` (or add it to SETUP_RUNS if it only installs)")
@@ -69,6 +73,7 @@ def main() -> None:
                     action = str(step["uses"]).split("@")[0]
                     if action == "docker/build-push-action":
                         ci_docker.append(str((step.get("with") or {}).get("file", "Dockerfile")))
+                        bad += [f"{where}: a check step must not have `{k}`, or it cannot fail the build" for k in gated]
                     elif action not in SETUP_ACTIONS:
                         bad.append(f"{where}: action `{action}` is not a known setup action; if it checks something, "
                                    "run that check as a check.sh step instead (or add it to SETUP_ACTIONS if it only installs)")

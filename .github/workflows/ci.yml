@@ -54,10 +54,11 @@ jobs:
         with:
           components: rustfmt
       # Formatting; version strings match Cargo.toml; doc links to repo
-      # files exist; CI and check.sh run the same checks.
+      # files exist; CI and check.sh run the same checks; those guards
+      # reject every bypass found before (scripts/selftest.py).
       # ci-sync reads the workflows as YAML.
-      - run: python3 -c "import yaml" || sudo apt-get install -y python3-yaml
-      - run: scripts/check.sh fmt versions links ci-sync
+      - run: python3 -c "import yaml" || (sudo apt-get update && sudo apt-get install -y python3-yaml)
+      - run: scripts/check.sh fmt versions links ci-sync scripts
 
   clippy:
     runs-on: ubuntu-latest
