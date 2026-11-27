@@ -559,7 +559,7 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 ```bash
 docker compose -f docker-compose.dev.yml up -d
 export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+make check     # every CI check; `make lint` skips the database and Docker steps
 ```
 
 Releases come from merging the release pull request that release-please keeps

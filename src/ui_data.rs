@@ -87,14 +87,16 @@ fn trend_days(q: &UiQuery) -> Result<i32, ApiError> {
 const TREND_COLUMNS: &str = "to_char(day,'YYYY-MM-DD') AS day,critical,high,medium,low,unknown";
 /// `$2` days ending on `$3`, today (UTC) by the state's clock.
 const TREND_SINCE: &str = "day > $3::date - $2 AND day <= $3::date";
-/// Open findings per severity at the end of each day, per realm, oldest first.
+/// Open findings per severity as of each day's last matcher pass, per realm,
+/// oldest first.
 /// Days without a snapshot (the server was down) have no row.
 async fn realm_trends(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let realms = ui_realms(&state, &p, &q)?;
     let sql = format!("SELECT row_to_json(t) FROM (SELECT realm,{TREND_COLUMNS} FROM realm_daily WHERE realm=ANY($1) AND {TREND_SINCE} ORDER BY day, realm) t");
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(realms).bind(trend_days(&q)?).bind(state.clock.now().date_naive()).fetch_all(&state.pool).await?))
 }
-/// The same for one service; `404` when it is not in a realm the caller reads.
+/// The same for one service; `404` when it is not in the requested realms
+/// (by default, every realm the caller reads).
 async fn service_trend(State(state): State<AppState>, p: Principal, UrlPath(id): UrlPath<i64>, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let realms = ui_realms(&state, &p, &q)?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM services WHERE id=$1 AND realm=ANY($2))").bind(id).bind(&realms).fetch_one(&state.pool).await?;

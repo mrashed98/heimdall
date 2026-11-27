@@ -53,7 +53,8 @@ pub struct AppState {
     /// is unset or malformed.
     pub secret_key: Option<Arc<secrets::SecretKey>>,
     pub channel_tests: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
-    /// The time handlers read. Tests fix it with `Clock::fixed`, so a result
+    /// The time the server reads (handlers and scheduler). Tests fix it with
+    /// `Clock::fixed`, so a result
     /// that depends on today does not change at midnight.
     pub clock: Clock,
 }

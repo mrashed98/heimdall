@@ -37,14 +37,18 @@ cargo test
 
 ## Before you open a pull request
 
-Run the same checks CI runs:
+Run the checks CI runs. Each CI job calls a step of `scripts/check.sh`, so
+these are the same commands:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-helm lint deploy/helm/heimdall
+make check     # every step (needs Postgres, Docker, helm, kubeconform, cargo-deny)
+make lint      # the steps that need no database or Docker
+make hooks     # run the fast checks (`make fast`) before every commit
 ```
+
+`scripts/check.sh --list` names the steps; `scripts/check.sh test web` runs
+some of them, and `--skip docker` leaves one out. A missing tool fails the
+step instead of skipping it.
 
 ## What a good change looks like
 
