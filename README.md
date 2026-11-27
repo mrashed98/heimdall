@@ -287,6 +287,8 @@ is a complete example.
 | `retention.findings_days` | `365` | Resolved findings are deleted after this long. |
 | `retention.releases_days` | `365` | Release records. |
 | `retention.outbox_days` | `30` | Sent notification rows. Oaths and their history are kept forever. |
+| `retention.audit_days` | `365` | Audit log entries. |
+| `retention.trends_days` | `365` | Daily counts behind the trend charts, 1 to 366. |
 
 `major_component` says which version number counts as the major. `0` (default)
 means the first number; `1` means the second, which is how Kubernetes and k3s
@@ -554,10 +556,13 @@ Logs are JSON on stdout (filter with `RUST_LOG`). Set
 
 ## Development
 
+The tools it needs are listed in [CONTRIBUTING](CONTRIBUTING.md#getting-set-up).
+
 ```bash
+(cd web && npm ci) && (cd docs/site && npm ci)
 docker compose -f docker-compose.dev.yml up -d
 export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+make check     # every CI check; `make lint` skips test, audit, docs, helm and docker
 ```
 
 Releases come from merging the release pull request that release-please keeps

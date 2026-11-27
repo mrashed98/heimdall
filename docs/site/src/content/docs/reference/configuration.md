@@ -311,6 +311,8 @@ images that were scanned or no longer run in any cluster.
 | `retention.findings_days` | integer | `365` | Resolved findings. |
 | `retention.releases_days` | integer | `365` | Release records. |
 | `retention.outbox_days` | integer | `30` | Sent notification rows. |
+| `retention.audit_days` | integer | `365` | Audit log entries. |
+| `retention.trends_days` | integer | `365` | Daily counts behind the trend charts, 1 to 366 (the API returns at most 366 days). |
 
 ## Fixed values
 
@@ -338,6 +340,5 @@ pool holds 10 connections.
 | `auth.oidc.admin_match_username` | `false` | Allow preferred_username to match admins. Email must be verified to match. |
 | `auth.oidc.role_mappings` | `[]` | List of `group`, `role`, `realms` mappings. |
 | `auth.oidc.default_role` | unset | Optional `role` and `realms` grant. |
-| `retention.audit_days` | `365` | Audit log retention in days. |
 
 Roles are `viewer`, `editor`, or `admin`; realms must be configured names or `*`. Admin grants must use only `realms: ["*"]` and users must also be listed in top-level `admins`. Unknown configuration fields are rejected.

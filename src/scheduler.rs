@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Context;
-use chrono::Utc;
 use tokio::task::JoinSet;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::Instrument;
@@ -187,9 +186,7 @@ async fn first_run(ctx: &Ctx) {
         tracing::info!("first run started");
         log_failure("sight", sight_all(ctx).await);
         log_failure("osv", osv_refresh(st).await);
-        let matched = match_all(st).await;
-        log_failure("alerts", announce(st, &matched).await);
-        log_failure("gauges", meters::recompute(&st.pool, &st.cfg).await);
+        log_failure("alerts", rematch(st).await);
         tracing::info!("first run done");
     }
     .instrument(span)
@@ -226,7 +223,7 @@ async fn run_loop(job: Job, ctx: Ctx) {
 
 async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
     let st = &ctx.state;
-    let now = Utc::now();
+    let now = st.clock.now();
     match job {
         Job::Sight => sight_all(&ctx).await,
         Job::Osv => {
@@ -240,7 +237,13 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
         }
         Job::Epss => {
             // Scores only annotate findings: nothing to rematch or announce.
-            let r = epss::refresh(&st.pool, &st.http, epss::FEED_URL).await?;
+            let r = epss::refresh(
+                &st.pool,
+                &st.http,
+                epss::FEED_URL,
+                st.clock.now().date_naive(),
+            )
+            .await?;
             tracing::info!(kept = r.kept, total = r.total, date = %r.date, "epss refresh ran");
             record_sync(st, "epss").await
         }
@@ -324,11 +327,18 @@ async fn run_job(job: Job, ctx: Ctx) -> anyhow::Result<()> {
     }
 }
 
-/// Matcher for every realm, then alerts, then the gauges.
+/// One matcher pass: matcher for every realm, then alerts, the gauges and
+/// today's trend row. The only way to run the matcher (startup included), so
+/// a step added here runs after every pass. A failing step does not skip the
+/// others; the alerts result is returned, the rest are logged.
 async fn rematch(st: &AppState) -> anyhow::Result<()> {
     let matched = match_all(st).await;
     let alerts = announce(st, &matched).await;
-    meters::recompute(&st.pool, &st.cfg).await?;
+    log_failure("gauges", meters::recompute(&st.pool, &st.cfg).await);
+    log_failure(
+        "trends",
+        crate::trends::snapshot(&st.pool, &st.cfg.realms, st.clock.now().date_naive()).await,
+    );
     alerts
 }
 
@@ -380,7 +390,7 @@ async fn sight_once(st: &AppState, realm: &str) -> anyhow::Result<()> {
 
 async fn record_sync(st: &AppState, feed: &str) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO kv (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value")
-        .bind(format!("sync|{feed}")).bind(Utc::now().to_rfc3339()).execute(&st.pool).await?;
+        .bind(format!("sync|{feed}")).bind(st.clock.now().to_rfc3339()).execute(&st.pool).await?;
     Ok(())
 }
 
@@ -411,7 +421,7 @@ async fn nvd_refresh(st: &AppState) -> anyhow::Result<()> {
     let key = std::env::var(&st.cfg.nvd.api_key_env).unwrap_or_default();
     let client = nvd::NvdClient::new(st.http.clone(), key);
     let targets = nvd::target_cpes(&st.cfg);
-    let r = nvd::refresh(&st.pool, &client, &targets, Utc::now()).await?;
+    let r = nvd::refresh(&st.pool, &client, &targets, st.clock.now()).await?;
     tracing::info!(
         changed = r.changed,
         matched = r.matched,
@@ -426,7 +436,7 @@ async fn nvd_refresh(st: &AppState) -> anyhow::Result<()> {
 async fn match_all(st: &AppState) -> Vec<String> {
     let mut ok = Vec::new();
     for realm in &st.cfg.realms {
-        match matcher::run(&st.pool, realm, Utc::now()).await {
+        match matcher::run(&st.pool, realm, st.clock.now()).await {
             Ok(r) => {
                 tracing::info!(
                     realm = %realm,

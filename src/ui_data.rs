@@ -4,6 +4,7 @@
 struct UiQuery {
     realms: Option<String>, limit: Option<String>, offset: Option<String>,
     sort: Option<String>, order: Option<String>, kind: Option<String>, tab: Option<String>,
+    days: Option<String>,
     search: Option<String>, version_lt: Option<String>,
 }
 fn ui_data_routes() -> Router<AppState> {
@@ -11,6 +12,8 @@ fn ui_data_routes() -> Router<AppState> {
         .route("/api/v1/ui/services/{id}/{section}", get(ui_service_section))
         .route("/api/v1/ui/releases", get(ui_releases))
         .route("/api/v1/ui/oaths", get(ui_oaths))
+        .route("/api/v1/trends", get(realm_trends))
+        .route("/api/v1/services/{id}/trend", get(service_trend))
         .route("/api/v1/components", get(component_search))
 }
 fn ui_realms(state: &AppState, p: &Principal, q: &UiQuery) -> Result<Vec<String>, ApiError> {
@@ -74,6 +77,33 @@ async fn ui_oaths(State(state): State<AppState>, p: Principal, Query(q): Query<U
     Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(realms).bind(tab).bind(parse_limit(&q.limit)?).bind(parse_offset(&q.offset)?).fetch_all(&state.pool).await?))
 }
 
+/// Days of history a trend returns: `days`, default 90, at most 366, ending today (UTC).
+fn trend_days(q: &UiQuery) -> Result<i32, ApiError> {
+    match given(&q.days) {
+        None => Ok(90),
+        Some(s) => s.parse::<i32>().ok().filter(|n| (1..=366).contains(n)).ok_or_else(|| ApiError::BadRequest(format!("days {s:?} must be a number from 1 to 366"))),
+    }
+}
+const TREND_COLUMNS: &str = "to_char(day,'YYYY-MM-DD') AS day,critical,high,medium,low,unknown";
+/// `$2` days ending on `$3`, today (UTC) by the state's clock.
+const TREND_SINCE: &str = "day > $3::date - $2 AND day <= $3::date";
+/// Open findings per severity as of each day's last matcher pass, per realm,
+/// oldest first.
+/// Days without a snapshot (the server was down) have no row.
+async fn realm_trends(State(state): State<AppState>, p: Principal, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let sql = format!("SELECT row_to_json(t) FROM (SELECT realm,{TREND_COLUMNS} FROM realm_daily WHERE realm=ANY($1) AND {TREND_SINCE} ORDER BY day, realm) t");
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(realms).bind(trend_days(&q)?).bind(state.clock.now().date_naive()).fetch_all(&state.pool).await?))
+}
+/// The same for one service; `404` when it is not in the requested realms
+/// (by default, every realm the caller reads).
+async fn service_trend(State(state): State<AppState>, p: Principal, UrlPath(id): UrlPath<i64>, Query(q): Query<UiQuery>) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
+    let realms = ui_realms(&state, &p, &q)?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM services WHERE id=$1 AND realm=ANY($2))").bind(id).bind(&realms).fetch_one(&state.pool).await?;
+    if !exists { return Err(ApiError::NotFound); }
+    let sql = format!("SELECT row_to_json(t) FROM (SELECT {TREND_COLUMNS} FROM service_daily WHERE service_id=$1 AND {TREND_SINCE} ORDER BY day) t");
+    Ok(Json(sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(id).bind(trend_days(&q)?).bind(state.clock.now().date_naive()).fetch_all(&state.pool).await?))
+}
 /// A search matching more components than this is refused, so one request
 /// never holds a whole inventory in memory; the caller narrows the text.
 const COMPONENT_SEARCH_CAP: usize = 10_000;

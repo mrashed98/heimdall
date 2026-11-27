@@ -19,11 +19,13 @@ Direct pushes and force pushes to `main` are blocked for everyone.
 
 ## Getting set up
 
-You need Rust (stable), Docker and, for chart work, Helm.
+You need Rust (stable), Python 3 with PyYAML, Node 22.23.4 or newer, and
+Docker. The full `make check` also needs helm, kubeconform and cargo-deny.
 
 ```bash
 git clone https://github.com/mrashed98/heimdall.git
 cd heimdall
+(cd web && npm ci) && (cd docs/site && npm ci)
 docker compose -f docker-compose.dev.yml up -d            # Postgres on localhost:5433
 export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
 cargo test
@@ -31,14 +33,18 @@ cargo test
 
 ## Before you open a pull request
 
-Run the same checks CI runs:
+Run the checks CI runs. Each CI job calls a step of `scripts/check.sh`, so
+these are the same commands:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-helm lint deploy/helm/heimdall
+make check     # every step (needs Postgres, Docker, helm, kubeconform, cargo-deny)
+make lint      # fmt, versions, links, ci-sync, scripts, clippy and web; not test, audit, docs, helm or docker
+make hooks     # run the fast checks (`make fast`) on the staged files before every commit
 ```
+
+`scripts/check.sh --list` names the steps; `scripts/check.sh test web` runs
+some of them, and `--skip docker` leaves one out. A missing tool fails the
+step instead of skipping it.
 
 ## What a good change looks like
 

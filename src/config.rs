@@ -63,6 +63,10 @@ impl HeimdallConfig {
     /// Semantic checks serde cannot express. Errors name the offending key.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::bail;
+        // The trend API returns at most 366 days; older rows would be kept unread.
+        if !(1..=366).contains(&self.retention.trends_days) {
+            bail!("retention.trends_days must be from 1 to 366");
+        }
         if let Some(d) = &self.sight.docker {
             d.host
                 .parse::<crate::inventory::docker::DockerHost>()
@@ -938,6 +942,8 @@ pub struct Retention {
     pub outbox_days: u32,
     #[serde(default = "default_findings_days")]
     pub audit_days: u32,
+    #[serde(default = "default_findings_days")]
+    pub trends_days: u32,
 }
 
 impl Default for Retention {
@@ -947,6 +953,7 @@ impl Default for Retention {
             releases_days: default_releases_days(),
             outbox_days: default_outbox_days(),
             audit_days: default_findings_days(),
+            trends_days: default_findings_days(),
         }
     }
 }
@@ -1048,6 +1055,15 @@ mod tests {
 
     fn err(yaml: &str) -> String {
         format!("{:#}", load_str(yaml).unwrap_err())
+    }
+
+    #[test]
+    fn trends_days_must_be_what_the_api_can_return() {
+        for bad in [0, 367] {
+            let e = err(&format!("realms: [a]\nretention: {{trends_days: {bad}}}"));
+            assert!(e.contains("retention.trends_days"), "{e}");
+        }
+        assert!(load_str("realms: [a]\nretention: {trends_days: 366}").is_ok());
     }
 
     #[test]

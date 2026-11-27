@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fast checks before each commit (a few seconds, no database). Enable with
+# `make hooks`. CI runs these and the slow ones through scripts/check.sh.
+# They run on a copy of the index, so they check what is committed, not
+# unstaged edits.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+snap="$(mktemp -d)"
+trap 'rm -rf "$snap"' EXIT
+git checkout-index --all --prefix="$snap/"
+make -C "$snap" fast

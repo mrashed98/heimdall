@@ -73,7 +73,7 @@ async fn oidc_flow_verifies_tokens_and_updates_identity(pool: PgPool) {
         let url = url::Url::parse(start.headers()["location"].to_str().unwrap()).unwrap();
         let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(params["code_challenge_method"], "S256");
-        let now = chrono::Utc::now().timestamp();
+        let now = heimdall::Clock::default().now().timestamp();
         let claims = json!({"iss":issuer,"sub":"subject-1","aud":if scenario == "aud" {"other"} else {"client"},"exp":if scenario == "expired" {now-1000} else {now+300},"iat":now,"nonce":if scenario == "nonce" {"wrong"} else {&params["nonce"]},"preferred_username":"alice","email_verified":true,"email":if scenario == "returning" {"updated@example.com"} else {"admin@example.com"},"name":if scenario == "returning" {"Updated"} else {"Alice"},"teams":["engineers","ops"]});
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some("test-key".into());

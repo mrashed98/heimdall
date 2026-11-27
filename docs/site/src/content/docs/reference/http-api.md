@@ -47,6 +47,8 @@ Errors come back as a status code and a JSON body, `{"error": "message"}`:
 | `GET /api/v1/findings/{id}` | read | Finding details. |
 | `GET /api/v1/services` | read | List services. |
 | `GET /api/v1/services/{id}/components` | read | A service's components. |
+| `GET /api/v1/trends` | read | Open findings per day, per realm. |
+| `GET /api/v1/services/{id}/trend` | read | Open findings per day for one service. |
 | `GET /api/v1/components` | read | Find where a component runs. |
 | `GET /api/v1/releases` | read | Recorded releases. |
 | `POST /api/v1/ingest/sbom` | ingest | Upload an SBOM. |
@@ -163,6 +165,34 @@ Scope `read`. `404` if the service does not exist. Rows:
   "direct": true, "via_image_digest": null
 }
 ```
+
+### `GET /api/v1/trends`
+
+Scope `read`. Open findings per severity on each day (UTC), per realm, oldest
+first. Heimdall records today's counts after every matcher run, the one at
+startup included, so a day holds the counts of its last run, which can be
+hours before midnight. A
+day with no row is one the server did not run; it is not a day with zero
+findings. A realm added to the config has no rows for the days before it was
+added, so a total across realms for those days covers only the realms
+configured then.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `days` | `90` | Days ending today, 1 to 366. |
+| `realms` | the caller's realms | Comma-separated realms. A realm not in the config is a `400`; realms the caller cannot read are ignored. |
+
+```json
+{"realm": "prod", "day": "2026-11-26", "critical": 2, "high": 14, "medium": 30, "low": 8, "unknown": 1}
+```
+
+Rows older than `retention.trends_days` are deleted.
+
+### `GET /api/v1/services/{id}/trend`
+
+Scope `read`. The same counts for one service, without `realm`. `days` and
+`realms` as above. `404` if the service is not in one of those realms, or the
+caller cannot read its realm; a realm not in the config is a `400`.
 
 ### `GET /api/v1/components`
 

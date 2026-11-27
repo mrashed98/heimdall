@@ -364,7 +364,7 @@ async fn test(
         mailer: &mailer,
     };
     // The error is already redacted.
-    let sent = outbox::send_now(&d, &ch, origin, &chans.secrets, Utc::now()).await;
+    let sent = outbox::send_now(&d, &ch, origin, &chans.secrets, st.clock.now()).await;
     let mut conn = st.pool.acquire().await?;
     crate::admin::record(
         &mut conn,

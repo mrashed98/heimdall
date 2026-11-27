@@ -988,7 +988,7 @@ mod tests {
         let comps = [(cid, PURL.to_string())];
         mount_hits(&server, &[&pysec, &ghsa]).await;
         refresh(&pool, &client_for(&server), &comps).await.unwrap();
-        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         let first = vuln_keys(&pool).await;
@@ -999,7 +999,7 @@ mod tests {
         ghsa["modified"] = json!("2026-06-01T00:00:00Z");
         mount_hits(&server, &[&pysec, &ghsa]).await;
         refresh(&pool, &client_for(&server), &comps).await.unwrap();
-        let report = crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        let report = crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         assert_eq!(vuln_keys(&pool).await, first);
@@ -1081,7 +1081,7 @@ mod tests {
         let old = widget_at(&pool, "api", "1.0.0").await;
         mount_hits(&server, &[&pysec]).await;
         refresh(&pool, &client_for(&server), &[old]).await.unwrap();
-        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         sqlx::query("update findings set notified_at = now()")
@@ -1095,7 +1095,7 @@ mod tests {
         mount_hits(&server, &[&pysec, &ghsa]).await;
         let new = widget_at(&pool, "api", "1.0.1").await;
         refresh(&pool, &client_for(&server), &[new]).await.unwrap();
-        let report = crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        let report = crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         assert_eq!(vuln_keys(&pool).await, first, "same finding key");
@@ -1118,7 +1118,7 @@ mod tests {
         refresh(&pool, &client_for(&server), std::slice::from_ref(&web))
             .await
             .unwrap();
-        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         let refs: Vec<String> = sqlx::query_scalar(
@@ -1170,7 +1170,7 @@ mod tests {
         let server = MockServer::start().await;
         let api = widget_at(&pool, "api", "1.0.0").await;
         let web = widget_at(&pool, "web", "1.0.1").await;
-        let now = chrono::Utc::now;
+        let now = || crate::Clock::default().now();
 
         // Only PyPI's record is known: api links it.
         mount_hits_per_component(&server, &[&pysec], &[&[0]]).await;
@@ -1245,7 +1245,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(links, [("PYSEC-2026-5".to_string(), "both".to_string())]);
-        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         let vulns = vuln_keys(&pool).await;
@@ -1324,7 +1324,7 @@ mod tests {
         assert_eq!(sev, "high", "the higher severity wins");
         assert_eq!(fixed[NAME_KEY], json!(["1.9.1"]), "Go's fix is kept");
 
-        crate::matcher::run(&pool, "prod", chrono::Utc::now())
+        crate::matcher::run(&pool, "prod", crate::Clock::default().now())
             .await
             .unwrap();
         let findings: Vec<(FindingKind, String)> =

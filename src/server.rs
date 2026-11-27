@@ -996,6 +996,160 @@ mod tests {
         .unwrap();
     }
 
+    /// Read routes that hold no per-realm data, with the reason. Every other
+    /// `GET /api/v1` route must be requested without `realms=` in
+    /// `session_read_access_is_realm_scoped`.
+    const NOT_REALM_SCOPED: &[(&str, &str)] = &[
+        ("/api/v1/audit", "admin only"),
+        ("/api/v1/channels", "admin only"),
+        ("/api/v1/channels/{id}/queued", "admin only"),
+        ("/api/v1/keys", "admin only"),
+        ("/api/v1/users", "admin only"),
+        ("/api/v1/users/{id}/grants", "admin only"),
+        ("/api/v1/images/pending", "ingest scope, image digests only"),
+    ];
+
+    /// The arguments of the call whose `(` is at `open`, up to its matching
+    /// `)`; parentheses inside string literals are skipped.
+    fn call_args(source: &str, open: usize) -> &str {
+        let (mut depth, mut in_str, mut prev) = (0, false, ' ');
+        for (i, c) in source[open..].char_indices() {
+            match c {
+                '"' if prev != '\\' => in_str = !in_str,
+                '(' if !in_str => depth += 1,
+                ')' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[open + 1..open + i];
+                    }
+                }
+                _ => {}
+            }
+            prev = c;
+        }
+        &source[open + 1..]
+    }
+
+    /// A `.route(...)` call's path when it serves GET under `/api/v1`, `None`
+    /// for other routes, `Err` when its path is not a string literal (the
+    /// guard could not tell what it serves).
+    fn read_route(args: &str) -> Result<Option<String>, String> {
+        let args = args.trim_start();
+        let Some(rest) = args.strip_prefix('"') else {
+            return Err(args.lines().next().unwrap_or("").to_owned());
+        };
+        let path = &rest[..rest.find('"').unwrap()];
+        let methods = regex::Regex::new(r"\bget\(|MethodFilter::GET\b").unwrap();
+        Ok(
+            (path.starts_with("/api/v1/") && methods.is_match(&rest[path.len()..]))
+                .then(|| path.to_owned()),
+        )
+    }
+
+    /// A new read route is checked against a viewer limited to one realm, or
+    /// says here why it has no realm data. Reads every route in src/.
+    #[test]
+    fn every_read_route_is_checked_for_realm_scope() {
+        // The reader proves itself on every form it claims to read.
+        for (call, expect) in [
+            (r#""/api/v1/x", get(h)"#, Ok(Some("/api/v1/x"))),
+            (r#""/api/v1/x", get(h).post(c)"#, Ok(Some("/api/v1/x"))),
+            (
+                r#""/api/v1/x", post(limit(h)).get(list)"#,
+                Ok(Some("/api/v1/x")),
+            ),
+            (
+                r#""/api/v1/x", axum::routing::post(c).delete(d).get(h)"#,
+                Ok(Some("/api/v1/x")),
+            ),
+            (
+                r#""/api/v1/x", on(MethodFilter::GET, h)"#,
+                Ok(Some("/api/v1/x")),
+            ),
+            (
+                "\n            \"/api/v1/x\",\n            axum::routing::get(h),\n        ",
+                Ok(Some("/api/v1/x")),
+            ),
+            (r#""/api/v1/x", post(c).delete(d)"#, Ok(None)),
+            (r#""/auth/x", get(h)"#, Ok(None)),
+            ("PATH, get(h)", Err("PATH, get(h)".to_owned())),
+        ] {
+            assert_eq!(
+                read_route(call),
+                expect.map(|p| p.map(str::to_owned)),
+                "reading {call:?}"
+            );
+        }
+        // Built at run time so the scan below does not read it as a route.
+        let mut example = format!(
+            r#"x.{}("/api/v1/y", post(limit(h, "(")).get(list)) // )"#,
+            "route"
+        );
+        let open = example.find('(').unwrap();
+        assert_eq!(
+            call_args(&example, open),
+            r#""/api/v1/y", post(limit(h, "(")).get(list)"#
+        );
+        example.clear();
+
+        // Every Rust file under src/, so a route in a new module is seen too.
+        fn rust_files(dir: &std::path::Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push_str(&std::fs::read_to_string(&path).unwrap());
+                }
+            }
+        }
+        let mut source = String::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut source,
+        );
+        let test = &source[source
+            .find(concat!(
+                "async fn session_read_access_",
+                "is_realm_scoped(pool"
+            ))
+            .unwrap()..];
+        let test = &test[..test.find("\n    }\n").unwrap()];
+        let (mut missing, mut unreadable) = (Vec::new(), Vec::new());
+        for (at, _) in source.match_indices(concat!(".rou", "te(")) {
+            let line_start = source[..at].rfind('\n').map_or(0, |n| n + 1);
+            if source[line_start..at].contains("//") {
+                continue; // a comment that mentions the call
+            }
+            match read_route(call_args(&source, at + ".route".len())) {
+                Err(path) => unreadable.push(path),
+                Ok(None) => {}
+                Ok(Some(path)) if NOT_REALM_SCOPED.iter().any(|(p, _)| *p == path) => {}
+                Ok(Some(path)) => {
+                    // Requested without a realm filter: that is where a leak would show.
+                    let pattern = regex::escape(&path)
+                        .replace(r"\{id\}", r"\{[a-z_]+\}")
+                        .replace(r"\{section\}", "[a-z]+");
+                    let request = regex::Regex::new(&format!(r#""{pattern}(\?[^"]*)?""#)).unwrap();
+                    let unfiltered = request
+                        .captures_iter(test)
+                        .any(|c| c.get(1).is_none_or(|q| !q.as_str().contains("realms=")));
+                    if !unfiltered {
+                        missing.push(path);
+                    }
+                }
+            }
+        }
+        assert!(
+            unreadable.is_empty(),
+            "write these route paths as string literals so the realm-scope guard can read them: {unreadable:?}"
+        );
+        assert!(
+            missing.is_empty(),
+            "request these without `realms=` as the realm-`a` viewer in session_read_access_is_realm_scoped (and seed realm-b data they must hide), or add them to NOT_REALM_SCOPED with a reason: {missing:?}"
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     async fn session_read_access_is_realm_scoped(pool: PgPool) {
         use sha2::{Digest, Sha256};
@@ -1009,6 +1163,26 @@ mod tests {
             sqlx::query("INSERT INTO oaths(advisory_id,name_key,service_name,realm,kind,reason,version_at_creation,created_by) VALUES ('CVE-test','pkg','one',$1,'ignore','test','1','alice')")
                 .bind(realm).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO realm_daily VALUES ('a','2026-01-10',1,0,0,0,0),('b','2026-01-10',5,0,0,0,0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_daily SELECT id,'2026-01-10',1,0,0,0,0 FROM services")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO components(purl,name_key,ecosystem,version) VALUES ('pkg:generic/shared@1','pkg:generic/shared','generic','1'),('pkg:generic/only-b@1','pkg:generic/only-b','generic','1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO service_components(service_id,component_id,source) SELECT s.id,c.id,'cluster' FROM services s, components c WHERE s.realm='b' OR c.name_key='pkg:generic/shared'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO findings(key,kind,realm,ref_id,severity,details) VALUES ('rel-a','majorrelease','a','2','high','{\"target\":\"widget-a\",\"version\":\"2\"}'),('rel-b','majorrelease','b','2','high','{\"target\":\"widget-b\",\"version\":\"2\"}')")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO releases(target,version) VALUES ('global','1')")
             .execute(&pool)
             .await
@@ -1030,12 +1204,14 @@ mod tests {
             "realms: [a, b]\nauth: {public_url: 'http://localhost:8080'}",
         )
         .unwrap();
-        let app = router(AppState::with_grant_cache_ttl(
+        let mut st = AppState::with_grant_cache_ttl(
             pool.clone(),
             Arc::new(cfg),
             reqwest::Client::new(),
             Duration::ZERO,
-        ));
+        );
+        st.clock = crate::Clock::fixed("2026-01-10T12:00:00Z".parse().unwrap());
+        let app = router(st);
         let get_session = |path: String| {
             let app = app.clone();
             async move {
@@ -1058,7 +1234,7 @@ mod tests {
             }
         };
         for (path, count) in [
-            ("/api/v1/findings", 1),
+            ("/api/v1/findings", 2),
             ("/api/v1/services", 1),
             ("/api/v1/realms", 1),
             ("/api/v1/oaths", 2),
@@ -1079,6 +1255,40 @@ mod tests {
         assert_eq!(overview["severity"].as_array().unwrap().len(), 5);
         assert_eq!(overview["severity"][0]["realm"], "a");
         assert_eq!(overview["services"][0]["risk"], 3);
+        // Without a realm filter, where a leak would show: only realm a.
+        let (_, services) = get_session("/api/v1/ui/services".into()).await;
+        let names: Vec<&str> = services
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["one"], "{services}");
+        let (_, releases) = get_session("/api/v1/ui/releases".into()).await;
+        let realms: Vec<&str> = releases
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["realm"].as_str().unwrap())
+            .collect();
+        assert_eq!(realms, ["a"], "{releases}");
+        let (_, oaths) = get_session("/api/v1/ui/oaths".into()).await;
+        assert!(!oaths.as_array().unwrap().is_empty(), "{oaths}");
+        assert!(
+            oaths.as_array().unwrap().iter().all(|r| r["realm"] != "b"),
+            "{oaths}"
+        );
+        let (_, trends) = get_session("/api/v1/trends".into()).await;
+        assert_eq!(trends.as_array().unwrap().len(), 1, "{trends}");
+        assert_eq!(trends[0]["realm"], "a");
+        let (_, found) = get_session("/api/v1/components?search=generic".into()).await;
+        assert_eq!(
+            found.as_array().unwrap().len(),
+            1,
+            "only-b is hidden: {found}"
+        );
+        assert_eq!(found[0]["services"].as_array().unwrap().len(), 1, "{found}");
+        assert_eq!(found[0]["services"][0]["realm"], "a");
         let (_, filtered) = get_session("/api/v1/status?realms=b".into()).await;
         assert!(filtered["severity"].as_array().unwrap().is_empty());
         assert!(filtered["services"].as_array().unwrap().is_empty());
@@ -1086,6 +1296,8 @@ mod tests {
             "/api/v1/ui/services?realms=b",
             "/api/v1/ui/oaths?realms=b",
             "/api/v1/ui/releases?realms=b",
+            "/api/v1/trends?realms=b",
+            "/api/v1/components?search=pkg&realms=b",
         ] {
             let (status, rows) = get_session(path.into()).await;
             assert_eq!(status, StatusCode::OK, "{path}: {rows}");
@@ -1099,6 +1311,12 @@ mod tests {
         );
         assert_eq!(
             get_session(format!("/api/v1/services/{service_b}/components"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get_session(format!("/api/v1/services/{service_b}/trend"))
                 .await
                 .0,
             StatusCode::NOT_FOUND
@@ -1134,7 +1352,7 @@ mod tests {
             .await
             .unwrap();
         for (path, count) in [
-            ("/api/v1/findings", 2),
+            ("/api/v1/findings", 4),
             ("/api/v1/services", 2),
             ("/api/v1/realms", 2),
             ("/api/v1/oaths", 3),
@@ -1309,6 +1527,100 @@ mod tests {
         );
         assert_eq!(
             get(&app, "/api/v1/components?search=log4j", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn trends_return_the_days_ending_today(pool: PgPool) {
+        let api = crate::inventory::store::upsert_service(&pool, "prod", "api")
+            .await
+            .unwrap();
+        // Today is fixed: a handler reading the real clock sees none of these.
+        for (realm, day, critical) in [
+            ("prod", "2026-01-10", 3),
+            ("prod", "2026-01-09", 2),
+            ("prod", "2026-01-01", 1),
+            ("prod", "2026-01-11", 9),
+            ("dev", "2026-01-10", 7),
+        ] {
+            sqlx::query("INSERT INTO realm_daily (realm, day, critical, high, medium, low, unknown) VALUES ($1, $2::date, $3, 1, 0, 0, 0)")
+                .bind(realm).bind(day).bind(critical).execute(&pool).await.unwrap();
+        }
+        for day in ["2026-01-10", "2025-10-02"] {
+            sqlx::query("INSERT INTO service_daily (service_id, day, critical, high, medium, low, unknown) VALUES ($1, $2::date, 1, 0, 0, 0, 0)")
+                .bind(api).bind(day).execute(&pool).await.unwrap();
+        }
+        let key = create_key(&pool, &[], "viewer", Scope::Read).await.unwrap();
+        let mut st = state(pool);
+        st.clock = crate::Clock::fixed("2026-01-10T23:59:00Z".parse().unwrap());
+        let app = router(st);
+        let fetch = |path: String| {
+            let (app, key) = (&app, &key);
+            async move {
+                let (status, body) = get(app, &path, Some(key)).await;
+                (
+                    status,
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_default(),
+                )
+            }
+        };
+        let days = |rows: &serde_json::Value| -> Vec<String> {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .map(|r| format!("{} {}", r["day"].as_str().unwrap(), r["critical"]))
+                .collect()
+        };
+
+        let (status, rows) = fetch("/api/v1/trends?realms=prod&days=2".into()).await;
+        assert_eq!(status, StatusCode::OK, "{rows}");
+        assert_eq!(
+            days(&rows),
+            ["2026-01-09 2", "2026-01-10 3"],
+            "the last 2 days, oldest first, none after today"
+        );
+        assert_eq!(rows[1]["realm"], "prod");
+        assert_eq!(rows[1]["high"], 1);
+        assert_eq!(
+            days(&fetch("/api/v1/trends?realms=prod".into()).await.1),
+            ["2026-01-01 1", "2026-01-09 2", "2026-01-10 3"],
+            "90 days by default"
+        );
+        assert_eq!(
+            fetch("/api/v1/trends?days=1".into())
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "every readable realm"
+        );
+
+        assert_eq!(
+            days(&fetch(format!("/api/v1/services/{api}/trend")).await.1),
+            ["2026-01-10 1"]
+        );
+        assert_eq!(
+            fetch(format!("/api/v1/services/{api}/trend?days=101"))
+                .await
+                .1
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        for bad in ["0", "367", "x"] {
+            assert_eq!(
+                fetch(format!("/api/v1/trends?days={bad}")).await.0,
+                StatusCode::BAD_REQUEST,
+                "days={bad}"
+            );
+        }
+        assert_eq!(
+            get(&app, "/api/v1/trends", None).await.0,
             StatusCode::UNAUTHORIZED
         );
     }

@@ -11,6 +11,13 @@ binaries, checksums, container image tags and the Helm chart of each version.
 
 ## Unreleased
 
+- **Trends.** Heimdall records the open findings per severity each day, per
+  realm and per service. The Overview charts open critical and high findings
+  over 90 days, and a service's page shows a 90-day line of its critical and
+  high findings. The counts are in `GET /api/v1/trends` and
+  `GET /api/v1/services/{id}/trend` and kept for `retention.trends_days`
+  (365 by default). See the
+  [HTTP API](/heimdall/reference/http-api/#get-apiv1trends).
 - **Component search.** Inventory → Find a component lists every service and
   image carrying a package, optionally only versions below a given one ("where
   do we run log4j-core below 2.17?"), within the realms you can read. The same

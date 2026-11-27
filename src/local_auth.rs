@@ -281,7 +281,7 @@ impl FromRequestParts<AppState> for Principal {
         let admin_allowed = if user_kind == "oidc" {
             let oidc = cfg.oidc.as_ref().ok_or(ApiError::Reauth)?;
             if refreshed.is_none_or(|at| {
-                at < chrono::Utc::now()
+                at < state.clock.now()
                     - chrono::Duration::minutes(i64::from(oidc.groups_max_age_minutes))
             }) {
                 return Err(ApiError::Reauth);
@@ -1047,7 +1047,7 @@ mod tests {
         );
         let cfg = crate::config::HeimdallConfig::from_yaml("realms: [prod]").unwrap();
         sqlx::query("INSERT INTO login_failures(username,ip,occurred_at) VALUES ('old','ip',now()-interval '16 minutes'),('new','ip',now())").execute(&pool).await.unwrap();
-        crate::retention::cleanup(&pool, &cfg, chrono::Utc::now())
+        crate::retention::cleanup(&pool, &cfg, crate::Clock::default().now())
             .await
             .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
