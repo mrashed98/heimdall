@@ -537,9 +537,6 @@ async fn logout(
 }
 
 #[cfg(test)]
-// Exception: these tests compare against database now() defaults, so they
-// read the real clock. Tests only; production code here uses AppState.clock.
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -1050,7 +1047,7 @@ mod tests {
         );
         let cfg = crate::config::HeimdallConfig::from_yaml("realms: [prod]").unwrap();
         sqlx::query("INSERT INTO login_failures(username,ip,occurred_at) VALUES ('old','ip',now()-interval '16 minutes'),('new','ip',now())").execute(&pool).await.unwrap();
-        crate::retention::cleanup(&pool, &cfg, chrono::Utc::now())
+        crate::retention::cleanup(&pool, &cfg, crate::Clock::default().now())
             .await
             .unwrap();
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")

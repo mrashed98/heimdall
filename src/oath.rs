@@ -533,9 +533,6 @@ async fn extend_handler(
 }
 
 #[cfg(test)]
-// Exception: these tests compare against database now() defaults, so they
-// read the real clock. Tests only; production code here uses AppState.clock.
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -543,7 +540,7 @@ mod tests {
     const GIN_KEY: &str = "pkg:golang/github.com/gin-gonic/gin";
 
     fn today() -> NaiveDate {
-        Utc::now().date_naive()
+        crate::Clock::default().now().date_naive()
     }
 
     fn req(kind: OathKind) -> NewOath {
@@ -603,7 +600,9 @@ mod tests {
                 advisory_id: given.to_string(),
                 ..snooze(7)
             };
-            let created = create(&pool, r, Utc::now()).await.unwrap();
+            let created = create(&pool, r, crate::Clock::default().now())
+                .await
+                .unwrap();
             assert_eq!(created.warning, None);
             let o = get(&pool, created.id).await;
             assert_eq!(o.advisory_id, "GHSA-aaaa-bbbb-cccc", "filed as {given}");
@@ -623,7 +622,9 @@ mod tests {
             advisory_id: "CVE-2099-0001".to_string(),
             ..snooze(7)
         };
-        let created = create(&pool, r, Utc::now()).await.unwrap();
+        let created = create(&pool, r, crate::Clock::default().now())
+            .await
+            .unwrap();
         assert!(created.warning.unwrap().contains("CVE-2099-0001"));
         assert_eq!(get(&pool, created.id).await.advisory_id, "CVE-2099-0001");
     }
@@ -634,7 +635,9 @@ mod tests {
             reason: "   ".to_string(),
             ..snooze(7)
         };
-        let e = create(&pool, r, Utc::now()).await.unwrap_err();
+        let e = create(&pool, r, crate::Clock::default().now())
+            .await
+            .unwrap_err();
         assert!(is_invalid(&e), "{e:#}");
     }
 
@@ -645,10 +648,15 @@ mod tests {
                 until,
                 ..req(OathKind::Snooze)
             };
-            let e = create(&pool, r, Utc::now()).await.unwrap_err();
+            let e = create(&pool, r, crate::Clock::default().now())
+                .await
+                .unwrap_err();
             assert!(is_invalid(&e), "until {until:?}: {e:#}");
         }
-        let id = create(&pool, snooze(1), Utc::now()).await.unwrap().id;
+        let id = create(&pool, snooze(1), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         let o = get(&pool, id).await;
         assert_eq!(o.status, "active");
         assert_eq!(
@@ -662,22 +670,25 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn ignore_defaults_review_90_days(pool: PgPool) {
-        let before = Utc::now();
-        let id = create(&pool, req(OathKind::Ignore), Utc::now())
+        let before = crate::Clock::default().now();
+        let id = create(&pool, req(OathKind::Ignore), crate::Clock::default().now())
             .await
             .unwrap()
             .id;
         let o = get(&pool, id).await;
         let review = o.review_at.unwrap();
         assert!(review >= before + Duration::days(90));
-        assert!(review <= Utc::now() + Duration::days(90));
+        assert!(review <= crate::Clock::default().now() + Duration::days(90));
         assert!(o.expires_at.is_none());
 
         let r = NewOath {
             until: Some(today() + Duration::days(30)),
             ..req(OathKind::Ignore)
         };
-        let id = create(&pool, r, Utc::now()).await.unwrap().id;
+        let id = create(&pool, r, crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         let o = get(&pool, id).await;
         assert_eq!(
             o.review_at.unwrap(),
@@ -690,7 +701,10 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn active_matches_any_version_of_same_name(pool: PgPool) {
-        let id = create(&pool, snooze(7), Utc::now()).await.unwrap().id;
+        let id = create(&pool, snooze(7), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         let o = get(&pool, id).await;
         assert_eq!(o.name_key, GIN_KEY);
         assert_eq!(o.version_at_creation, "v1.9.0");
@@ -705,7 +719,7 @@ mod tests {
             GIN_KEY,
             "api",
             "prod",
-            Utc::now(),
+            crate::Clock::default().now(),
         )
         .await
         .unwrap();
@@ -716,30 +730,36 @@ mod tests {
             ("GHSA-aaaa-bbbb-cccc", "pkg:golang/example.com/x", "api"),
             ("GHSA-aaaa-bbbb-cccc", GIN_KEY, "web"),
         ] {
-            assert!(active_for(&pool, adv, key, svc, "prod", Utc::now())
-                .await
-                .unwrap()
-                .is_none());
+            assert!(
+                active_for(&pool, adv, key, svc, "prod", crate::Clock::default().now())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn expiry_processed_once_after_downtime(pool: PgPool) {
-        let snooze_id = create(&pool, snooze(1), Utc::now()).await.unwrap().id;
-        let ignore_id = create(&pool, req(OathKind::Ignore), Utc::now())
+        let snooze_id = create(&pool, snooze(1), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
+        let ignore_id = create(&pool, req(OathKind::Ignore), crate::Clock::default().now())
             .await
             .unwrap()
             .id;
         // Not yet due.
-        assert!(
-            process_expiries(&mut pool.acquire().await.unwrap(), Utc::now())
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(process_expiries(
+            &mut pool.acquire().await.unwrap(),
+            crate::Clock::default().now()
+        )
+        .await
+        .unwrap()
+        .is_empty());
 
         // Heimdall was down for a while: only the snooze is due 10 days on.
-        let later = Utc::now() + Duration::days(10);
+        let later = crate::Clock::default().now() + Duration::days(10);
         let due = process_expiries(&mut pool.acquire().await.unwrap(), later)
             .await
             .unwrap();
@@ -758,7 +778,7 @@ mod tests {
         // Ignore comes up for review at 90 days.
         let due = process_expiries(
             &mut pool.acquire().await.unwrap(),
-            Utc::now() + Duration::days(91),
+            crate::Clock::default().now() + Duration::days(91),
         )
         .await
         .unwrap();
@@ -771,7 +791,7 @@ mod tests {
             GIN_KEY,
             "api",
             "prod",
-            Utc::now()
+            crate::Clock::default().now()
         )
         .await
         .unwrap()
@@ -785,7 +805,10 @@ mod tests {
             realm: String::new(),
             ..snooze(7)
         };
-        let id = create(&pool, all, Utc::now()).await.unwrap().id;
+        let id = create(&pool, all, crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         assert!(get(&pool, id).await.realm.is_none());
         for realm in ["prod", "dev-k3s"] {
             let hit = active_for(
@@ -794,7 +817,7 @@ mod tests {
                 GIN_KEY,
                 "api",
                 realm,
-                Utc::now(),
+                crate::Clock::default().now(),
             )
             .await
             .unwrap();
@@ -808,14 +831,16 @@ mod tests {
             realm: "dev-k3s".to_string(),
             ..snooze(7)
         };
-        create(&pool, dev, Utc::now()).await.unwrap();
+        create(&pool, dev, crate::Clock::default().now())
+            .await
+            .unwrap();
         assert!(active_for(
             &pool,
             "GHSA-aaaa-bbbb-cccc",
             GIN_KEY,
             "api",
             "prod",
-            Utc::now()
+            crate::Clock::default().now()
         )
         .await
         .unwrap()
@@ -826,7 +851,7 @@ mod tests {
             GIN_KEY,
             "api",
             "dev-k3s",
-            Utc::now()
+            crate::Clock::default().now()
         )
         .await
         .unwrap()
@@ -840,20 +865,27 @@ mod tests {
             ..snooze(7)
         };
         assert!(is_invalid(
-            &create(&pool, both, Utc::now()).await.unwrap_err()
+            &create(&pool, both, crate::Clock::default().now())
+                .await
+                .unwrap_err()
         ));
         let neither = NewOath {
             realm: String::new(),
             ..snooze(7)
         };
         assert!(is_invalid(
-            &create(&pool, neither, Utc::now()).await.unwrap_err()
+            &create(&pool, neither, crate::Clock::default().now())
+                .await
+                .unwrap_err()
         ));
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn revoke_stops_matching_and_records_event(pool: PgPool) {
-        let id = create(&pool, snooze(7), Utc::now()).await.unwrap().id;
+        let id = create(&pool, snooze(7), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         let o = revoke(&pool, id, "bob").await.unwrap().unwrap();
         assert_eq!(o.status, "revoked");
         assert!(active_for(
@@ -862,7 +894,7 @@ mod tests {
             GIN_KEY,
             "api",
             "prod",
-            Utc::now()
+            crate::Clock::default().now()
         )
         .await
         .unwrap()
@@ -879,22 +911,25 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn extend_reactivates_expired_and_rejects_bad_input(pool: PgPool) {
-        let id = create(&pool, snooze(1), Utc::now()).await.unwrap().id;
+        let id = create(&pool, snooze(1), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
         process_expiries(
             &mut pool.acquire().await.unwrap(),
-            Utc::now() + Duration::days(5),
+            crate::Clock::default().now() + Duration::days(5),
         )
         .await
         .unwrap();
         assert_eq!(get(&pool, id).await.status, "expired");
 
-        let past = extend(&pool, id, today(), "bob", Utc::now())
+        let past = extend(&pool, id, today(), "bob", crate::Clock::default().now())
             .await
             .unwrap_err();
         assert!(is_invalid(&past));
 
         let new_until = today() + Duration::days(30);
-        let o = extend(&pool, id, new_until, "bob", Utc::now())
+        let o = extend(&pool, id, new_until, "bob", crate::Clock::default().now())
             .await
             .unwrap()
             .unwrap();
@@ -909,20 +944,29 @@ mod tests {
         );
 
         revoke(&pool, id, "bob").await.unwrap();
-        let e = extend(&pool, id, new_until, "bob", Utc::now())
+        let e = extend(&pool, id, new_until, "bob", crate::Clock::default().now())
             .await
             .unwrap_err();
         assert!(is_invalid(&e));
-        assert!(extend(&pool, id + 1000, new_until, "bob", Utc::now())
-            .await
-            .unwrap()
-            .is_none());
+        assert!(extend(
+            &pool,
+            id + 1000,
+            new_until,
+            "bob",
+            crate::Clock::default().now()
+        )
+        .await
+        .unwrap()
+        .is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]
     async fn list_filters_by_status(pool: PgPool) {
-        let a = create(&pool, snooze(7), Utc::now()).await.unwrap().id;
-        let b = create(&pool, req(OathKind::Ignore), Utc::now())
+        let a = create(&pool, snooze(7), crate::Clock::default().now())
+            .await
+            .unwrap()
+            .id;
+        let b = create(&pool, req(OathKind::Ignore), crate::Clock::default().now())
             .await
             .unwrap()
             .id;
@@ -935,24 +979,33 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn lapsed_but_unprocessed_oath_not_active(pool: PgPool) {
-        create(&pool, snooze(1), Utc::now()).await.unwrap();
+        create(&pool, snooze(1), crate::Clock::default().now())
+            .await
+            .unwrap();
         create(
             &pool,
             NewOath {
                 advisory_id: "GHSA-ign".to_string(),
                 ..req(OathKind::Ignore)
             },
-            Utc::now(),
+            crate::Clock::default().now(),
         )
         .await
         .unwrap();
-        let later = Utc::now() + Duration::days(100);
+        let later = crate::Clock::default().now() + Duration::days(100);
         // process_expiries has not run, yet neither oath suppresses at `later`.
         for adv in ["GHSA-aaaa-bbbb-cccc", "GHSA-ign"] {
-            assert!(active_for(&pool, adv, GIN_KEY, "api", "prod", Utc::now())
-                .await
-                .unwrap()
-                .is_some());
+            assert!(active_for(
+                &pool,
+                adv,
+                GIN_KEY,
+                "api",
+                "prod",
+                crate::Clock::default().now()
+            )
+            .await
+            .unwrap()
+            .is_some());
             assert!(active_for(&pool, adv, GIN_KEY, "api", "prod", later)
                 .await
                 .unwrap()

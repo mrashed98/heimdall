@@ -449,9 +449,6 @@ struct Existing {
 }
 
 #[cfg(test)]
-// Exception: these tests compare against database now() defaults, so they
-// read the real clock. Tests only; production code here uses AppState.clock.
-#[allow(clippy::disallowed_methods)]
 mod tests {
     use chrono::Duration;
     use serde_json::{json, Value};
@@ -588,7 +585,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn vuln_opened_once_and_stable(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
 
         let first = run(&pool, REALM, now).await.unwrap();
         let vulns = of_kind(&pool, FindingKind::Vuln).await;
@@ -616,7 +613,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn open_finding_updates_severity_but_keeps_notified_at(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         run(&pool, REALM, now).await.unwrap();
         sqlx::query("UPDATE findings SET notified_at = $1")
             .bind(now)
@@ -656,7 +653,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         run(&pool, REALM, now).await.unwrap();
         // The digest announced the medium Vuln (and its fix alerted).
         sqlx::query("UPDATE findings SET notified_at = $1")
@@ -680,7 +677,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn vuln_resolves_when_component_removed(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         run(&pool, REALM, now).await.unwrap();
 
         let sid = upsert_service(&pool, REALM, SERVICE).await.unwrap();
@@ -720,9 +717,11 @@ mod tests {
     async fn reopen_within_30_days_keeps_notified_at(pool: PgPool) {
         // An inventory flap (a scale-to-zero, an image not scanned yet):
         // the findings come back, already announced, so no second card.
-        let resolved_at = Utc::now() - Duration::days(29);
+        let resolved_at = crate::Clock::default().now() - Duration::days(29);
         announce_resolve_and_return(&pool, resolved_at).await;
-        let report = run(&pool, REALM, Utc::now()).await.unwrap();
+        let report = run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let all = findings(&pool).await;
         assert_eq!(all.len(), 2, "same keys, same rows");
         assert!(all
@@ -740,7 +739,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let resolved_at = Utc::now() - Duration::days(5);
+        let resolved_at = crate::Clock::default().now() - Duration::days(5);
         run(&pool, REALM, resolved_at - Duration::hours(1))
             .await
             .unwrap();
@@ -760,7 +759,9 @@ mod tests {
             .await
             .unwrap();
 
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!((v.status.as_str(), v.severity.as_str()), ("open", "high"));
         assert!(v.notified_at.is_none(), "the High re-arms");
@@ -771,14 +772,16 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn reopen_within_30_days_keeps_opened_at(pool: PgPool) {
-        let resolved_at = Utc::now() - Duration::days(29);
+        let resolved_at = crate::Clock::default().now() - Duration::days(29);
         announce_resolve_and_return(&pool, resolved_at).await;
         let before: Vec<DateTime<Utc>> =
             sqlx::query_scalar("SELECT opened_at FROM findings ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let after: Vec<DateTime<Utc>> =
             sqlx::query_scalar("SELECT opened_at FROM findings ORDER BY id")
                 .fetch_all(&pool)
@@ -790,9 +793,11 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn reopen_after_30_days_rearms(pool: PgPool) {
         // Gone for over 30 days: coming back is a new occurrence.
-        let resolved_at = Utc::now() - Duration::days(31);
+        let resolved_at = crate::Clock::default().now() - Duration::days(31);
         announce_resolve_and_return(&pool, resolved_at).await;
-        let report = run(&pool, REALM, Utc::now()).await.unwrap();
+        let report = run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let all = findings(&pool).await;
         assert_eq!(all.len(), 2, "same keys, same rows");
         assert!(all
@@ -808,7 +813,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn resolve_is_scoped_to_realm(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         run(&pool, REALM, now).await.unwrap();
         let report = run(&pool, "staging", now).await.unwrap();
         assert_eq!(report.resolved, 0);
@@ -818,7 +823,9 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn fix_available_when_fixed_version_greater(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let fixes = of_kind(&pool, FindingKind::FixAvailable).await;
         assert_eq!(fixes.len(), 1);
         let f = &fixes[0];
@@ -842,14 +849,18 @@ mod tests {
         // OSV would not link v1.9.2, so there is nothing to find.
         inventory(&pool, Source::Git, &[item(&gin("v1.9.2"), true)]).await;
         advisory(&pool, ADV, "high", json!({ GIN_KEY: ["1.9.1"] }), json!({})).await;
-        let report = run(&pool, REALM, Utc::now()).await.unwrap();
+        let report = run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         assert!(report.opened.is_empty());
         assert!(findings(&pool).await.is_empty());
 
         // Even if a link exists (say an NVD range), a fix that is not newer
         // than the current version is no FixAvailable.
         link(&pool, &gin("v1.9.2"), ADV, "nvd").await;
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         assert_eq!(of_kind(&pool, FindingKind::Vuln).await.len(), 1);
         assert!(of_kind(&pool, FindingKind::FixAvailable).await.is_empty());
     }
@@ -857,7 +868,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn fix_available_even_under_oath(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         let oath_id = snooze(&pool, now + Duration::days(7)).await;
         run(&pool, REALM, now).await.unwrap();
 
@@ -888,11 +899,13 @@ mod tests {
                 until: None,
                 by: "alice".to_string(),
             },
-            Utc::now(),
+            crate::Clock::default().now(),
         )
         .await
         .unwrap();
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!(v.details["oath"], json!(created.id));
     }
@@ -919,7 +932,9 @@ mod tests {
             .bind(REALM)
         };
         let old = insert("OLD-1").fetch_one(&pool).await.unwrap();
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!(v.details["oath"], json!(old));
 
@@ -939,7 +954,9 @@ mod tests {
             .await
             .unwrap();
         let reverse = insert("OLD-2").fetch_one(&pool).await.unwrap();
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
         assert_eq!(v.details["oath"], json!(reverse));
     }
@@ -947,7 +964,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn oath_expired_finding_from_expiry(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         let oath_id = snooze(&pool, now - Duration::hours(1)).await;
 
         let report = run(&pool, REALM, now).await.unwrap();
@@ -981,7 +998,9 @@ mod tests {
         inventory(&pool, Source::Ci, &[item(&gin("v1.9.0"), true)]).await;
         advisory(&pool, ADV, "high", json!({ GIN_KEY: ["1.9.1"] }), json!({})).await;
         link(&pool, &gin("v1.9.0"), ADV, "osv").await;
-        let report = run(&pool, REALM, Utc::now()).await.unwrap();
+        let report = run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         assert!(report.opened.is_empty());
         assert!(findings(&pool).await.is_empty());
     }
@@ -998,7 +1017,9 @@ mod tests {
         )
         .await;
         link(&pool, &gin("v1.9.0"), ADV, "osv").await;
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
         let fixes = of_kind(&pool, FindingKind::FixAvailable).await;
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].details["direct"], json!(false));
@@ -1019,7 +1040,9 @@ mod tests {
         )
         .await;
         link(&pool, &purl, ADV, "osv").await;
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
 
         let want = json!({"suggest": "2.4.1", "latest": "3.0.0"});
         let v = &of_kind(&pool, FindingKind::Vuln).await[0];
@@ -1042,7 +1065,9 @@ mod tests {
         )
         .await;
         link(&pool, &purl, "CVE-2024-0001", "nvd").await;
-        run(&pool, REALM, Utc::now()).await.unwrap();
+        run(&pool, REALM, crate::Clock::default().now())
+            .await
+            .unwrap();
 
         let vulns = of_kind(&pool, FindingKind::Vuln).await;
         assert_eq!(vulns.len(), 1);
@@ -1059,7 +1084,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn expiry_rolls_back_with_failed_matcher_tx(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         let oath_id = snooze(&pool, now - Duration::hours(1)).await;
         // Make the findings write fail after process_expiries has run.
         sqlx::query(
@@ -1098,7 +1123,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn concurrent_runs_same_realm_no_error(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         // Several runs at once, as Task 17's loops will do. Without the realm
         // lock they race to insert the same keys (unique violation).
         let mut set = tokio::task::JoinSet::new();
@@ -1122,7 +1147,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn expired_oath_for_fixed_cve_is_silent(pool: PgPool) {
         seed_gin(&pool, "v1.9.0").await;
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         let oath_id = snooze(&pool, now - Duration::hours(1)).await;
         // Upgraded past the fix: OSV no longer links the component.
         inventory(&pool, Source::Git, &[item(&gin("v1.9.1"), true)]).await;
@@ -1149,7 +1174,7 @@ mod tests {
         replace_components(&pool, staging, Source::Git, &[item(&gin("v1.9.1"), true)])
             .await
             .unwrap();
-        let now = Utc::now();
+        let now = crate::Clock::default().now();
         let oath_id: i64 = sqlx::query_scalar(
             "INSERT INTO oaths (advisory_id, name_key, service_name, realm, kind, reason, \
              version_at_creation, expires_at, created_by) \
