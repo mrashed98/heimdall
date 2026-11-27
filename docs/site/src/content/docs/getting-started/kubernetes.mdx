@@ -18,15 +18,15 @@ The Helm chart lives in the repository at `deploy/helm/heimdall`.
   `heimdall scan-images`), or use the images pushed to GHCR by a release.
 
   ```bash
-  docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.4.0 .
-  docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.4.0 .
+  docker build -f deploy/Dockerfile -t ghcr.io/mrashed98/heimdall:0.5.0 .
+  docker build -f deploy/Dockerfile.scanner -t ghcr.io/mrashed98/heimdall-scanner:0.5.0 .
   ```
 
 <Aside type="note">
 Each release builds static Linux binaries (`heimdall-linux-amd64`,
 `heimdall-linux-arm64`), multi-arch images and the chart. The images are
 pushed to GHCR tagged with the version **without the `v`** (release
-tag `v0.4.0` gives `heimdall:0.4.0`) and `latest`. That is the tag the chart
+tag `v0.5.0` gives `heimdall:0.5.0`) and `latest`. That is the tag the chart
 pulls by default (its `appVersion`), and the chart's own version is the same.
 </Aside>
 
@@ -67,7 +67,7 @@ pulls by default (its `appVersion`), and the chart's own version is the same.
    Each release from 0.4.0 on publishes the chart to GHCR as an OCI chart:
 
    ```bash
-   helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.4.0 \
+   helm install heimdall oci://ghcr.io/mrashed98/charts/heimdall --version 0.5.0 \
      -n heimdall --create-namespace \
      --set image.repository=ghcr.io/mrashed98/heimdall \
      --set scannerImage.repository=ghcr.io/mrashed98/heimdall-scanner \

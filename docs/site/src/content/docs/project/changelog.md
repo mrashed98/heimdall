@@ -11,6 +11,8 @@ binaries, checksums, container image tags and the Helm chart of each version.
 
 ## Unreleased
 
+## 0.5.0
+
 - **Trends.** Heimdall records the open findings per severity each day, per
   realm and per service. The Overview charts open critical and high findings
   over 90 days, and a service's page shows a 90-day line of its critical and
