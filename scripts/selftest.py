@@ -7,8 +7,8 @@ each broken copy of the CI workflows. Run as `scripts/check.sh scripts`.
 """
 
 import copy
-import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,8 +20,8 @@ WF = ROOT / ".github/workflows"
 failures = []
 
 
-def run(args, env=None):
-    return subprocess.run(args, cwd=ROOT, capture_output=True, text=True, env={**os.environ, **(env or {})})
+def run(args):
+    return subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
 
 
 # check.sh: a bad argument is a usage error (exit 2) with a message, never a crash.
@@ -64,12 +64,17 @@ if base.returncode != 0:
     failures.append(f"check_ci_sync.py fails on the real workflows: {base.stdout.strip()}")
 ci = yaml.safe_load((WF / "ci.yml").read_text())
 for name, mutate, says in MUTATIONS:
+    # check_ci_sync.py reads only its own tree, so each case gets a copy of
+    # the files it reads, with ci.yml broken.
     with tempfile.TemporaryDirectory() as tmp:
+        tree = pathlib.Path(tmp)
+        for f in ["scripts/check_ci_sync.py", "scripts/check.sh", ".github/workflows/docs.yml"]:
+            (tree / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / f, tree / f)
         doc = copy.deepcopy(ci)
         mutate(doc)
-        (pathlib.Path(tmp) / "ci.yml").write_text(yaml.safe_dump(doc))
-        (pathlib.Path(tmp) / "docs.yml").write_text((WF / "docs.yml").read_text())
-        r = run([sys.executable, "scripts/check_ci_sync.py"], {"CI_SYNC_WORKFLOWS": tmp})
+        (tree / ".github/workflows/ci.yml").write_text(yaml.safe_dump(doc))
+        r = run([sys.executable, str(tree / "scripts/check_ci_sync.py")])
         if r.returncode == 0 or says not in r.stdout:
             failures.append(f"check_ci_sync.py passes a {name} (exit {r.returncode}); want a failure saying {says!r}")
 

@@ -12,7 +12,6 @@ Anything else fails, so a check added to CI outside check.sh is caught, and
 every check.sh step must be called from CI.
 """
 
-import os
 import pathlib
 import re
 import subprocess
@@ -24,9 +23,7 @@ except ImportError:
     sys.exit("check_ci_sync.py: PyYAML is missing (pip install pyyaml / apt-get install python3-yaml)")
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-# CI_SYNC_WORKFLOWS points at another copy of .github/workflows (the self-test
-# feeds it broken workflows).
-WORKFLOW_DIR = pathlib.Path(os.environ.get("CI_SYNC_WORKFLOWS", ROOT / ".github/workflows"))
+WORKFLOW_DIR = ROOT / ".github/workflows"
 WORKFLOWS = ["ci.yml", "docs.yml"]
 # Commands that install or prepare, not check (matched against the whole run).
 SETUP_RUNS = [

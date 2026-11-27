@@ -25,11 +25,13 @@ Direct pushes and force pushes to `main` are blocked for everyone.
 
 ## Getting set up
 
-You need Rust (stable), Docker and, for chart work, Helm.
+You need Rust (stable), Python 3 with PyYAML, Node 22.23.4 or newer, and
+Docker. The full `make check` also needs helm, kubeconform and cargo-deny.
 
 ```bash
 git clone https://github.com/mrashed98/heimdall.git
 cd heimdall
+(cd web && npm ci) && (cd docs/site && npm ci)
 docker compose -f docker-compose.dev.yml up -d            # Postgres on localhost:5433
 export DATABASE_URL=postgres://heimdall:heimdall@localhost:5433/heimdall
 cargo test
@@ -42,8 +44,8 @@ these are the same commands:
 
 ```bash
 make check     # every step (needs Postgres, Docker, helm, kubeconform, cargo-deny)
-make lint      # the steps that need no database or Docker
-make hooks     # run the fast checks (`make fast`) before every commit
+make lint      # fmt, versions, links, ci-sync, scripts, clippy and web; not test, audit, docs, helm or docker
+make hooks     # run the fast checks (`make fast`) on the staged files before every commit
 ```
 
 `scripts/check.sh --list` names the steps; `scripts/check.sh test web` runs
