@@ -39,12 +39,16 @@ these are the same commands:
 ```bash
 make check     # every step (needs Postgres, Docker, helm, kubeconform, cargo-deny)
 make lint      # fmt, versions, links, ci-sync, scripts, clippy and web; not test, audit, docs, helm or docker
-make hooks     # run the fast checks (`make fast`) on the staged files before every commit
+make hooks     # before every commit: `make fast` on the staged files, then `make review`
 ```
 
 `scripts/check.sh --list` names the steps; `scripts/check.sh test web` runs
 some of them, and `--skip docker` leaves one out. A missing tool fails the
 step instead of skipping it.
+
+`make review` runs `/review-pr`, a Claude Code review of the staged changes,
+and needs the `claude` CLI; without it the hook says so and skips that
+review. Skip it for one commit with `HEIMDALL_SKIP_AI_REVIEW=1 git commit`.
 
 ## What a good change looks like
 
