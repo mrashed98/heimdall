@@ -10,10 +10,11 @@ make lint                        # no database: format, guards, clippy, web
 make hooks                       # before every commit: make fast, then /review-pr on the staged changes
 ```
 
-Before pushing, run `/review-pr` (`.claude/skills/review-pr/`): every pstack
-verification step plus the checks above, on the branch. The pre-commit hook
-runs it report-only on the staged changes (`scripts/review-pr.sh`; skip one
-commit with `HEIMDALL_SKIP_AI_REVIEW=1`).
+Before pushing, run `/review-pr` (`.claude/skills/review-pr/`) on the branch:
+every pstack verification step plus `make lint`, and `make check` only when
+Postgres and Docker are up; otherwise run `scripts/check.sh` yourself for the
+full CI check. The pre-commit hook runs it report-only on the staged changes
+(`scripts/review-pr.sh`; skip one commit with `HEIMDALL_SKIP_AI_REVIEW=1`).
 
 Judge a check by its exit status. Piping it through `grep`/`tail` replaces
 that status with grep's, which has passed a failing test and a failing
