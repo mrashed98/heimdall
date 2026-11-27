@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/mrashed98/heimdall/compare/v0.4.0...v0.5.0) (2026-11-27)
+
+
+### Features
+
+* component search across services ([#73](https://github.com/mrashed98/heimdall/issues/73)) ([e656a9c](https://github.com/mrashed98/heimdall/commit/e656a9cd3ad24724acb73098ad70b1ef16e68cae))
+* daily trends of open findings ([#75](https://github.com/mrashed98/heimdall/issues/75)) ([b04bfe1](https://github.com/mrashed98/heimdall/commit/b04bfe1581948532594fc1ee1a69cad2857c8052))
+
 ## [0.4.0](https://github.com/mrashed98/heimdall/compare/v0.3.2...v0.4.0) (2026-11-26)
 
 
